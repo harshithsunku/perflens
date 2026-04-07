@@ -2,10 +2,13 @@
 """PerfLens Device Agent - collects perf data and streams to server."""
 
 import argparse
+import socket
+import struct
 import subprocess
 import sys
 import tempfile
 import os
+import time
 
 
 def collect_perf_data(pid, frequency=99, duration=3):
@@ -39,17 +42,27 @@ def collect_perf_data(pid, frequency=99, duration=3):
 
         return result.stdout
     finally:
-        # Clean up perf.data file
         try:
             os.unlink(perf_data_path)
         except OSError:
             pass
 
 
+def send_data(sock, data):
+    """Send data using length-prefix protocol: 4-byte big-endian length + payload."""
+    encoded = data.encode('utf-8')
+    header = struct.pack('!I', len(encoded))
+    sock.sendall(header + encoded)
+
+
 def main():
     parser = argparse.ArgumentParser(description='PerfLens Device Agent')
     parser.add_argument('--pid', type=int, required=True,
                         help='PID of process to profile')
+    parser.add_argument('--server', type=str, default=None,
+                        help='Server IP to stream data to (omit for stdout mode)')
+    parser.add_argument('--port', type=int, default=9999,
+                        help='Server port (default: 9999)')
     parser.add_argument('--frequency', type=int, default=99,
                         help='Sampling frequency in Hz (default: 99)')
     parser.add_argument('--duration', type=int, default=3,
@@ -63,16 +76,50 @@ def main():
         print(f"[agent] Error: process {args.pid} not found", file=sys.stderr)
         sys.exit(1)
     except PermissionError:
-        pass  # Process exists but we can't signal it — that's fine
+        pass
 
-    print(f"[agent] Collecting perf data for PID {args.pid}", file=sys.stderr)
-    output = collect_perf_data(args.pid, args.frequency, args.duration)
-    if output:
-        print(output)
-        print(f"[agent] Done. Output {len(output)} bytes.", file=sys.stderr)
+    # TCP streaming mode
+    if args.server:
+        print(f"[agent] Connecting to {args.server}:{args.port}", file=sys.stderr)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.connect((args.server, args.port))
+            print(f"[agent] Connected. Profiling PID {args.pid} in a loop.", file=sys.stderr)
+
+            while True:
+                # Check if process still exists
+                try:
+                    os.kill(args.pid, 0)
+                except ProcessLookupError:
+                    print(f"[agent] Process {args.pid} exited.", file=sys.stderr)
+                    break
+                except PermissionError:
+                    pass
+
+                output = collect_perf_data(args.pid, args.frequency, args.duration)
+                if output:
+                    send_data(sock, output)
+                    print(f"[agent] Sent {len(output)} bytes", file=sys.stderr)
+                else:
+                    print("[agent] No data this round, retrying...", file=sys.stderr)
+                    time.sleep(1)
+        except ConnectionRefusedError:
+            print(f"[agent] Connection refused to {args.server}:{args.port}", file=sys.stderr)
+            sys.exit(1)
+        except (BrokenPipeError, ConnectionResetError):
+            print("[agent] Server disconnected.", file=sys.stderr)
+        finally:
+            sock.close()
     else:
-        print("[agent] No data collected.", file=sys.stderr)
-        sys.exit(1)
+        # Stdout mode (single collection)
+        print(f"[agent] Collecting perf data for PID {args.pid}", file=sys.stderr)
+        output = collect_perf_data(args.pid, args.frequency, args.duration)
+        if output:
+            print(output)
+            print(f"[agent] Done. Output {len(output)} bytes.", file=sys.stderr)
+        else:
+            print("[agent] No data collected.", file=sys.stderr)
+            sys.exit(1)
 
 
 if __name__ == '__main__':
