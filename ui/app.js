@@ -129,9 +129,9 @@ function renderCurrentEvent() {
     renderFunctionTable(evtData.function_summary);
     renderFlamegraph(evtData.flamegraph, evtData.function_summary.total_samples);
 
-    // Update source view if we have a file selected
-    if (state.currentSourceFile && evtData.source[state.currentSourceFile]) {
-        renderSourceView(state.currentSourceFile, evtData.source[state.currentSourceFile]);
+    // Re-fetch source if a file is selected (data may have changed)
+    if (state.currentSourceFile) {
+        fetchAndRenderSource(state.currentSourceFile);
     }
 }
 
@@ -173,20 +173,42 @@ function renderFunctionTable(data) {
 
 function showSourceForFunction(funcName) {
     const evtData = state.perEvent[state.selectedEvent];
-    if (!evtData || !evtData.source) return;
+    if (!evtData) return;
 
-    for (const [filePath, lines] of Object.entries(evtData.source)) {
-        if (lines.some(l => l.samples > 0)) {
-            state.currentSourceFile = filePath;
-            renderSourceView(filePath, lines);
-            // Switch to source tab
-            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-            document.querySelectorAll('.tab-content').forEach(tc => tc.classList.remove('active'));
-            document.querySelector('.tab[data-tab="source"]').classList.add('active');
-            document.getElementById('tab-source').classList.add('active');
-            return;
-        }
+    // source_files is a list of {path, found, total_samples}
+    const sourceFiles = evtData.source_files || [];
+    if (sourceFiles.length === 0) return;
+
+    // Pick the file with the most samples
+    const bestFile = sourceFiles[0];
+    if (bestFile && bestFile.found) {
+        state.currentSourceFile = bestFile.path;
+        fetchAndRenderSource(bestFile.path);
+        // Switch to source tab
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(tc => tc.classList.remove('active'));
+        document.querySelector('.tab[data-tab="source"]').classList.add('active');
+        document.getElementById('tab-source').classList.add('active');
     }
+}
+
+function fetchAndRenderSource(filePath) {
+    const container = document.getElementById('source-view');
+    container.innerHTML = '<p class="empty loading">Loading source...</p>';
+
+    const url = `/api/source?file=${encodeURIComponent(filePath)}&event=${encodeURIComponent(state.selectedEvent)}`;
+    fetch(url)
+        .then(r => r.json())
+        .then(data => {
+            if (data.lines && data.lines.length > 0) {
+                renderSourceView(data.file, data.lines);
+            } else {
+                container.innerHTML = `<p class="empty">No source data for ${escapeHtml(filePath)}</p>`;
+            }
+        })
+        .catch(err => {
+            container.innerHTML = `<p class="empty">Error loading source: ${escapeHtml(String(err))}</p>`;
+        });
 }
 
 // --- Source View ---

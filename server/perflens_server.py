@@ -138,14 +138,14 @@ def handle_agent_connection(conn, addr):
                   f"{len(samples)} new samples, {len(all_samples)} total, "
                   f"events: {event_types}")
 
-            # Build per-event summaries
+            # Build per-event summaries (no full source — too large for big binaries)
             per_event = {}
             for evt in event_types:
                 evt_samples = filter_samples_by_event(all_samples, evt)
                 per_event[evt] = {
                     'function_summary': build_function_summary(evt_samples),
                     'flamegraph': build_flamegraph_data(evt_samples),
-                    'source': build_annotated_source(mapper, evt_samples),
+                    'source_files': mapper.get_files_with_samples(evt_samples),
                 }
 
             # Broadcast to UI
@@ -167,6 +167,7 @@ def handle_agent_connection(conn, addr):
         # Save session
         _save_session(session_dir, session_id, addr, raw_chunks,
                       all_samples, perf_stat_final, mapper)
+        mapper.close()
 
 
 def _save_session(session_dir, session_id, addr, raw_chunks,
@@ -192,13 +193,14 @@ def _save_session(session_dir, session_id, addr, raw_chunks,
         with open(os.path.join(session_dir, 'metadata.json'), 'w') as f:
             json.dump(metadata, f, indent=2)
 
-        # Save per-event summaries
+        # Save per-event summaries (include full source for offline replay)
         per_event = {}
         for evt in event_types:
             evt_samples = filter_samples_by_event(all_samples, evt)
             per_event[evt] = {
                 'function_summary': build_function_summary(evt_samples),
                 'flamegraph': build_flamegraph_data(evt_samples),
+                'source_files': mapper.get_files_with_samples(evt_samples),
                 'source': build_annotated_source(mapper, evt_samples),
             }
         with open(os.path.join(session_dir, 'per_event.json'), 'w') as f:
@@ -327,8 +329,9 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
                 per_event[evt] = {
                     'function_summary': build_function_summary(evt_samples),
                     'flamegraph': build_flamegraph_data(evt_samples),
-                    'source': build_annotated_source(mapper, evt_samples),
+                    'source_files': mapper.get_files_with_samples(evt_samples),
                 }
+            mapper.close()
 
             for sse_event, data in [
                 ('event_types', event_types),
@@ -362,10 +365,14 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
                     pass
 
     def _handle_source_request(self, file_path):
-        """Return annotated source for a specific file."""
+        """Return annotated source for a specific file, optionally filtered by event."""
         if not file_path:
             self._send_json({'error': 'file parameter required'})
             return
+
+        parsed = urlparse(self.path)
+        params = parse_qs(parsed.query)
+        event_type = params.get('event', [None])[0]
 
         mapper = SourceMapper(
             server_config['source_dir'],
@@ -374,7 +381,13 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
         with profiling_state['lock']:
             all_samples = list(profiling_state['all_samples'])
 
+        # Filter by event if specified
+        if event_type:
+            all_samples = filter_samples_by_event(all_samples, event_type)
+
         line_data = mapper.map_samples_to_lines(all_samples)
+        mapper.close()
+
         if file_path in line_data:
             lines = mapper.annotate_source(file_path, line_data[file_path])
             self._send_json({'file': file_path, 'lines': lines})
