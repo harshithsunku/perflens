@@ -11,7 +11,10 @@ import os
 import time
 
 
-def collect_perf_data(pid, frequency=99, duration=3):
+EVENTS = 'cycles,instructions,cache-misses,branch-misses'
+
+
+def collect_perf_data(pid, frequency=99, duration=3, events=EVENTS):
     """Run perf record + perf script and return the text output."""
     with tempfile.NamedTemporaryFile(suffix='.data', delete=False) as f:
         perf_data_path = f.name
@@ -20,6 +23,7 @@ def collect_perf_data(pid, frequency=99, duration=3):
         # Run perf record
         cmd_record = [
             'perf', 'record',
+            '-e', events,
             '-o', perf_data_path,
             '-p', str(pid),
             '-g',
@@ -46,6 +50,19 @@ def collect_perf_data(pid, frequency=99, duration=3):
             os.unlink(perf_data_path)
         except OSError:
             pass
+
+
+def collect_perf_stat(pid, duration=3, events=EVENTS):
+    """Run perf stat and return the text output."""
+    cmd = [
+        'perf', 'stat',
+        '-e', events + ',task-clock,page-faults,context-switches',
+        '-p', str(pid),
+        '--', 'sleep', str(duration)
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    # perf stat writes to stderr
+    return result.stderr
 
 
 def send_data(sock, data):
@@ -98,8 +115,14 @@ def main():
 
                 output = collect_perf_data(args.pid, args.frequency, args.duration)
                 if output:
-                    send_data(sock, output)
-                    print(f"[agent] Sent {len(output)} bytes", file=sys.stderr)
+                    # Also collect perf stat
+                    stat_output = collect_perf_stat(args.pid, duration=args.duration)
+                    # Prefix perf stat with marker so server can separate it
+                    combined = output
+                    if stat_output:
+                        combined += "\n### PERF_STAT ###\n" + stat_output
+                    send_data(sock, combined)
+                    print(f"[agent] Sent {len(combined)} bytes", file=sys.stderr)
                 else:
                     print("[agent] No data this round, retrying...", file=sys.stderr)
                     time.sleep(1)

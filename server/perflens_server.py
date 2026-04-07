@@ -12,7 +12,9 @@ import time
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
-from parser import parse_perf_script, build_function_summary, build_flamegraph_data
+from parser import (parse_perf_script, build_function_summary, build_flamegraph_data,
+                    split_perf_data, get_event_types, filter_samples_by_event,
+                    parse_perf_stat)
 from source_mapper import SourceMapper, build_annotated_source
 
 # Shared state for streaming data to UI
@@ -24,6 +26,8 @@ profiling_state = {
     'agent_connected': False,
     'agent_addr': None,
     'sse_clients': [],       # list of (wfile, lock) for SSE
+    'event_types': [],       # available event types
+    'perf_stat': {},         # latest perf stat metrics
 }
 
 server_config = {
@@ -104,31 +108,42 @@ def handle_agent_connection(conn, addr):
 
             text = payload.decode('utf-8')
 
+            # Split perf script and perf stat data
+            script_text, stat_text = split_perf_data(text)
+
             # Parse this chunk
-            samples = parse_perf_script(text)
+            samples = parse_perf_script(script_text)
+            perf_stat = parse_perf_stat(stat_text) if stat_text else {}
+
             with state['lock']:
                 state['all_samples'].extend(samples)
                 state['chunk_count'] += 1
                 state['last_update'] = time.time()
+                state['event_types'] = get_event_types(state['all_samples'])
+                if perf_stat:
+                    state['perf_stat'] = perf_stat
                 all_samples = list(state['all_samples'])
-
-            # Build summaries from accumulated data
-            summary = build_function_summary(all_samples)
-            flamegraph = build_flamegraph_data(all_samples)
-            annotated = build_annotated_source(mapper, all_samples)
-
-            # Build source data for UI
-            source_data = {}
-            for fpath, lines in annotated.items():
-                source_data[fpath] = lines
+                event_types = list(state['event_types'])
 
             print(f"[server] Chunk {state['chunk_count']}: "
-                  f"{len(samples)} new samples, {len(all_samples)} total")
+                  f"{len(samples)} new samples, {len(all_samples)} total, "
+                  f"events: {event_types}")
+
+            # Build per-event summaries
+            per_event = {}
+            for evt in event_types:
+                evt_samples = filter_samples_by_event(all_samples, evt)
+                per_event[evt] = {
+                    'function_summary': build_function_summary(evt_samples),
+                    'flamegraph': build_flamegraph_data(evt_samples),
+                    'source': build_annotated_source(mapper, evt_samples),
+                }
 
             # Broadcast to UI
-            broadcast_sse('function_summary', summary)
-            broadcast_sse('flamegraph', flamegraph)
-            broadcast_sse('source', source_data)
+            broadcast_sse('event_types', event_types)
+            broadcast_sse('per_event', per_event)
+            if perf_stat:
+                broadcast_sse('perf_stat', perf_stat)
 
     except ConnectionResetError:
         print(f"[server] Agent {addr} connection reset")
@@ -238,22 +253,29 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
         state = profiling_state
         with state['lock']:
             all_samples = list(state['all_samples'])
+            event_types = list(state['event_types'])
+            perf_stat = dict(state['perf_stat'])
 
         if all_samples:
             mapper = SourceMapper(
                 server_config['source_dir'],
                 server_config.get('binary_path')
             )
-            summary = build_function_summary(all_samples)
-            flamegraph = build_flamegraph_data(all_samples)
-            annotated = build_annotated_source(mapper, all_samples)
+            per_event = {}
+            for evt in event_types:
+                evt_samples = filter_samples_by_event(all_samples, evt)
+                per_event[evt] = {
+                    'function_summary': build_function_summary(evt_samples),
+                    'flamegraph': build_flamegraph_data(evt_samples),
+                    'source': build_annotated_source(mapper, evt_samples),
+                }
 
-            for event_type, data in [
-                ('function_summary', summary),
-                ('flamegraph', flamegraph),
-                ('source', annotated),
+            for sse_event, data in [
+                ('event_types', event_types),
+                ('per_event', per_event),
+                ('perf_stat', perf_stat),
             ]:
-                msg = f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+                msg = f"event: {sse_event}\ndata: {json.dumps(data)}\n\n"
                 try:
                     with wlock:
                         self.wfile.write(msg.encode('utf-8'))

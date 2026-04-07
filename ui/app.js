@@ -3,9 +3,10 @@
 let state = {
     totalSamples: 0,
     chunkCount: 0,
-    functionSummary: null,
-    flamegraphData: null,
-    sourceData: {},
+    eventTypes: [],
+    selectedEvent: 'cycles',
+    perEvent: {},       // {event_type: {function_summary, flamegraph, source}}
+    perfStat: {},
     currentSourceFile: null,
 };
 
@@ -19,34 +20,39 @@ document.querySelectorAll('.tab').forEach(tab => {
     });
 });
 
+// --- Event selector ---
+document.getElementById('event-select').addEventListener('change', (e) => {
+    state.selectedEvent = e.target.value;
+    renderCurrentEvent();
+});
+
 // --- SSE Connection ---
 function connectSSE() {
     const evtSource = new EventSource('/api/stream');
 
     evtSource.addEventListener('status', (e) => {
-        const data = JSON.parse(e.data);
-        updateStatus(data);
+        updateStatus(JSON.parse(e.data));
     });
 
-    evtSource.addEventListener('function_summary', (e) => {
-        const data = JSON.parse(e.data);
-        state.functionSummary = data;
-        state.totalSamples = data.total_samples;
-        state.chunkCount++;
-        updateSummaryBar();
-        renderFunctionTable(data);
+    evtSource.addEventListener('event_types', (e) => {
+        state.eventTypes = JSON.parse(e.data);
+        updateEventSelector();
     });
 
-    evtSource.addEventListener('flamegraph', (e) => {
-        state.flamegraphData = JSON.parse(e.data);
-        renderFlamegraph(state.flamegraphData);
-    });
-
-    evtSource.addEventListener('source', (e) => {
-        state.sourceData = JSON.parse(e.data);
-        if (state.currentSourceFile && state.sourceData[state.currentSourceFile]) {
-            renderSourceView(state.currentSourceFile, state.sourceData[state.currentSourceFile]);
+    evtSource.addEventListener('per_event', (e) => {
+        state.perEvent = JSON.parse(e.data);
+        // Update total samples from selected event
+        const evtData = state.perEvent[state.selectedEvent];
+        if (evtData) {
+            state.totalSamples = evtData.function_summary.total_samples;
         }
+        updateStatBar();
+        renderCurrentEvent();
+    });
+
+    evtSource.addEventListener('perf_stat', (e) => {
+        state.perfStat = JSON.parse(e.data);
+        updateStatBar();
     });
 
     evtSource.onerror = () => {
@@ -65,7 +71,7 @@ function connectSSE() {
 function updateStatus(data) {
     const dot = document.getElementById('status-dot');
     const text = document.getElementById('status-text');
-    const agentEl = document.getElementById('agent-status');
+    const agentEl = document.getElementById('stat-agent');
 
     if (data.connected) {
         dot.className = 'dot connected';
@@ -78,9 +84,55 @@ function updateStatus(data) {
     }
 }
 
-function updateSummaryBar() {
-    document.getElementById('total-samples').textContent = state.totalSamples.toLocaleString();
-    document.getElementById('chunk-count').textContent = state.chunkCount;
+function updateEventSelector() {
+    const select = document.getElementById('event-select');
+    const current = select.value;
+    select.innerHTML = state.eventTypes.map(evt =>
+        `<option value="${evt}" ${evt === current ? 'selected' : ''}>${evt}</option>`
+    ).join('');
+    // If selected event doesn't exist anymore, pick first
+    if (!state.eventTypes.includes(state.selectedEvent) && state.eventTypes.length > 0) {
+        state.selectedEvent = state.eventTypes[0];
+        select.value = state.selectedEvent;
+    }
+}
+
+function formatNumber(n) {
+    if (n === undefined || n === null) return '--';
+    if (typeof n === 'number' && !Number.isInteger(n)) return n.toFixed(2);
+    if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+    return String(n);
+}
+
+function updateStatBar() {
+    const s = state.perfStat;
+    document.getElementById('stat-samples').textContent = formatNumber(state.totalSamples);
+    document.getElementById('stat-ipc').textContent =
+        s.ipc ? s.ipc.value.toFixed(2) : '--';
+    document.getElementById('stat-cycles').textContent =
+        s.cycles ? formatNumber(s.cycles.value) : '--';
+    document.getElementById('stat-instructions').textContent =
+        s.instructions ? formatNumber(s.instructions.value) : '--';
+    document.getElementById('stat-cache-misses').textContent =
+        s['cache-misses'] ? formatNumber(s['cache-misses'].value) : '--';
+    document.getElementById('stat-branch-misses').textContent =
+        s['branch-misses'] ? formatNumber(s['branch-misses'].value) : '--';
+}
+
+// --- Render current event ---
+function renderCurrentEvent() {
+    const evtData = state.perEvent[state.selectedEvent];
+    if (!evtData) return;
+
+    renderFunctionTable(evtData.function_summary);
+    renderFlamegraph(evtData.flamegraph, evtData.function_summary.total_samples);
+
+    // Update source view if we have a file selected
+    if (state.currentSourceFile && evtData.source[state.currentSourceFile]) {
+        renderSourceView(state.currentSourceFile, evtData.source[state.currentSourceFile]);
+    }
 }
 
 // --- Function Table ---
@@ -97,7 +149,7 @@ function renderFunctionTable(data) {
         const hue = Math.max(0, 120 - (f.percent / Math.max(maxPercent, 1)) * 120);
         const barColor = `hsl(${hue}, 70%, 45%)`;
         const moduleName = f.module.split('/').pop();
-        return `<tr data-file="${escapeAttr(f.file || '')}" data-func="${escapeAttr(f.name)}">
+        return `<tr data-func="${escapeAttr(f.name)}">
             <td>${i + 1}</td>
             <td><strong>${escapeHtml(f.name)}</strong></td>
             <td title="${escapeAttr(f.module)}">${escapeHtml(moduleName)}</td>
@@ -114,18 +166,17 @@ function renderFunctionTable(data) {
     // Click handler for source view
     tbody.querySelectorAll('tr').forEach(row => {
         row.addEventListener('click', () => {
-            const funcName = row.dataset.func;
-            showSourceForFunction(funcName);
+            showSourceForFunction(row.dataset.func);
         });
     });
 }
 
 function showSourceForFunction(funcName) {
-    // Find which source file contains this function
-    for (const [filePath, lines] of Object.entries(state.sourceData)) {
-        // Check if any line has samples (the file is relevant)
-        const hasData = lines.some(l => l.samples > 0);
-        if (hasData) {
+    const evtData = state.perEvent[state.selectedEvent];
+    if (!evtData || !evtData.source) return;
+
+    for (const [filePath, lines] of Object.entries(evtData.source)) {
+        if (lines.some(l => l.samples > 0)) {
             state.currentSourceFile = filePath;
             renderSourceView(filePath, lines);
             // Switch to source tab
@@ -150,7 +201,7 @@ function renderSourceView(filePath, lines) {
     let hottestLine = 0;
     let maxSamples = 0;
 
-    let html = `<div class="source-header">${escapeHtml(filePath)} (${totalSamples} samples)</div>`;
+    let html = `<div class="source-header">${escapeHtml(filePath)} (${totalSamples} samples, ${state.selectedEvent})</div>`;
     lines.forEach(l => {
         let heat = 0;
         if (l.percent > 0) heat = 1;
@@ -174,17 +225,14 @@ function renderSourceView(filePath, lines) {
 
     container.innerHTML = html;
 
-    // Auto-scroll to hottest line
     if (hottestLine > 0) {
         const el = document.getElementById('source-line-' + hottestLine);
-        if (el) {
-            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        }
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
 }
 
-// --- Flame Graph (simple SVG) ---
-function renderFlamegraph(data) {
+// --- Flame Graph ---
+function renderFlamegraph(data, totalSamples) {
     const container = document.getElementById('flamegraph-container');
     if (!data || !data.children || data.children.length === 0) {
         container.innerHTML = '<p class="empty">No flame graph data yet.</p>';
@@ -194,17 +242,17 @@ function renderFlamegraph(data) {
     const width = container.clientWidth - 32;
     const rowHeight = 18;
     const fontSize = 11;
+    totalSamples = totalSamples || data.value;
 
-    // Flatten the tree into rectangles
     const rects = [];
-    const maxDepth = flattenTree(data, 0, 0, width, rects);
+    const maxDepth = flattenTree(data, 0, 0, width, rects, totalSamples);
     const height = (maxDepth + 1) * rowHeight + 4;
 
     let svg = `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">`;
     rects.forEach(r => {
-        const hue = 30 + Math.random() * 30;  // warm colors
-        const sat = 80 + Math.random() * 20;
-        const light = 45 + Math.random() * 15;
+        const hue = 30 + (hashCode(r.name) % 30);
+        const sat = 80 + (hashCode(r.name + 'x') % 20);
+        const light = 45 + (hashCode(r.name + 'y') % 15);
         const color = `hsl(${hue}, ${sat}%, ${light}%)`;
         const y = height - (r.depth + 1) * rowHeight;
 
@@ -213,7 +261,8 @@ function renderFlamegraph(data) {
         svg += `fill="${color}" rx="1" `;
         svg += `><title>${escapeHtml(r.name)} (${r.value} samples, ${r.percent.toFixed(1)}%)</title></rect>`;
         if (r.w > 40) {
-            const label = r.name.length > r.w / 7 ? r.name.substring(0, Math.floor(r.w / 7)) + '...' : r.name;
+            const maxChars = Math.floor(r.w / 7);
+            const label = r.name.length > maxChars ? r.name.substring(0, maxChars) + '..' : r.name;
             svg += `<text x="${r.x + 3}" y="${y + 13}" font-size="${fontSize}" fill="#fff" `;
             svg += `pointer-events="none">${escapeHtml(label)}</text>`;
         }
@@ -224,8 +273,8 @@ function renderFlamegraph(data) {
     container.innerHTML = svg;
 }
 
-function flattenTree(node, depth, x, width, rects) {
-    const percent = state.totalSamples > 0 ? (node.value / state.totalSamples * 100) : 0;
+function flattenTree(node, depth, x, width, rects, totalSamples) {
+    const percent = totalSamples > 0 ? (node.value / totalSamples * 100) : 0;
     rects.push({ name: node.name, value: node.value, percent, depth, x, w: width });
 
     let maxDepth = depth;
@@ -234,13 +283,22 @@ function flattenTree(node, depth, x, width, rects) {
         node.children.forEach(child => {
             const childWidth = (child.value / node.value) * width;
             if (childWidth >= 1) {
-                const d = flattenTree(child, depth + 1, childX, childWidth, rects);
+                const d = flattenTree(child, depth + 1, childX, childWidth, rects, totalSamples);
                 maxDepth = Math.max(maxDepth, d);
             }
             childX += childWidth;
         });
     }
     return maxDepth;
+}
+
+function hashCode(str) {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+        hash = ((hash << 5) - hash) + str.charCodeAt(i);
+        hash |= 0;
+    }
+    return Math.abs(hash);
 }
 
 // --- Utilities ---
@@ -258,11 +316,6 @@ fetch('/api/status')
     .then(data => {
         if (data.agent_connected) {
             updateStatus({ connected: true, agent: data.agent_addr });
-        }
-        if (data.total_samples > 0) {
-            state.totalSamples = data.total_samples;
-            state.chunkCount = data.chunk_count;
-            updateSummaryBar();
         }
     })
     .catch(() => {});

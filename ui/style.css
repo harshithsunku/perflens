@@ -50,6 +50,34 @@ main {
     padding: 16px;
 }
 
+#perf-stat-bar {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+}
+
+#event-selector {
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+}
+
+#event-select {
+    background: #16213e;
+    color: #53a8b6;
+    border: 1px solid #0f3460;
+    border-radius: 4px;
+    padding: 6px 12px;
+    font-family: inherit;
+    font-size: 13px;
+    cursor: pointer;
+}
+
+#event-select:focus { outline: 1px solid #53a8b6; }
+
 #summary-bar {
     display: flex;
     gap: 16px;

@@ -16,26 +16,50 @@
     </header>
 
     <main>
-        <div id="summary-bar">
+        <!-- Perf Stat Summary Dashboard -->
+        <div id="perf-stat-bar">
             <div class="stat-card">
-                <div class="stat-value" id="total-samples">0</div>
-                <div class="stat-label">Total Samples</div>
+                <div class="stat-value" id="stat-samples">0</div>
+                <div class="stat-label">Samples</div>
             </div>
             <div class="stat-card">
-                <div class="stat-value" id="chunk-count">0</div>
-                <div class="stat-label">Chunks</div>
+                <div class="stat-value" id="stat-ipc">--</div>
+                <div class="stat-label">IPC</div>
             </div>
             <div class="stat-card">
-                <div class="stat-value" id="agent-status">--</div>
+                <div class="stat-value" id="stat-cycles">--</div>
+                <div class="stat-label">Cycles</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="stat-instructions">--</div>
+                <div class="stat-label">Instructions</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="stat-cache-misses">--</div>
+                <div class="stat-label">Cache Misses</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="stat-branch-misses">--</div>
+                <div class="stat-label">Branch Misses</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="stat-agent">--</div>
                 <div class="stat-label">Agent</div>
             </div>
+        </div>
+
+        <!-- Event Type Selector -->
+        <div id="event-selector">
+            <label>Event: </label>
+            <select id="event-select">
+                <option value="cycles">cycles</option>
+            </select>
         </div>
 
         <div id="tabs">
             <button class="tab active" data-tab="functions">Functions</button>
             <button class="tab" data-tab="source">Source</button>
             <button class="tab" data-tab="flamegraph">Flame Graph</button>
-            <button class="tab" data-tab="raw">Raw Data</button>
         </div>
 
         <div id="tab-functions" class="tab-content active">
@@ -65,10 +89,6 @@
             <div id="flamegraph-container">
                 <p class="empty">Waiting for data...</p>
             </div>
-        </div>
-
-        <div id="tab-raw" class="tab-content">
-            <pre id="raw-data">Waiting for data...</pre>
         </div>
     </main>
 
