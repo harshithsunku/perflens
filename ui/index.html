@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PerfLens</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header>
+        <h1>PerfLens</h1>
+        <div id="status">
+            <span id="status-dot" class="dot disconnected"></span>
+            <span id="status-text">Connecting...</span>
+        </div>
+    </header>
+
+    <main>
+        <div id="summary-bar">
+            <div class="stat-card">
+                <div class="stat-value" id="total-samples">0</div>
+                <div class="stat-label">Total Samples</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="chunk-count">0</div>
+                <div class="stat-label">Chunks</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="agent-status">--</div>
+                <div class="stat-label">Agent</div>
+            </div>
+        </div>
+
+        <div id="tabs">
+            <button class="tab active" data-tab="functions">Functions</button>
+            <button class="tab" data-tab="source">Source</button>
+            <button class="tab" data-tab="flamegraph">Flame Graph</button>
+            <button class="tab" data-tab="raw">Raw Data</button>
+        </div>
+
+        <div id="tab-functions" class="tab-content active">
+            <table id="function-table">
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>Function</th>
+                        <th>Module</th>
+                        <th>CPU %</th>
+                        <th>Samples</th>
+                    </tr>
+                </thead>
+                <tbody id="function-tbody">
+                    <tr><td colspan="5" class="empty">Waiting for data...</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div id="tab-source" class="tab-content">
+            <div id="source-view">
+                <p class="empty">Click a function in the table to view source code.</p>
+            </div>
+        </div>
+
+        <div id="tab-flamegraph" class="tab-content">
+            <div id="flamegraph-container">
+                <p class="empty">Waiting for data...</p>
+            </div>
+        </div>
+
+        <div id="tab-raw" class="tab-content">
+            <pre id="raw-data">Waiting for data...</pre>
+        </div>
+    </main>
+
+    <script src="app.js"></script>
+</body>
+</html>

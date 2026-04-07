@@ -1,0 +1,245 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
+    background: #1a1a2e;
+    color: #e0e0e0;
+    min-height: 100vh;
+}
+
+header {
+    background: #16213e;
+    padding: 12px 24px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 2px solid #0f3460;
+}
+
+header h1 {
+    font-size: 20px;
+    color: #53a8b6;
+    letter-spacing: 1px;
+}
+
+#status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+}
+
+.dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    display: inline-block;
+}
+
+.dot.connected { background: #00e676; }
+.dot.disconnected { background: #ff5252; }
+.dot.waiting { background: #ffc107; }
+
+main {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 16px;
+}
+
+#summary-bar {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 16px;
+}
+
+.stat-card {
+    background: #16213e;
+    border: 1px solid #0f3460;
+    border-radius: 6px;
+    padding: 12px 20px;
+    min-width: 140px;
+    text-align: center;
+}
+
+.stat-value {
+    font-size: 24px;
+    font-weight: bold;
+    color: #53a8b6;
+}
+
+.stat-label {
+    font-size: 11px;
+    color: #888;
+    margin-top: 4px;
+    text-transform: uppercase;
+}
+
+#tabs {
+    display: flex;
+    gap: 0;
+    margin-bottom: 0;
+    border-bottom: 2px solid #0f3460;
+}
+
+.tab {
+    background: transparent;
+    border: none;
+    color: #888;
+    padding: 10px 20px;
+    cursor: pointer;
+    font-size: 14px;
+    font-family: inherit;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -2px;
+    transition: color 0.2s;
+}
+
+.tab:hover { color: #e0e0e0; }
+.tab.active { color: #53a8b6; border-bottom-color: #53a8b6; }
+
+.tab-content {
+    display: none;
+    padding: 16px 0;
+}
+
+.tab-content.active { display: block; }
+
+/* Function table */
+#function-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+
+#function-table th {
+    background: #16213e;
+    padding: 8px 12px;
+    text-align: left;
+    font-weight: 600;
+    color: #53a8b6;
+    border-bottom: 2px solid #0f3460;
+    position: sticky;
+    top: 0;
+}
+
+#function-table td {
+    padding: 6px 12px;
+    border-bottom: 1px solid #1a1a3e;
+}
+
+#function-table tr:nth-child(even) { background: #16213e40; }
+#function-table tr:hover { background: #0f346060; cursor: pointer; }
+
+.cpu-bar {
+    background: #0f3460;
+    border-radius: 2px;
+    height: 16px;
+    position: relative;
+    min-width: 60px;
+}
+
+.cpu-bar-fill {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.3s;
+}
+
+.cpu-bar-text {
+    position: absolute;
+    right: 4px;
+    top: 0;
+    line-height: 16px;
+    font-size: 11px;
+    color: #fff;
+}
+
+.empty {
+    color: #666;
+    text-align: center;
+    padding: 40px;
+}
+
+/* Source view */
+#source-view {
+    background: #0d1117;
+    border-radius: 6px;
+    overflow-x: auto;
+    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.source-header {
+    padding: 8px 16px;
+    background: #16213e;
+    border-bottom: 1px solid #0f3460;
+    font-weight: bold;
+    color: #53a8b6;
+}
+
+.source-line {
+    display: flex;
+    padding: 0 16px;
+    white-space: pre;
+}
+
+.source-line:hover { background: #1a1a3e; }
+
+.source-line .line-no {
+    width: 50px;
+    text-align: right;
+    color: #555;
+    user-select: none;
+    flex-shrink: 0;
+    padding-right: 12px;
+}
+
+.source-line .line-samples {
+    width: 90px;
+    text-align: right;
+    flex-shrink: 0;
+    padding-right: 12px;
+    font-size: 11px;
+}
+
+.source-line .line-code {
+    flex: 1;
+}
+
+/* Heat coloring */
+.heat-0 { }
+.heat-1 { background: rgba(255, 255, 0, 0.05); }
+.heat-2 { background: rgba(255, 200, 0, 0.10); }
+.heat-3 { background: rgba(255, 150, 0, 0.15); }
+.heat-4 { background: rgba(255, 100, 0, 0.20); }
+.heat-5 { background: rgba(255, 50, 0, 0.30); }
+
+.heat-1 .line-samples { color: #aaa; }
+.heat-2 .line-samples { color: #cc9; }
+.heat-3 .line-samples { color: #da5; }
+.heat-4 .line-samples { color: #e83; }
+.heat-5 .line-samples { color: #f44; }
+
+/* Flame graph */
+#flamegraph-container {
+    background: #0d1117;
+    border-radius: 6px;
+    padding: 16px;
+    min-height: 300px;
+}
+
+/* Raw data */
+#raw-data {
+    background: #0d1117;
+    border-radius: 6px;
+    padding: 16px;
+    max-height: 600px;
+    overflow: auto;
+    font-size: 12px;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
