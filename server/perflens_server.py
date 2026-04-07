@@ -7,6 +7,8 @@ import struct
 import sys
 import threading
 
+from parser import parse_perf_script, build_function_summary
+
 
 def recv_exactly(conn, n):
     """Receive exactly n bytes from a socket."""
@@ -43,14 +45,16 @@ def handle_agent_connection(conn, addr):
 
             text = payload.decode('utf-8')
             chunk_num += 1
-            lines = text.strip().split('\n')
+
+            # Parse and display summary
+            samples = parse_perf_script(text)
+            summary = build_function_summary(samples)
             print(f"\n[server] === Chunk {chunk_num} from {addr}: "
-                  f"{length} bytes, {len(lines)} lines ===")
-            # Print first 20 lines as preview
-            for line in lines[:20]:
-                print(line)
-            if len(lines) > 20:
-                print(f"  ... ({len(lines) - 20} more lines)")
+                  f"{length} bytes, {summary['total_samples']} samples ===")
+            print(f"Top 10 functions:")
+            for f in summary['functions'][:10]:
+                print(f"  {f['percent']:6.1f}%  {f['samples']:5d}  "
+                      f"{f['name']:<30s}  ({f['module']})")
 
     except ConnectionResetError:
         print(f"[server] Agent {addr} connection reset")
