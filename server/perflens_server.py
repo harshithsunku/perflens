@@ -9,6 +9,7 @@ import struct
 import sys
 import threading
 import time
+from datetime import datetime
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
@@ -33,6 +34,7 @@ profiling_state = {
 server_config = {
     'source_dir': '.',
     'binary_path': None,
+    'sessions_dir': None,
 }
 
 
@@ -90,6 +92,12 @@ def handle_agent_connection(conn, addr):
         server_config.get('binary_path')
     )
 
+    # Create session directory
+    session_id = datetime.now().strftime('%Y%m%d_%H%M%S') + f'_{addr[0]}'
+    session_dir = os.path.join(server_config['sessions_dir'], session_id)
+    os.makedirs(session_dir, exist_ok=True)
+    raw_chunks = []
+
     try:
         while True:
             header = recv_exactly(conn, 4)
@@ -107,6 +115,7 @@ def handle_agent_connection(conn, addr):
                 break
 
             text = payload.decode('utf-8')
+            raw_chunks.append(text)
 
             # Split perf script and perf stat data
             script_text, stat_text = split_perf_data(text)
@@ -151,7 +160,53 @@ def handle_agent_connection(conn, addr):
         conn.close()
         with state['lock']:
             state['agent_connected'] = False
+            all_samples = list(state['all_samples'])
+            perf_stat_final = dict(state['perf_stat'])
         broadcast_sse('status', {'connected': False, 'agent': None})
+
+        # Save session
+        _save_session(session_dir, session_id, addr, raw_chunks,
+                      all_samples, perf_stat_final, mapper)
+
+
+def _save_session(session_dir, session_id, addr, raw_chunks,
+                  all_samples, perf_stat, mapper):
+    """Save profiling session to disk."""
+    try:
+        # Save raw perf data
+        for i, chunk in enumerate(raw_chunks):
+            with open(os.path.join(session_dir, f'chunk_{i:03d}.txt'), 'w') as f:
+                f.write(chunk)
+
+        # Save metadata
+        event_types = get_event_types(all_samples)
+        metadata = {
+            'session_id': session_id,
+            'agent': f"{addr[0]}:{addr[1]}",
+            'timestamp': datetime.now().isoformat(),
+            'total_samples': len(all_samples),
+            'chunks': len(raw_chunks),
+            'event_types': event_types,
+            'perf_stat': perf_stat,
+        }
+        with open(os.path.join(session_dir, 'metadata.json'), 'w') as f:
+            json.dump(metadata, f, indent=2)
+
+        # Save per-event summaries
+        per_event = {}
+        for evt in event_types:
+            evt_samples = filter_samples_by_event(all_samples, evt)
+            per_event[evt] = {
+                'function_summary': build_function_summary(evt_samples),
+                'flamegraph': build_flamegraph_data(evt_samples),
+                'source': build_annotated_source(mapper, evt_samples),
+            }
+        with open(os.path.join(session_dir, 'per_event.json'), 'w') as f:
+            json.dump(per_event, f)
+
+        print(f"[server] Session saved: {session_id} ({len(all_samples)} samples)")
+    except Exception as e:
+        print(f"[server] Error saving session: {e}")
 
 
 def run_tcp_server(port):
@@ -193,6 +248,11 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
             })
         elif path == '/api/stream':
             self._handle_sse()
+        elif path == '/api/sessions':
+            self._handle_sessions_list()
+        elif path.startswith('/api/sessions/'):
+            session_id = path.split('/api/sessions/')[1].rstrip('/')
+            self._handle_session_replay(session_id)
         elif path == '/api/source':
             params = parse_qs(parsed.query)
             file_path = params.get('file', [None])[0]
@@ -321,6 +381,42 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
         else:
             self._send_json({'file': file_path, 'lines': [], 'error': 'no data for file'})
 
+    def _handle_sessions_list(self):
+        """List all saved sessions."""
+        sessions_dir = server_config['sessions_dir']
+        sessions = []
+        if os.path.isdir(sessions_dir):
+            for name in sorted(os.listdir(sessions_dir), reverse=True):
+                meta_path = os.path.join(sessions_dir, name, 'metadata.json')
+                if os.path.isfile(meta_path):
+                    try:
+                        with open(meta_path) as f:
+                            meta = json.load(f)
+                        sessions.append(meta)
+                    except (json.JSONDecodeError, IOError):
+                        pass
+        self._send_json(sessions)
+
+    def _handle_session_replay(self, session_id):
+        """Return full session data for replay."""
+        session_dir = os.path.join(server_config['sessions_dir'], session_id)
+        per_event_path = os.path.join(session_dir, 'per_event.json')
+        meta_path = os.path.join(session_dir, 'metadata.json')
+
+        if not os.path.isfile(per_event_path):
+            self._send_json({'error': 'session not found'})
+            return
+
+        with open(meta_path) as f:
+            metadata = json.load(f)
+        with open(per_event_path) as f:
+            per_event = json.load(f)
+
+        self._send_json({
+            'metadata': metadata,
+            'per_event': per_event,
+        })
+
     def log_message(self, format, *args):
         # Suppress access logs for SSE keepalives
         if '/api/stream' not in str(args):
@@ -354,6 +450,11 @@ def main():
 
     server_config['source_dir'] = os.path.abspath(args.source_dir)
     server_config['binary_path'] = args.binary
+
+    sessions_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'sessions')
+    sessions_dir = os.path.abspath(sessions_dir)
+    os.makedirs(sessions_dir, exist_ok=True)
+    server_config['sessions_dir'] = sessions_dir
 
     ui_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'ui')
     ui_dir = os.path.abspath(ui_dir)

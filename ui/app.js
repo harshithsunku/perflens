@@ -310,6 +310,76 @@ function escapeAttr(s) {
     return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+// --- Sessions ---
+function loadSessions() {
+    fetch('/api/sessions')
+        .then(r => r.json())
+        .then(sessions => renderSessionsList(sessions))
+        .catch(() => {});
+}
+
+function renderSessionsList(sessions) {
+    const container = document.getElementById('sessions-list');
+    if (!sessions || sessions.length === 0) {
+        container.innerHTML = '<p class="empty">No saved sessions.</p>';
+        return;
+    }
+
+    let html = '<table id="sessions-table"><thead><tr>';
+    html += '<th>Session</th><th>Agent</th><th>Samples</th><th>Events</th><th>Time</th><th></th>';
+    html += '</tr></thead><tbody>';
+    sessions.forEach(s => {
+        html += `<tr>`;
+        html += `<td>${escapeHtml(s.session_id)}</td>`;
+        html += `<td>${escapeHtml(s.agent || '--')}</td>`;
+        html += `<td>${s.total_samples}</td>`;
+        html += `<td>${(s.event_types || []).join(', ')}</td>`;
+        html += `<td>${escapeHtml(s.timestamp || '')}</td>`;
+        html += `<td><button class="replay-btn" data-session="${escapeAttr(s.session_id)}">Replay</button></td>`;
+        html += `</tr>`;
+    });
+    html += '</tbody></table>';
+    container.innerHTML = html;
+
+    container.querySelectorAll('.replay-btn').forEach(btn => {
+        btn.addEventListener('click', () => replaySession(btn.dataset.session));
+    });
+}
+
+function replaySession(sessionId) {
+    fetch('/api/sessions/' + encodeURIComponent(sessionId))
+        .then(r => r.json())
+        .then(data => {
+            if (data.error) {
+                alert('Error: ' + data.error);
+                return;
+            }
+            // Load session data into state
+            state.perEvent = data.per_event;
+            state.eventTypes = data.metadata.event_types || [];
+            state.perfStat = data.metadata.perf_stat || {};
+            const firstEvt = state.eventTypes[0] || 'cycles';
+            state.selectedEvent = firstEvt;
+            state.totalSamples = data.metadata.total_samples;
+
+            updateEventSelector();
+            updateStatBar();
+            renderCurrentEvent();
+
+            // Switch to functions tab
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(tc => tc.classList.remove('active'));
+            document.querySelector('.tab[data-tab="functions"]').classList.add('active');
+            document.getElementById('tab-functions').classList.add('active');
+
+            const dot = document.getElementById('status-dot');
+            const text = document.getElementById('status-text');
+            dot.className = 'dot waiting';
+            text.textContent = 'Replaying: ' + sessionId;
+        })
+        .catch(err => alert('Failed to load session: ' + err));
+}
+
 // --- Init ---
 fetch('/api/status')
     .then(r => r.json())
@@ -321,3 +391,4 @@ fetch('/api/status')
     .catch(() => {});
 
 connectSSE();
+loadSessions();
