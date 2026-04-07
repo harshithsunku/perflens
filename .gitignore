@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+sessions/
+test/sample_workload
+*.data
