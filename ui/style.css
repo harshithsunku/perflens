@@ -296,14 +296,16 @@ main {
 
 .replay-btn:hover { background: #53a8b6; color: #0d1117; }
 
-/* Raw data */
-#raw-data {
-    background: #0d1117;
-    border-radius: 6px;
-    padding: 16px;
-    max-height: 600px;
-    overflow: auto;
-    font-size: 12px;
-    white-space: pre-wrap;
-    word-break: break-all;
+/* Loading animation */
+@keyframes pulse {
+    0%, 100% { opacity: 0.4; }
+    50% { opacity: 1; }
+}
+
+.loading { animation: pulse 1.5s ease-in-out infinite; }
+
+/* Responsive */
+@media (max-width: 900px) {
+    #perf-stat-bar { flex-direction: column; }
+    .stat-card { min-width: auto; }
 }
