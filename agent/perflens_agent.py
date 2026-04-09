@@ -305,8 +305,12 @@ class TCPSender:
             log(f"Send failed ({e}), reconnecting...")
             self.close()
             self.connect()
-            # Retry the send once after reconnect
-            self._sock.sendall(data)
+            try:
+                self._sock.sendall(data)
+            except (BrokenPipeError, ConnectionResetError, OSError) as e2:
+                log(f"Retry send also failed ({e2})")
+                self.close()
+                raise
 
     def close(self):
         if self._sock:
@@ -397,8 +401,18 @@ class PerfCollector:
             )
             self._track(proc_stat)
 
-            # Wait for both
-            _, rec_stderr = proc_record.communicate(timeout=timeout)
+            # Wait for both — if record times out, also clean up stat
+            try:
+                _, rec_stderr = proc_record.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                proc_record.kill()
+                proc_stat.kill()
+                proc_record.wait()
+                proc_stat.wait()
+                self._untrack(proc_record)
+                self._untrack(proc_stat)
+                log_warn("Collection timed out, killed subprocesses")
+                return None
             self._untrack(proc_record)
 
             _, stat_stderr = proc_stat.communicate(timeout=timeout)

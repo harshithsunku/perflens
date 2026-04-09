@@ -128,8 +128,10 @@ document.querySelectorAll('.tab').forEach(tab => {
 function switchToTab(tabName) {
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     document.querySelectorAll('.tab-content').forEach(tc => tc.classList.remove('active'));
-    document.querySelector('.tab[data-tab="' + tabName + '"]').classList.add('active');
-    document.getElementById('tab-' + tabName).classList.add('active');
+    const tabBtn = document.querySelector('.tab[data-tab="' + tabName + '"]');
+    const tabContent = document.getElementById('tab-' + tabName);
+    if (tabBtn) tabBtn.classList.add('active');
+    if (tabContent) tabContent.classList.add('active');
 }
 
 // --- Event selector ---
@@ -211,7 +213,7 @@ function updateEventSelector() {
     const select = document.getElementById('event-select');
     const current = select.value;
     select.innerHTML = state.eventTypes.map(evt =>
-        `<option value="${evt}" ${evt === current ? 'selected' : ''}>${evt}</option>`
+        '<option value="' + escapeAttr(evt) + '"' + (evt === current ? ' selected' : '') + '>' + escapeHtml(evt) + '</option>'
     ).join('');
     if (!state.eventTypes.includes(state.selectedEvent) && state.eventTypes.length > 0) {
         state.selectedEvent = state.eventTypes[0];
@@ -478,13 +480,13 @@ function renderSourceView(filePath, lines) {
         }
     });
 
-    // Limit render to 2000 lines or hottest line + 100
+    // Render at least 2000 lines, or enough to include the hottest line + 100
     const maxLine = Math.max(2000, hottestLine + 100);
     const displayLines = lines.length > maxLine ? lines.slice(0, maxLine) : lines;
     const truncated = lines.length > displayLines.length;
 
     let html = '<div class="source-header">' + escapeHtml(filePath) +
-               ' (' + totalSamples + ' samples, ' + state.selectedEvent + ')</div>';
+               ' (' + totalSamples + ' samples, ' + escapeHtml(state.selectedEvent) + ')</div>';
     html += '<div class="source-scroll">';
 
     for (let i = 0; i < displayLines.length; i++) {
@@ -649,7 +651,7 @@ function renderSessionsList(sessions) {
             '<td>' + escapeHtml(s.session_id) + '</td>' +
             '<td>' + escapeHtml(s.agent || '--') + '</td>' +
             '<td>' + s.total_samples + '</td>' +
-            '<td>' + (s.event_types || []).join(', ') + '</td>' +
+            '<td>' + escapeHtml((s.event_types || []).join(', ')) + '</td>' +
             '<td>' + escapeHtml(s.timestamp || '') + '</td>' +
             '<td><button class="replay-btn" data-session="' + escapeAttr(s.session_id) + '">Replay</button></td>' +
             '</tr>';

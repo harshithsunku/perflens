@@ -54,6 +54,7 @@ class ProfilingState:
         self.agent_connected = False
         self.agent_addr = None
         self.sse_clients = set()   # set of (wfile, wlock) tuples
+        self.agent_conn = None     # active agent socket, for /api/stop
         self.event_types = []
         self.perf_stat = {}
         self.source_mapper = None  # SourceMapper, set at startup
@@ -261,6 +262,7 @@ def handle_agent_connection(conn, addr):
     with state.lock:
         state.agent_connected = True
         state.agent_addr = f"{addr[0]}:{addr[1]}"
+        state.agent_conn = conn
         state.all_samples = []
         state.chunk_count = 0
 
@@ -341,6 +343,7 @@ def handle_agent_connection(conn, addr):
         conn.close()
         with state.lock:
             state.agent_connected = False
+            state.agent_conn = None
             all_samples = list(state.all_samples)
             perf_stat_final = dict(state.perf_stat)
         broadcast_sse('status', {'connected': False, 'agent': None})
@@ -425,6 +428,8 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
                 'total_samples': len(state.all_samples),
                 'chunk_count': state.chunk_count,
             })
+        elif path == '/api/stop':
+            self._handle_stop()
         elif path == '/api/stream':
             self._handle_sse()
         elif path == '/api/sessions':
@@ -454,6 +459,19 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
         self.wfile.write(body)
+
+    def _handle_stop(self):
+        """Close the agent connection, triggering normal disconnect flow."""
+        with state.lock:
+            conn = state.agent_conn
+        if conn:
+            try:
+                conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            self._send_json({'stopped': True})
+        else:
+            self._send_json({'stopped': False, 'reason': 'no agent connected'})
 
     def _serve_file(self, file_path):
         ext = os.path.splitext(file_path)[1]

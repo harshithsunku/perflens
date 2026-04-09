@@ -138,6 +138,12 @@ class Addr2LinePipe:
                     else:
                         results[addr] = ('??', '??', 0)
         except (BrokenPipeError, OSError):
+            if self._proc:
+                try:
+                    self._proc.kill()
+                    self._proc.wait(timeout=2)
+                except Exception:
+                    pass
             self._proc = None
 
         return results
