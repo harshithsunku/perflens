@@ -116,15 +116,16 @@ jobs:
                     "$PkgDir/perflens-server-bin.exe"
           Copy-Item VERSION "$PkgDir/VERSION"
 
-          # Simple .bat launcher
-          $Launcher = @'
-@echo off
-setlocal
-set SELF_DIR=%~dp0
-set PATH=%SELF_DIR%bin;%PATH%
-"%SELF_DIR%perflens-server-bin.exe" %*
-'@
-          $Launcher | Out-File -Encoding ASCII "$PkgDir/perflens-server.bat"
+          # Simple .bat launcher (built from an array so indentation is safe
+          # inside a YAML block scalar and we don't need a here-string).
+          $Launcher = @(
+            '@echo off',
+            'setlocal',
+            'set SELF_DIR=%~dp0',
+            'set PATH=%SELF_DIR%bin;%PATH%',
+            '"%SELF_DIR%perflens-server-bin.exe" %*'
+          )
+          Set-Content -Encoding ASCII -Path "$PkgDir/perflens-server.bat" -Value $Launcher
 
           if (-not (Test-Path dist)) { New-Item -ItemType Directory -Path dist | Out-Null }
           Push-Location build
