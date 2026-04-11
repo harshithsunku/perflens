@@ -1,0 +1,261 @@
+name: build
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-server:
+    name: server (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+            binary_name: perflens-server-bin
+            freeze_mode: script
+          - os: macos-latest
+            platform: macos-arm64
+            binary_name: perflens-server-bin
+            freeze_mode: script
+          - os: macos-13
+            platform: macos-x86_64
+            binary_name: perflens-server-bin
+            freeze_mode: script
+          - os: windows-latest
+            platform: windows-x86_64
+            binary_name: perflens-server-bin.exe
+            freeze_mode: windows
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PyInstaller
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller
+
+      - name: Read version
+        id: ver
+        shell: bash
+        run: |
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      # -------------------------------------------------------------------
+      # Linux / macOS: the build script does all the packaging work.
+      # -------------------------------------------------------------------
+      - name: Build server package (Linux/macOS)
+        if: matrix.freeze_mode == 'script'
+        shell: bash
+        run: |
+          chmod +x build_package.sh
+          ./build_package.sh --server
+
+      # -------------------------------------------------------------------
+      # Windows: call PyInstaller directly (the bash build script relies on
+      # a POSIX environment). We still produce the same on-disk layout.
+      # -------------------------------------------------------------------
+      - name: Build server package (Windows)
+        if: matrix.freeze_mode == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $Version = (Get-Content VERSION -Raw).Trim()
+          $PkgName = "perflens-server-$Version"
+          $PkgDir  = "build/$PkgName"
+          $Stage   = "build/server-stage"
+          if (Test-Path build) { Remove-Item build -Recurse -Force }
+          if (Test-Path dist)  { Remove-Item dist  -Recurse -Force }
+          New-Item -ItemType Directory -Path "$Stage/server" | Out-Null
+          New-Item -ItemType Directory -Path "$Stage/ui"     | Out-Null
+          Copy-Item server/perflens_server.py "$Stage/server/"
+          Copy-Item server/parser.py          "$Stage/server/"
+          Copy-Item server/source_mapper.py   "$Stage/server/"
+          Copy-Item ui/index.html,ui/app.js,ui/style.css "$Stage/ui/"
+          Copy-Item VERSION "$Stage/VERSION"
+
+          # Run PyInstaller with ';' as add-data separator on Windows.
+          Push-Location $Stage
+          pyinstaller `
+            --noconfirm --clean `
+            --onefile `
+            --name perflens-server-bin `
+            --paths server `
+            --hidden-import parser `
+            --hidden-import source_mapper `
+            --add-data "ui/index.html;ui" `
+            --add-data "ui/app.js;ui" `
+            --add-data "ui/style.css;ui" `
+            --add-data "VERSION;." `
+            --exclude-module tkinter `
+            --exclude-module unittest `
+            --exclude-module pydoc `
+            --exclude-module doctest `
+            --console `
+            server/perflens_server.py
+          Pop-Location
+
+          New-Item -ItemType Directory -Path $PkgDir             | Out-Null
+          New-Item -ItemType Directory -Path "$PkgDir/bin"       | Out-Null
+          New-Item -ItemType Directory -Path "$PkgDir/sessions"  | Out-Null
+          Copy-Item "$Stage/dist/perflens-server-bin.exe" `
+                    "$PkgDir/perflens-server-bin.exe"
+          Copy-Item VERSION "$PkgDir/VERSION"
+
+          # Simple .bat launcher
+          $Launcher = @'
+@echo off
+setlocal
+set SELF_DIR=%~dp0
+set PATH=%SELF_DIR%bin;%PATH%
+"%SELF_DIR%perflens-server-bin.exe" %*
+'@
+          $Launcher | Out-File -Encoding ASCII "$PkgDir/perflens-server.bat"
+
+          if (-not (Test-Path dist)) { New-Item -ItemType Directory -Path dist | Out-Null }
+          Push-Location build
+          tar -czf "../dist/$PkgName.tar.gz" $PkgName
+          Pop-Location
+
+      - name: Verify binary exists
+        shell: bash
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          PKG="build/perflens-server-${VERSION}"
+          if [ ! -d "$PKG" ]; then
+            echo "::error::package directory $PKG missing" >&2
+            exit 1
+          fi
+          if [ ! -f "$PKG/${{ matrix.binary_name }}" ]; then
+            echo "::warning::expected binary ${{ matrix.binary_name }} not found in $PKG (non-frozen build?)"
+          fi
+          ls -la "$PKG"
+
+      - name: Rename tarball for platform
+        shell: bash
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          SRC="dist/perflens-server-${VERSION}.tar.gz"
+          DST="dist/perflens-server-${VERSION}-${{ matrix.platform }}.tar.gz"
+          mv "$SRC" "$DST"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: perflens-server-${{ matrix.platform }}
+          path: dist/perflens-server-*-${{ matrix.platform }}.tar.gz
+          if-no-files-found: error
+
+  build-agent:
+    name: agent
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build agent package
+        shell: bash
+        run: |
+          chmod +x build_package.sh
+          ./build_package.sh --agent
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: perflens-agent
+          path: dist/perflens-agent-*.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-server, build-agent]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Read version
+        id: ver
+        shell: bash
+        run: |
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Collect release assets
+        id: collect
+        shell: bash
+        run: |
+          mkdir -p release
+          find artifacts -name 'perflens-*.tar.gz' -exec cp {} release/ \;
+          ls -la release
+          echo "assets<<EOF" >> "$GITHUB_OUTPUT"
+          (cd release && ls perflens-*.tar.gz) >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Generate release notes
+        id: notes
+        shell: bash
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          {
+            echo "## PerfLens ${VERSION}"
+            echo
+            echo "Self-contained, portable packages for the PerfLens profiling tool."
+            echo
+            echo "### Downloads"
+            echo
+            echo "| Platform | File |"
+            echo "|----------|------|"
+            for f in release/perflens-*.tar.gz; do
+              fname="$(basename "$f")"
+              case "$fname" in
+                *linux-x86_64*)  plat="Linux x86_64 (server)" ;;
+                *macos-arm64*)   plat="macOS arm64 (server)" ;;
+                *macos-x86_64*)  plat="macOS x86_64 (server)" ;;
+                *windows-x86_64*) plat="Windows x86_64 (server)" ;;
+                *agent*)         plat="Agent (any Linux, Python 3.5+)" ;;
+                *)               plat="other" ;;
+              esac
+              echo "| ${plat} | ${fname} |"
+            done
+            echo
+            echo "### Usage"
+            echo
+            echo '```'
+            echo "tar xf perflens-server-${VERSION}-<platform>.tar.gz"
+            echo "./perflens-server-${VERSION}/perflens-server --source-dir ... --binary ..."
+            echo '```'
+          } > release_notes.md
+          cat release_notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release_notes.md
+          files: release/perflens-*.tar.gz
+          fail_on_unmatched_files: true
