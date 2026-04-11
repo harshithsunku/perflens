@@ -108,10 +108,11 @@ Pre-built server tarballs are published on every tagged release for:
 | Platform | Tarball |
 |----------|---------|
 | Linux x86_64 | `perflens-server-<ver>-linux-x86_64.tar.gz` |
-| macOS arm64 | `perflens-server-<ver>-macos-arm64.tar.gz` |
-| macOS x86_64 | `perflens-server-<ver>-macos-x86_64.tar.gz` |
+| macOS arm64 (Apple Silicon) | `perflens-server-<ver>-macos-arm64.tar.gz` |
 | Windows x86_64 | `perflens-server-<ver>-windows-x86_64.tar.gz` |
 | Agent (any Linux, Python 3.5+) | `perflens-agent-<ver>.tar.gz` |
+
+> **Intel Mac users:** GitHub retired the free `macos-13` runner, so there's no pre-built macOS x86_64 tarball. Either build from source (`./build_package.sh --no-freeze --server`) or run the Linux tarball under a VM/container.
 
 ### Option B — from source (dev / contributors)
 
