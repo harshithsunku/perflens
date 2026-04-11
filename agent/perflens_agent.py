@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""PerfLens Device Agent — collects perf data, compresses, and streams to server."""
+"""PerfLens Device Agent -- collects perf data, compresses, and streams to server.
+
+Python 3.5+ compatible. Runs on embedded ARM switches with Python 3.5.7.
+"""
 
 import argparse
-import dataclasses
+import errno
 import os
 import platform
 import signal
@@ -17,55 +20,89 @@ import time
 
 LOG_PREFIX = "[perflens-agent]"
 
+# Binary name for perf; kept as a constant to make it easy to override
+# for testing and to avoid repeating the string throughout the file.
+PERF = 'perf'
+
 
 def log(msg):
-    print(f"{LOG_PREFIX} {msg}", file=sys.stderr, flush=True)
+    sys.stderr.write("%s %s\n" % (LOG_PREFIX, msg))
+    sys.stderr.flush()
 
 
 def log_warn(msg):
-    print(f"{LOG_PREFIX} WARNING: {msg}", file=sys.stderr, flush=True)
+    sys.stderr.write("%s WARNING: %s\n" % (LOG_PREFIX, msg))
+    sys.stderr.flush()
 
 
 # ---------------------------------------------------------------------------
-# Data classes
+# subprocess compat helper (Python 3.5+)
 # ---------------------------------------------------------------------------
 
-@dataclasses.dataclass
-class PlatformInfo:
-    arch: str
-    endianness: str
-    kernel: str
-    perf_version: str
-    perf_event_paranoid: int
+def _run_cmd(cmd, input_data=None, timeout=None):
+    """Run a command and return (returncode, stdout_bytes, stderr_bytes).
+
+    Compatibility helper for Python 3.5, which lacks the higher-level
+    interfaces added in later versions.
+    """
+    p = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE if input_data is not None else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = p.communicate(input=input_data, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        try:
+            p.wait()
+        except Exception:
+            pass
+        raise
+    return p.returncode, stdout, stderr
 
 
-@dataclasses.dataclass
-class PerfCapabilities:
-    record_events: list          # events suitable for perf record
-    stat_only_events: list       # events only for perf stat
-    all_events: list             # union of both
-    callgraph_method: str        # "fp", "dwarf", "lbr", or "" (none)
+# ---------------------------------------------------------------------------
+# Data classes -- plain classes for 3.5 compat (no decorator-based records)
+# ---------------------------------------------------------------------------
+
+class PlatformInfo(object):
+    def __init__(self, arch, endianness, kernel, perf_version, perf_event_paranoid):
+        self.arch = arch
+        self.endianness = endianness
+        self.kernel = kernel
+        self.perf_version = perf_version
+        self.perf_event_paranoid = perf_event_paranoid
 
 
-@dataclasses.dataclass
-class CompressionMethod:
-    available: bool
-    command: str                 # full path or name of zstd binary, "" if unavailable
+class PerfCapabilities(object):
+    def __init__(self, record_events, stat_only_events, all_events, callgraph_method):
+        self.record_events = record_events          # events suitable for perf record
+        self.stat_only_events = stat_only_events    # events only for perf stat
+        self.all_events = all_events                # union of both
+        self.callgraph_method = callgraph_method    # 'fp' / 'dwarf' / 'lbr' / '' (none)
+
+
+class CompressionMethod(object):
+    def __init__(self, available, command):
+        self.available = available
+        self.command = command                      # full path/name of zstd, "" if unavailable
 
 
 # ---------------------------------------------------------------------------
 # Platform detection
 # ---------------------------------------------------------------------------
 
-def detect_platform() -> PlatformInfo:
+def detect_platform():
     arch = platform.machine()
     endianness = sys.byteorder
     kernel = platform.release()
 
     # perf version
     try:
-        r = subprocess.run(["perf", "--version"], capture_output=True, text=True, timeout=5)
-        perf_version = r.stdout.strip() if r.returncode == 0 else "unknown"
+        rc, out, _ = _run_cmd([PERF, "--version"], timeout=5)
+        perf_version = out.decode("utf-8", "replace").strip() if rc == 0 else "unknown"
     except Exception:
         perf_version = "unknown"
 
@@ -85,14 +122,14 @@ def detect_platform() -> PlatformInfo:
         perf_event_paranoid=paranoid,
     )
 
-    log(f"Platform: arch={info.arch}, endian={info.endianness}, "
-        f"kernel={info.kernel}, perf={info.perf_version}, "
-        f"perf_event_paranoid={info.perf_event_paranoid}")
+    log("Platform: arch=%s, endian=%s, kernel=%s, perf=%s, perf_event_paranoid=%s" % (
+        info.arch, info.endianness, info.kernel, info.perf_version,
+        info.perf_event_paranoid))
 
     if paranoid > 1:
-        log_warn(f"perf_event_paranoid={paranoid} (>1). "
+        log_warn("perf_event_paranoid=%d (>1). "
                  "Some events may be unavailable. "
-                 "Consider: sudo sysctl kernel.perf_event_paranoid=1")
+                 "Consider: sudo sysctl kernel.perf_event_paranoid=1" % paranoid)
 
     return info
 
@@ -101,7 +138,7 @@ def detect_platform() -> PlatformInfo:
 # Capability probing
 # ---------------------------------------------------------------------------
 
-STAT_ONLY_EVENTS = {"page-faults", "context-switches", "cpu-migrations"}
+STAT_ONLY_EVENTS = set(["page-faults", "context-switches", "cpu-migrations"])
 
 CANDIDATE_EVENTS = [
     "cycles", "instructions", "cache-misses", "cache-references",
@@ -109,19 +146,19 @@ CANDIDATE_EVENTS = [
     "context-switches", "cpu-migrations",
 ]
 
-CALLGRAPH_METHODS = ["fp", "dwarf", "lbr"]
+CALLGRAPH_METHODS = ['fp', 'dwarf', 'lbr']
 
 SKIP_PATTERNS = ["not supported", "invalid event", "unknown"]
 
 
-def _event_works(event: str, pid: int) -> bool:
+def _event_works(event, pid):
     """Probe whether a single perf event works on this system."""
-    cmd = ["perf", "stat", "-e", event, "-p", str(pid), "--", "sleep", "1"]
+    cmd = [PERF, "stat", "-e", event, "-p", str(pid), "--", "sleep", "1"]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-        if r.returncode != 0:
+        rc, _, stderr = _run_cmd(cmd, timeout=10)
+        if rc != 0:
             return False
-        stderr_lower = r.stderr.lower()
+        stderr_lower = stderr.decode("utf-8", "replace").lower()
         for pat in SKIP_PATTERNS:
             if pat in stderr_lower:
                 return False
@@ -130,24 +167,24 @@ def _event_works(event: str, pid: int) -> bool:
         return False
 
 
-def _callgraph_works(method: str, pid: int) -> bool:
+def _callgraph_works(method, pid):
     """Probe whether a call-graph method works by doing a short perf record + script."""
-    with tempfile.NamedTemporaryFile(suffix=".data", delete=False) as f:
-        tmp = f.name
+    fd, tmp = tempfile.mkstemp(suffix=".data")
+    os.close(fd)
     try:
         cmd_rec = [
-            "perf", "record", "-e", "cycles", "-p", str(pid),
+            PERF, "record", "-e", "cycles", "-p", str(pid),
             "--call-graph", method, "-F", "99", "-o", tmp,
             "--", "sleep", "2",
         ]
-        r = subprocess.run(cmd_rec, capture_output=True, text=True, timeout=15)
-        if r.returncode != 0:
+        rc, _, _ = _run_cmd(cmd_rec, timeout=15)
+        if rc != 0:
             return False
-        cmd_script = ["perf", "script", "-i", tmp]
-        r = subprocess.run(cmd_script, capture_output=True, text=True, timeout=15)
-        if r.returncode != 0:
+        cmd_script = [PERF, "script", "-i", tmp]
+        rc, stdout, _ = _run_cmd(cmd_script, timeout=15)
+        if rc != 0:
             return False
-        return len(r.stdout.strip()) > 0
+        return len(stdout.decode("utf-8", "replace").strip()) > 0
     except Exception:
         return False
     finally:
@@ -157,7 +194,7 @@ def _callgraph_works(method: str, pid: int) -> bool:
             pass
 
 
-def probe_capabilities(pid: int) -> PerfCapabilities:
+def probe_capabilities(pid):
     log("Probing perf event support...")
     record_events = []
     stat_only_events = []
@@ -167,9 +204,9 @@ def probe_capabilities(pid: int) -> PerfCapabilities:
                 stat_only_events.append(ev)
             else:
                 record_events.append(ev)
-            log(f"  {ev}: supported")
+            log("  %s: supported" % ev)
         else:
-            log(f"  {ev}: not available, skipping")
+            log("  %s: not available, skipping" % ev)
 
     if not record_events:
         log_warn("No record events available. Profiling may not produce useful data.")
@@ -178,13 +215,13 @@ def probe_capabilities(pid: int) -> PerfCapabilities:
     log("Probing call-graph methods...")
     callgraph = ""
     for method in CALLGRAPH_METHODS:
-        log(f"  Trying --call-graph {method}...")
+        log("  Trying --call-graph %s..." % method)
         if _callgraph_works(method, pid):
             callgraph = method
-            log(f"  Using call-graph method: {method}")
+            log("  Using call-graph method: %s" % method)
             break
         else:
-            log(f"  {method}: failed")
+            log("  %s: failed" % method)
 
     if not callgraph:
         log_warn("No call-graph method works. Will collect flat profiles (no stacks).")
@@ -195,8 +232,8 @@ def probe_capabilities(pid: int) -> PerfCapabilities:
         all_events=record_events + stat_only_events,
         callgraph_method=callgraph,
     )
-    log(f"Record events: {','.join(caps.record_events) or '(none)'}")
-    log(f"Stat-only events: {','.join(caps.stat_only_events) or '(none)'}")
+    log("Record events: %s" % (",".join(caps.record_events) or "(none)"))
+    log("Stat-only events: %s" % (",".join(caps.stat_only_events) or "(none)"))
     return caps
 
 
@@ -204,44 +241,58 @@ def probe_capabilities(pid: int) -> PerfCapabilities:
 # Compression probing
 # ---------------------------------------------------------------------------
 
-def probe_compression() -> CompressionMethod:
+def _candidate_arch_dirs():
+    """Return a list of candidate arch directory names for bundled binaries.
+
+    Embedded targets may report nonstandard machine names; for big-endian
+    AArch64 switches in particular, try several fallbacks.
+    """
+    mach = platform.machine()
+    candidates = [mach]
+    # Fallbacks for big-endian ARM and 32-bit ARM variants
+    for alt in ("aarch64_be", "arm64", "armv7l", "armv7", "arm"):
+        if alt not in candidates:
+            candidates.append(alt)
+    return candidates
+
+
+def probe_compression():
     # 1. System zstd
     try:
-        r = subprocess.run(["which", "zstd"], capture_output=True, text=True, timeout=5)
-        if r.returncode == 0:
-            path = r.stdout.strip()
-            log(f"Compression: using system zstd at {path}")
-            return CompressionMethod(available=True, command=path)
+        rc, out, _ = _run_cmd(["which", "zstd"], timeout=5)
+        if rc == 0:
+            path = out.decode("utf-8", "replace").strip()
+            if path:
+                log("Compression: using system zstd at %s" % path)
+                return CompressionMethod(available=True, command=path)
     except Exception:
         pass
 
-    # 2. Bundled binary
-    arch = platform.machine()
-    bundled = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin", arch, "zstd")
-    if os.path.isfile(bundled) and os.access(bundled, os.X_OK):
-        log(f"Compression: using bundled zstd at {bundled}")
-        return CompressionMethod(available=True, command=bundled)
+    # 2. Bundled binary -- try multiple arch directory names
+    base_bin = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin")
+    for arch_dir in _candidate_arch_dirs():
+        bundled = os.path.join(base_bin, arch_dir, "zstd")
+        if os.path.isfile(bundled) and os.access(bundled, os.X_OK):
+            log("Compression: using bundled zstd at %s" % bundled)
+            return CompressionMethod(available=True, command=bundled)
 
     # 3. No compression
     log_warn("zstd not found. Install with: apt install zstd / yum install zstd. "
-             "Sending uncompressed — higher TCP overhead.")
+             "Sending uncompressed -- higher TCP overhead.")
     return CompressionMethod(available=False, command="")
 
 
-def compress_data(data: bytes, comp: CompressionMethod) -> tuple:
+def compress_data(data, comp):
     """Compress data with zstd. Returns (payload_bytes, compression_flag)."""
     if not comp.available:
         return data, 0
 
     try:
-        r = subprocess.run(
-            [comp.command, "-1", "-c"],
-            input=data, capture_output=True, timeout=30,
-        )
-        if r.returncode == 0 and len(r.stdout) > 0:
-            return r.stdout, 1
+        rc, stdout, _ = _run_cmd([comp.command, "-1", "-c"], input_data=data, timeout=30)
+        if rc == 0 and len(stdout) > 0:
+            return stdout, 1
     except Exception as e:
-        log_warn(f"Compression failed: {e}")
+        log_warn("Compression failed: %s" % e)
 
     return data, 0
 
@@ -250,7 +301,7 @@ def compress_data(data: bytes, comp: CompressionMethod) -> tuple:
 # Shutdown coordination
 # ---------------------------------------------------------------------------
 
-class ShutdownFlag:
+class ShutdownFlag(object):
     def __init__(self):
         self._flag = threading.Event()
 
@@ -258,10 +309,10 @@ class ShutdownFlag:
         self._flag.set()
 
     @property
-    def is_set(self) -> bool:
+    def is_set(self):
         return self._flag.is_set()
 
-    def wait(self, timeout=None) -> bool:
+    def wait(self, timeout=None):
         return self._flag.wait(timeout)
 
 
@@ -269,8 +320,8 @@ class ShutdownFlag:
 # TCP sender with reconnect
 # ---------------------------------------------------------------------------
 
-class TCPSender:
-    def __init__(self, host: str, port: int, shutdown: ShutdownFlag):
+class TCPSender(object):
+    def __init__(self, host, port, shutdown):
         self._host = host
         self._port = port
         self._shutdown = shutdown
@@ -281,34 +332,39 @@ class TCPSender:
         delay = 1.0
         max_delay = 30.0
         while not self._shutdown.is_set:
+            s = None
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 s.settimeout(30)
                 s.connect((self._host, self._port))
                 self._sock = s
-                log(f"Connected to {self._host}:{self._port}")
+                log("Connected to %s:%d" % (self._host, self._port))
                 return
             except OSError as e:
-                log(f"Connection failed ({e}), retrying in {delay:.0f}s...")
-                s.close()
+                log("Connection failed (%s), retrying in %.0fs..." % (e, delay))
+                if s is not None:
+                    try:
+                        s.close()
+                    except OSError:
+                        pass
                 self._shutdown.wait(delay)
                 delay = min(delay * 2, max_delay)
         raise SystemExit("Shutdown during connect")
 
-    def send(self, payload: bytes, compression_flag: int):
+    def send(self, payload, compression_flag):
         """Send with 5-byte header. Reconnects on failure and retries once."""
         header = struct.pack("!IB", len(payload), compression_flag)
         data = header + payload
         try:
             self._sock.sendall(data)
-        except (BrokenPipeError, ConnectionResetError, OSError) as e:
-            log(f"Send failed ({e}), reconnecting...")
+        except (IOError, OSError) as e:
+            log("Send failed (%s), reconnecting..." % e)
             self.close()
             self.connect()
             try:
                 self._sock.sendall(data)
-            except (BrokenPipeError, ConnectionResetError, OSError) as e2:
-                log(f"Retry send also failed ({e2})")
+            except (IOError, OSError) as e2:
+                log("Retry send also failed (%s)" % e2)
                 self.close()
                 raise
 
@@ -325,9 +381,8 @@ class TCPSender:
 # Perf collector
 # ---------------------------------------------------------------------------
 
-class PerfCollector:
-    def __init__(self, pid: int, caps: PerfCapabilities, frequency: int,
-                 duration: int, shutdown: ShutdownFlag):
+class PerfCollector(object):
+    def __init__(self, pid, caps, frequency, duration, shutdown):
         self._pid = pid
         self._caps = caps
         self._frequency = frequency
@@ -336,11 +391,11 @@ class PerfCollector:
         self._lock = threading.Lock()
         self._active_procs = []
 
-    def _track(self, proc: subprocess.Popen):
+    def _track(self, proc):
         with self._lock:
             self._active_procs.append(proc)
 
-    def _untrack(self, proc: subprocess.Popen):
+    def _untrack(self, proc):
         with self._lock:
             try:
                 self._active_procs.remove(proc)
@@ -357,13 +412,13 @@ class PerfCollector:
             except OSError:
                 pass
 
-    def collect(self) -> str:
+    def collect(self):
         """Run one collection round. Returns combined perf script + stat text, or None."""
         if not self._caps.record_events:
             return None
 
-        with tempfile.NamedTemporaryFile(suffix=".data", delete=False) as f:
-            tmp_path = f.name
+        fd, tmp_path = tempfile.mkstemp(suffix=".data")
+        os.close(fd)
 
         timeout = self._duration + 10
 
@@ -371,7 +426,7 @@ class PerfCollector:
             # Build perf record command
             record_events_str = ",".join(self._caps.record_events)
             cmd_record = [
-                "perf", "record",
+                PERF, "record",
                 "-e", record_events_str,
                 "-p", str(self._pid),
                 "-F", str(self._frequency),
@@ -384,7 +439,7 @@ class PerfCollector:
             # Build perf stat command
             all_events_str = ",".join(self._caps.all_events) + ",task-clock"
             cmd_stat = [
-                "perf", "stat",
+                PERF, "stat",
                 "-e", all_events_str,
                 "-p", str(self._pid),
                 "--", "sleep", str(self._duration),
@@ -401,7 +456,7 @@ class PerfCollector:
             )
             self._track(proc_stat)
 
-            # Wait for both — if record times out, also clean up stat
+            # Wait for both -- if record times out, also clean up stat
             try:
                 _, rec_stderr = proc_record.communicate(timeout=timeout)
             except subprocess.TimeoutExpired:
@@ -418,15 +473,16 @@ class PerfCollector:
             _, stat_stderr = proc_stat.communicate(timeout=timeout)
             self._untrack(proc_stat)
 
-            rec_stderr_text = rec_stderr.decode("utf-8", errors="replace")
-            stat_stderr_text = stat_stderr.decode("utf-8", errors="replace")
+            rec_stderr_text = rec_stderr.decode("utf-8", "replace")
+            stat_stderr_text = stat_stderr.decode("utf-8", "replace")
 
             if proc_record.returncode != 0:
-                log(f"perf record failed (rc={proc_record.returncode}): {rec_stderr_text.strip()}")
+                log("perf record failed (rc=%d): %s" % (
+                    proc_record.returncode, rec_stderr_text.strip()))
                 return None
 
             # Run perf script
-            cmd_script = ["perf", "script", "-i", tmp_path]
+            cmd_script = [PERF, "script", "-i", tmp_path]
             proc_script = subprocess.Popen(
                 cmd_script, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             )
@@ -434,11 +490,12 @@ class PerfCollector:
             script_stdout, script_stderr = proc_script.communicate(timeout=timeout)
             self._untrack(proc_script)
 
-            script_text = script_stdout.decode("utf-8", errors="replace")
-            script_err = script_stderr.decode("utf-8", errors="replace")
+            script_text = script_stdout.decode("utf-8", "replace")
+            script_err = script_stderr.decode("utf-8", "replace")
 
             if proc_script.returncode != 0:
-                log(f"perf script failed (rc={proc_script.returncode}): {script_err.strip()}")
+                log("perf script failed (rc=%d): %s" % (
+                    proc_script.returncode, script_err.strip()))
                 return None
 
             # Combine
@@ -464,11 +521,13 @@ class PerfCollector:
 # Signal handling
 # ---------------------------------------------------------------------------
 
-def install_signal_handlers(shutdown: ShutdownFlag, collector: PerfCollector,
-                            sender: TCPSender):
+def install_signal_handlers(shutdown, collector, sender):
     def handler(signum, frame):
-        signame = signal.Signals(signum).name
-        log(f"Received {signame}, shutting down...")
+        try:
+            signame = signal.Signals(signum).name
+        except Exception:
+            signame = str(signum)
+        log("Received %s, shutting down..." % signame)
         shutdown.set()
         collector.terminate_all()
         sender.close()
@@ -481,28 +540,38 @@ def install_signal_handlers(shutdown: ShutdownFlag, collector: PerfCollector,
 # Main
 # ---------------------------------------------------------------------------
 
+def _process_exists(pid):
+    """Return True if the PID exists and we can see it. Raises on unknown error."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError as e:
+        if e.errno == errno.ESRCH:
+            return False
+        # EPERM means the process exists but we lack permission -- treat as alive
+        if e.errno == errno.EPERM:
+            return True
+        raise
+
+
 def main():
-    parser = argparse.ArgumentParser(description="PerfLens Device Agent")
-    parser.add_argument("--pid", type=int, required=True,
-                        help="PID of process to profile")
-    parser.add_argument("--server", type=str, default=None,
-                        help="Server IP to stream data to (omit for stdout mode)")
-    parser.add_argument("--port", type=int, default=9999,
-                        help="Server port (default: 9999)")
-    parser.add_argument("--frequency", type=int, default=99,
-                        help="Sampling frequency in Hz (default: 99)")
-    parser.add_argument("--duration", type=int, default=8,
-                        help="Duration of each collection in seconds (default: 8)")
-    args = parser.parse_args()
+    argp = argparse.ArgumentParser(description="PerfLens Device Agent")
+    argp.add_argument("--pid", type=int, required=True,
+                      help="PID of process to profile")
+    argp.add_argument("--server", type=str, default=None,
+                      help="Server IP to stream data to (omit for stdout mode)")
+    argp.add_argument("--port", type=int, default=9999,
+                      help="Server port (default: 9999)")
+    argp.add_argument("--frequency", type=int, default=99,
+                      help="Sampling frequency in Hz (default: 99)")
+    argp.add_argument("--duration", type=int, default=8,
+                      help="Duration of each collection in seconds (default: 8)")
+    args = argp.parse_args()
 
     # Verify the process exists
-    try:
-        os.kill(args.pid, 0)
-    except ProcessLookupError:
-        log(f"Error: process {args.pid} not found")
+    if not _process_exists(args.pid):
+        log("Error: process %d not found" % args.pid)
         sys.exit(1)
-    except PermissionError:
-        pass
 
     # Platform detection
     detect_platform()
@@ -510,15 +579,19 @@ def main():
     # Capability probing
     caps = probe_capabilities(args.pid)
 
-    # Stdout mode — single collection, print, exit
+    # Stdout mode -- single collection, print, exit
     if not args.server:
-        log(f"Collecting perf data for PID {args.pid} (stdout mode)")
+        log("Collecting perf data for PID %d (stdout mode)" % args.pid)
         shutdown = ShutdownFlag()
         collector = PerfCollector(args.pid, caps, args.frequency, args.duration, shutdown)
         output = collector.collect()
         if output:
-            print(output)
-            log(f"Done. Output {len(output)} bytes.")
+            try:
+                sys.stdout.write(output)
+                sys.stdout.flush()
+            except (IOError, OSError):
+                pass
+            log("Done. Output %d bytes." % len(output))
         else:
             log("No data collected.")
             sys.exit(1)
@@ -542,7 +615,7 @@ def main():
     install_signal_handlers(shutdown, collector, sender)
 
     # Connect
-    log(f"Connecting to {args.server}:{args.port}...")
+    log("Connecting to %s:%d..." % (args.server, args.port))
     try:
         sender.connect()
     except SystemExit:
@@ -554,22 +627,18 @@ def main():
         round_num += 1
 
         # Process liveness check
-        try:
-            os.kill(args.pid, 0)
-        except ProcessLookupError:
-            log(f"Process {args.pid} has exited")
+        if not _process_exists(args.pid):
+            log("Process %d has exited" % args.pid)
             break
-        except PermissionError:
-            pass
 
-        log(f"Round {round_num}: collecting ({args.duration}s)...")
+        log("Round %d: collecting (%ds)..." % (round_num, args.duration))
         output = collector.collect()
 
         if shutdown.is_set:
             break
 
         if not output:
-            log(f"Round {round_num}: no data, retrying...")
+            log("Round %d: no data, retrying..." % round_num)
             time.sleep(1)
             continue
 
@@ -580,17 +649,17 @@ def main():
         compressed_size = len(payload)
 
         if flag == 1:
-            ratio = raw_size / compressed_size if compressed_size > 0 else 0
-            log(f"Round {round_num}: perf script {raw_size} bytes, "
-                f"compressed {compressed_size} bytes (ratio {ratio:.1f}x)")
+            ratio = (raw_size / compressed_size) if compressed_size > 0 else 0
+            log("Round %d: perf script %d bytes, compressed %d bytes (ratio %.1fx)" % (
+                round_num, raw_size, compressed_size, ratio))
         else:
-            log(f"Round {round_num}: perf script {raw_size} bytes (uncompressed)")
+            log("Round %d: perf script %d bytes (uncompressed)" % (round_num, raw_size))
 
         try:
             sender.send(payload, flag)
-            log(f"Round {round_num}: sent successfully")
-        except (BrokenPipeError, ConnectionResetError, OSError) as e:
-            log(f"Round {round_num}: send failed after reconnect: {e}")
+            log("Round %d: sent successfully" % round_num)
+        except (IOError, OSError) as e:
+            log("Round %d: send failed after reconnect: %s" % (round_num, e))
             if shutdown.is_set:
                 break
             time.sleep(1)

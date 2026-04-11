@@ -1,5 +1,10 @@
+build/
+dist/
+*.spec
 __pycache__/
 *.pyc
 sessions/
 test/sample_workload
 *.data
+*.data.old
+.DS_Store

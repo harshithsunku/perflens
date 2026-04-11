@@ -1,0 +1,118 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 340" role="img" aria-label="PerfLens — real-time Linux perf profiling in your browser">
+  <title>PerfLens</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b0f14"/>
+      <stop offset="1" stop-color="#131c2b"/>
+    </linearGradient>
+    <linearGradient id="titleFill" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#f0f6fc"/>
+      <stop offset="1" stop-color="#c9d1d9"/>
+    </linearGradient>
+    <linearGradient id="lensRing" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#58a6ff"/>
+      <stop offset="1" stop-color="#3fb950"/>
+    </linearGradient>
+    <filter id="softShadow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="6"/>
+      <feOffset dx="0" dy="3" result="offset"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.5"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1200" height="340" fill="url(#bg)"/>
+
+  <!-- Subtle scan grid -->
+  <g stroke="#1a2332" stroke-width="1" opacity="0.45">
+    <line x1="0" y1="80"  x2="1200" y2="80"/>
+    <line x1="0" y1="160" x2="1200" y2="160"/>
+    <line x1="0" y1="240" x2="1200" y2="240"/>
+  </g>
+
+  <!-- Corner dots -->
+  <g fill="#30363d">
+    <circle cx="24" cy="24" r="3"/>
+    <circle cx="1176" cy="24" r="3"/>
+    <circle cx="24" cy="316" r="3"/>
+    <circle cx="1176" cy="316" r="3"/>
+  </g>
+
+  <!-- Logo mark: lens -->
+  <g transform="translate(88, 118)" filter="url(#softShadow)">
+    <circle cx="0" cy="0" r="38" fill="none" stroke="url(#lensRing)" stroke-width="4"/>
+    <circle cx="0" cy="0" r="22" fill="none" stroke="#58a6ff" stroke-width="2" opacity="0.65"/>
+    <circle cx="0" cy="0" r="8"  fill="#3fb950" opacity="0.85"/>
+    <line x1="-28" y1="0" x2="28" y2="0" stroke="#3fb950" stroke-width="1.5" opacity="0.7"/>
+    <line x1="0" y1="-28" x2="0" y2="28" stroke="#58a6ff" stroke-width="1.5" opacity="0.7"/>
+  </g>
+
+  <!-- Title -->
+  <text x="160" y="140" font-family="system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+        font-size="80" font-weight="800" fill="url(#titleFill)" letter-spacing="-2">PerfLens</text>
+
+  <!-- Tagline -->
+  <text x="162" y="182" font-family="system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+        font-size="22" fill="#8b949e">
+    Real-time Linux <tspan fill="#58a6ff" font-weight="600">perf</tspan> profiling, streamed to your browser.
+  </text>
+
+  <!-- Feature badges -->
+  <g font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="13"
+     transform="translate(162, 220)">
+    <g>
+      <rect x="0" y="0" width="108" height="28" rx="6" fill="#161b22" stroke="#30363d"/>
+      <text x="54" y="19" text-anchor="middle" fill="#3fb950">flame graphs</text>
+    </g>
+    <g transform="translate(118, 0)">
+      <rect x="0" y="0" width="124" height="28" rx="6" fill="#161b22" stroke="#30363d"/>
+      <text x="62" y="19" text-anchor="middle" fill="#d29922">source mapping</text>
+    </g>
+    <g transform="translate(252, 0)">
+      <rect x="0" y="0" width="106" height="28" rx="6" fill="#161b22" stroke="#30363d"/>
+      <text x="53" y="19" text-anchor="middle" fill="#58a6ff">ARM + x86</text>
+    </g>
+    <g transform="translate(368, 0)">
+      <rect x="0" y="0" width="94" height="28" rx="6" fill="#161b22" stroke="#30363d"/>
+      <text x="47" y="19" text-anchor="middle" fill="#f85149">zstd wire</text>
+    </g>
+    <g transform="translate(472, 0)">
+      <rect x="0" y="0" width="92" height="28" rx="6" fill="#161b22" stroke="#30363d"/>
+      <text x="46" y="19" text-anchor="middle" fill="#a5a5ff">py 3.5+</text>
+    </g>
+  </g>
+
+  <!-- Right side: decorative flame graph -->
+  <g transform="translate(720, 60)">
+    <!-- Frame stack -->
+    <g>
+      <rect x="0"   y="0"   width="440" height="22" rx="2" fill="#8b3a3a"/>
+      <rect x="14"  y="26"  width="396" height="22" rx="2" fill="#a44628"/>
+      <rect x="28"  y="52"  width="324" height="22" rx="2" fill="#b8631c"/>
+      <rect x="28"  y="78"  width="150" height="22" rx="2" fill="#c6810a"/>
+      <rect x="192" y="78"  width="160" height="22" rx="2" fill="#9e8c2a"/>
+      <rect x="28"  y="104" width="84"  height="22" rx="2" fill="#7b9a3d"/>
+      <rect x="120" y="104" width="58"  height="22" rx="2" fill="#4c9a4a"/>
+      <rect x="192" y="104" width="82"  height="22" rx="2" fill="#5aa845"/>
+      <rect x="282" y="104" width="70"  height="22" rx="2" fill="#3fb950"/>
+      <rect x="44"  y="130" width="38"  height="22" rx="2" fill="#3fb950"/>
+      <rect x="124" y="130" width="48"  height="22" rx="2" fill="#3fb950"/>
+      <rect x="252" y="130" width="52"  height="22" rx="2" fill="#2ea043"/>
+      <rect x="308" y="130" width="42"  height="22" rx="2" fill="#238636"/>
+    </g>
+    <!-- Baseline -->
+    <line x1="0" y1="168" x2="440" y2="168" stroke="#30363d" stroke-width="1"/>
+    <!-- Caption -->
+    <text x="0" y="188" font-family="ui-monospace, 'SF Mono', Menlo, monospace"
+          font-size="11" fill="#6e7681">
+      cycles · fp call-graph · 4145 samples
+    </text>
+  </g>
+
+  <!-- Bottom ticker line -->
+  <g transform="translate(88, 296)" font-family="ui-monospace, 'SF Mono', Menlo, monospace"
+     font-size="11" fill="#6e7681">
+    <text x="0" y="0">$ ./perflens-server  <tspan fill="#3fb950">✓</tspan>  TCP 9999  ·  HTTP 8080  ·  addr2line · zstd · ready</text>
+  </g>
+</svg>

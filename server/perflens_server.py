@@ -716,8 +716,44 @@ def main():
                 src, dst = mapping.split('=', 1)
                 path_map[src] = dst
 
-    # Build config
-    base_dir = os.path.dirname(os.path.abspath(__file__))
+    # Build config.
+    #
+    # Path resolution differs between development runs (script mode) and
+    # PyInstaller frozen builds:
+    #   - In frozen mode, `sys._MEIPASS` is the temporary directory where
+    #     PyInstaller extracts bundled data (ui/, VERSION, etc.). The actual
+    #     executable lives next to the sessions directory we want to write.
+    #   - In script mode, __file__ is server/perflens_server.py and the ui/
+    #     and sessions/ dirs are siblings of server/.
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        bundle_dir = sys._MEIPASS
+        base_dir = os.path.dirname(os.path.abspath(sys.executable))
+    else:
+        bundle_dir = None
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # Resolve the UI directory: PyInstaller bundle first, then alongside the
+    # executable (extracted package), then the development layout.
+    ui_candidates = []
+    if bundle_dir:
+        ui_candidates.append(os.path.join(bundle_dir, 'ui'))
+    ui_candidates.append(os.path.join(base_dir, 'ui'))
+    ui_candidates.append(os.path.join(base_dir, '..', 'ui'))
+
+    ui_dir = None
+    for candidate in ui_candidates:
+        if os.path.isdir(candidate):
+            ui_dir = os.path.abspath(candidate)
+            break
+    if ui_dir is None:
+        ui_dir = os.path.abspath(ui_candidates[-1])
+
+    # Sessions directory: next to the executable in frozen mode, sibling of
+    # server/ in script mode.
+    if bundle_dir:
+        sessions_dir = os.path.abspath(os.path.join(base_dir, 'sessions'))
+    else:
+        sessions_dir = os.path.abspath(os.path.join(base_dir, '..', 'sessions'))
 
     config = ServerConfig(
         source_dir=os.path.abspath(args.source_dir),
@@ -725,11 +761,11 @@ def main():
         map_file_path=os.path.abspath(args.map) if args.map else None,
         addr2line_bin=args.addr2line,
         path_map=path_map or None,
-        sessions_dir=os.path.abspath(os.path.join(base_dir, '..', 'sessions')),
+        sessions_dir=sessions_dir,
         max_samples=args.max_samples,
         tcp_port=args.port,
         http_port=args.http_port,
-        ui_dir=os.path.abspath(os.path.join(base_dir, '..', 'ui')),
+        ui_dir=ui_dir,
     )
 
     os.makedirs(config.sessions_dir, exist_ok=True)
