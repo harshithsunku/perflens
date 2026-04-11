@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """PerfLens Device Agent -- collects perf data, compresses, and streams to server.
 
-Python 3.5+ compatible. Runs on embedded ARM switches with Python 3.5.7.
+Python 3.5+ compatible. Designed to run on older ARM or x86 Linux targets
+where only Python 3.5 may be available.
 """
 
 import argparse
@@ -244,8 +245,8 @@ def probe_capabilities(pid):
 def _candidate_arch_dirs():
     """Return a list of candidate arch directory names for bundled binaries.
 
-    Embedded targets may report nonstandard machine names; for big-endian
-    AArch64 switches in particular, try several fallbacks.
+    Some embedded ARM targets report nonstandard machine names; for
+    big-endian AArch64 in particular, try several fallbacks.
     """
     mach = platform.machine()
     candidates = [mach]

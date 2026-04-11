@@ -15,7 +15,7 @@
 
 **PerfLens** is a remote Linux performance profiler with a real-time web UI. Drop the agent on any Linux device (ARM or x86), point it at a PID, and watch flame graphs, function tables, `perf stat` metrics, and line-level annotated source update live in your browser.
 
-No frontend frameworks. No pip dependencies. No Docker. Pure Python stdlib on the server, plain HTML/CSS/JS for the UI, and a ~600-line Python 3.5-compatible agent that runs on embedded switches with kernels as old as 4.14.
+No frontend frameworks. No pip dependencies. No Docker. Pure Python stdlib on the server, plain HTML/CSS/JS for the UI, and a ~600-line Python 3.5-compatible agent that runs anywhere from older ARM embedded Linux targets to modern x86 servers.
 
 ---
 
@@ -47,7 +47,7 @@ The pipeline in one sentence: **`perf record` → agent → TCP+zstd → server 
 - Each collection round runs `perf record` and `perf stat` in parallel for N seconds, then `perf script` to flatten the output
 - The combined text is compressed with `zstd -1 -c` (system or bundled binary) and framed with a 5-byte header
 - Reconnects with exponential backoff if the server drops
-- Runs on **Python 3.5+** — no f-strings, no dataclasses, no `subprocess.run(capture_output=True)`, no `ProcessLookupError`. Suitable for embedded switches.
+- Runs on **Python 3.5+** — no f-strings, no dataclasses, no `subprocess.run(capture_output=True)`, no `ProcessLookupError`. Suitable for older ARM or x86 Linux targets that don't ship a modern Python.
 
 ### Local machine
 
