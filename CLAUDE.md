@@ -62,6 +62,10 @@ history.
 perflens/
 ├── agent/
 │   └── perflens_agent.py         # Python 3.5+ device agent
+├── agent-c/
+│   ├── perflens_agent.c          # C agent (~1000 lines, static binary)
+│   ├── Makefile                  # native + cross-compile targets
+│   └── vendor/zstd/              # zstd single-file amalgamation
 ├── server/
 │   ├── perflens_server.py        # TCP listener + ThreadingHTTPServer
 │   ├── parser.py                 # perf script / perf stat parser
@@ -155,3 +159,7 @@ perflens/
   symbols and not stripped.
 - The source view renders up to ~2000 lines (or hottest line ± 100,
   whichever is larger).
+- The parser handles `perf script` output from all kernel versions (2.6
+  through 6.x), including optional `[cpu]`, `pid/tid`, and flags fields.
+  The agent normalizes output with `perf script -F` when supported (perf
+  >= ~3.12) and falls back to default format on older versions.

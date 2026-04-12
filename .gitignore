@@ -8,3 +8,5 @@ test/sample_workload
 *.data
 *.data.old
 .DS_Store
+*.o
+agent-c/perflens-agent

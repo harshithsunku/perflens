@@ -7,7 +7,8 @@
 # Usage:
 #   ./build_package.sh              # build both, frozen with PyInstaller
 #   ./build_package.sh --server     # server package only
-#   ./build_package.sh --agent      # agent package only
+#   ./build_package.sh --agent      # agent package only (Python)
+#   ./build_package.sh --agent-c    # C agent (native static binary)
 #   ./build_package.sh --no-freeze  # skip PyInstaller, package scripts only
 #
 set -e
@@ -21,12 +22,14 @@ cd "$REPO_ROOT"
 
 BUILD_SERVER=1
 BUILD_AGENT=1
+BUILD_AGENT_C=0
 NO_FREEZE=0
 
 for arg in "$@"; do
     case "$arg" in
         --server)    BUILD_SERVER=1; BUILD_AGENT=0 ;;
         --agent)     BUILD_AGENT=1; BUILD_SERVER=0 ;;
+        --agent-c)   BUILD_AGENT_C=1; BUILD_SERVER=0; BUILD_AGENT=0 ;;
         --no-freeze) NO_FREEZE=1 ;;
         -h|--help)
             sed -n '3,15p' "$0"
@@ -363,6 +366,35 @@ build_agent() {
 }
 
 # ---------------------------------------------------------------------------
+# C Agent package (static binary)
+# ---------------------------------------------------------------------------
+
+build_agent_c() {
+    if [ ! -f "$REPO_ROOT/agent-c/perflens_agent.c" ]; then
+        err "agent-c/perflens_agent.c not found"
+        return 1
+    fi
+
+    info "Building C agent (native static binary)"
+    if ! ( cd "$REPO_ROOT/agent-c" && make clean && make ) 2>&1; then
+        err "C agent build failed"
+        return 1
+    fi
+
+    local pkg_dir="$BUILD_DIR/perflens-agent-c-${VERSION}"
+    rm -rf "$pkg_dir"
+    mkdir -p "$pkg_dir"
+
+    cp "$REPO_ROOT/agent-c/perflens-agent" "$pkg_dir/perflens-agent"
+    chmod +x "$pkg_dir/perflens-agent"
+    echo "$VERSION" > "$pkg_dir/VERSION"
+
+    local tarball="$DIST_DIR/perflens-agent-c-${VERSION}.tar.gz"
+    ( cd "$BUILD_DIR" && tar -czf "$tarball" "perflens-agent-c-${VERSION}" )
+    ok "Wrote ${tarball}"
+}
+
+# ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
 
@@ -376,6 +408,10 @@ fi
 
 if [ "$BUILD_AGENT" -eq 1 ]; then
     build_agent
+fi
+
+if [ "$BUILD_AGENT_C" -eq 1 ]; then
+    build_agent_c
 fi
 
 echo

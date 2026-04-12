@@ -15,7 +15,7 @@
 
 **PerfLens** is a remote Linux performance profiler with a real-time web UI. Drop the agent on any Linux device (ARM or x86), point it at a PID, and watch flame graphs, function tables, `perf stat` metrics, and line-level annotated source update live in your browser.
 
-No frontend frameworks. No pip dependencies. No Docker. Pure Python stdlib on the server, plain HTML/CSS/JS for the UI, and a ~600-line Python 3.5-compatible agent that runs anywhere from older ARM embedded Linux targets to modern x86 servers.
+No frontend frameworks. No pip dependencies. No Docker. Pure Python stdlib on the server, plain HTML/CSS/JS for the UI, and two agent options: a ~600-line Python 3.5-compatible agent for targets with Python, or a single static C binary (~1.8 MB) with zero runtime dependencies for bare-metal or minimal environments.
 
 ---
 
@@ -27,6 +27,7 @@ No frontend frameworks. No pip dependencies. No Docker. Pure Python stdlib on th
 - **Interactive SVG flame graphs** — vanilla JS, no d3, no bundling; zoomable, hoverable
 - **ARM + x86** — same agent code runs on aarch64, aarch64_be, armv7l, x86_64
 - **Session save / replay** — raw chunks saved to disk, replayed lazily on demand via the UI's session list
+- **C agent option** — single static binary with vendored zstd, no runtime dependencies; cross-compiles to aarch64, armv7l, x86_64
 - **Portable release packages** — PyInstaller-frozen server for Linux/macOS/Windows, scripted agent for any Python 3.5+ host
 - **Capability probing** — the agent discovers which perf events and call-graph modes (`fp` / `dwarf` / `lbr`) actually work on the target before collecting
 - **Zstd compression** — typical perf script payloads compress 20–40× before hitting the wire
@@ -114,7 +115,23 @@ Pre-built server tarballs are published on every tagged release for:
 
 > **Intel Mac users:** GitHub retired the free `macos-13` runner, so there's no pre-built macOS x86_64 tarball. Either build from source (`./build_package.sh --no-freeze --server`) or run the Linux tarball under a VM/container.
 
-### Option B — from source (dev / contributors)
+### Option B — C agent (recommended for targets without Python)
+
+```bash
+# Build (on your build machine)
+cd agent-c
+make                              # native x86_64
+make CROSS=aarch64-linux-gnu-     # cross-compile for ARM64
+
+# Deploy (single file, no dependencies)
+scp perflens-agent user@device:/tmp/
+ssh user@device
+/tmp/perflens-agent --pid <PID> --server <server-ip>
+```
+
+The C agent is a single static binary (~1.8 MB) with zstd built in. It is wire-protocol-identical to the Python agent — the server cannot tell which agent connected.
+
+### Option C — from source (dev / contributors)
 
 ```bash
 # Server
@@ -124,7 +141,7 @@ python3 server/perflens_server.py \
     --port       9999 \
     --http-port  8080
 
-# Agent (on the target device)
+# Agent (on the target device — Python or C)
 scp agent/perflens_agent.py user@device:/tmp/
 ssh user@device
 python3 /tmp/perflens_agent.py --pid <PID> --server <server-ip>
@@ -136,7 +153,7 @@ Then browse to `http://<server-ip>:8080`.
 
 | Component | Needs |
 |-----------|-------|
-| **Target device** | Linux, `perf`, Python 3.5+, ideally `zstd` (agent falls back to uncompressed if missing) |
+| **Target device** | Linux, `perf`; Python 3.5+ for Python agent **or** nothing extra for C agent; ideally `zstd` for Python agent (C agent has it built in) |
 | **Local machine** | Python 3.8+ (or frozen tarball), `addr2line` and `readelf` from binutils (bundled in `bin/` or on PATH), ideally `zstd` for decompression |
 | **Binary** | Compiled with `-g` (debug symbols), not stripped |
 | **Source** | A checkout of the source tree readable from the server machine |
@@ -242,6 +259,10 @@ The agent launcher auto-prepends the correct arch directory to `$PATH` based on 
 perflens/
 ├── agent/
 │   └── perflens_agent.py         # Python 3.5+ device agent
+├── agent-c/
+│   ├── perflens_agent.c          # C agent (static binary, zero deps)
+│   ├── Makefile                  # native + cross-compile targets
+│   └── vendor/zstd/              # vendored zstd amalgamation
 ├── server/
 │   ├── perflens_server.py        # TCP listener + ThreadingHTTPServer
 │   ├── parser.py                 # perf script / perf stat parser

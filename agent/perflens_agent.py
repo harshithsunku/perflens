@@ -78,11 +78,13 @@ class PlatformInfo(object):
 
 
 class PerfCapabilities(object):
-    def __init__(self, record_events, stat_only_events, all_events, callgraph_method):
+    def __init__(self, record_events, stat_only_events, all_events, callgraph_method,
+                 script_fields=""):
         self.record_events = record_events          # events suitable for perf record
         self.stat_only_events = stat_only_events    # events only for perf stat
         self.all_events = all_events                # union of both
         self.callgraph_method = callgraph_method    # 'fp' / 'dwarf' / 'lbr' / '' (none)
+        self.script_fields = script_fields          # '-F' fields string or '' if unsupported
 
 
 class CompressionMethod(object):
@@ -151,6 +153,10 @@ CALLGRAPH_METHODS = ['fp', 'dwarf', 'lbr']
 
 SKIP_PATTERNS = ["not supported", "invalid event", "unknown"]
 
+# Normalized field set for 'perf script -F'.  Ensures consistent output format
+# across kernel versions.  Requires perf >= ~3.12 (older versions lack -F).
+SCRIPT_FIELDS = "comm,pid,time,period,event,ip,sym,dso"
+
 
 def _event_works(event, pid):
     """Probe whether a single perf event works on this system."""
@@ -182,6 +188,37 @@ def _callgraph_works(method, pid):
         if rc != 0:
             return False
         cmd_script = [PERF, "script", "-i", tmp]
+        rc, stdout, _ = _run_cmd(cmd_script, timeout=15)
+        if rc != 0:
+            return False
+        return len(stdout.decode("utf-8", "replace").strip()) > 0
+    except Exception:
+        return False
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def _script_fields_work(pid, event="cycles"):
+    """Probe whether 'perf script -F <fields>' is supported.
+
+    Older perf versions (pre ~3.12) lack -F entirely.  Returns True if
+    the normalized field set produces output, False otherwise.
+    """
+    fd, tmp = tempfile.mkstemp(suffix=".data")
+    os.close(fd)
+    try:
+        cmd_rec = [
+            PERF, "record", "-e", event, "-p", str(pid),
+            "-F", "99", "-o", tmp,
+            "--", "sleep", "1",
+        ]
+        rc, _, _ = _run_cmd(cmd_rec, timeout=15)
+        if rc != 0:
+            return False
+        cmd_script = [PERF, "script", "-F", SCRIPT_FIELDS, "-i", tmp]
         rc, stdout, _ = _run_cmd(cmd_script, timeout=15)
         if rc != 0:
             return False
@@ -227,11 +264,22 @@ def probe_capabilities(pid):
     if not callgraph:
         log_warn("No call-graph method works. Will collect flat profiles (no stacks).")
 
+    # Probe perf script -F support (normalizes output across kernel versions)
+    script_fields = ""
+    if record_events:
+        log("Probing perf script -F support...")
+        if _script_fields_work(pid, event=record_events[0]):
+            script_fields = SCRIPT_FIELDS
+            log("  perf script -F supported, using: %s" % script_fields)
+        else:
+            log("  perf script -F not supported, using default output format")
+
     caps = PerfCapabilities(
         record_events=record_events,
         stat_only_events=stat_only_events,
         all_events=record_events + stat_only_events,
         callgraph_method=callgraph,
+        script_fields=script_fields,
     )
     log("Record events: %s" % (",".join(caps.record_events) or "(none)"))
     log("Stat-only events: %s" % (",".join(caps.stat_only_events) or "(none)"))
@@ -482,8 +530,10 @@ class PerfCollector(object):
                     proc_record.returncode, rec_stderr_text.strip()))
                 return None
 
-            # Run perf script
+            # Run perf script (use -F for normalized output if supported)
             cmd_script = [PERF, "script", "-i", tmp_path]
+            if self._caps.script_fields:
+                cmd_script = [PERF, "script", "-F", self._caps.script_fields, "-i", tmp_path]
             proc_script = subprocess.Popen(
                 cmd_script, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             )

@@ -185,10 +185,69 @@ jobs:
           path: dist/perflens-agent-*.tar.gz
           if-no-files-found: error
 
+  build-agent-c:
+    name: agent-c (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            cross: ''
+            cross_pkg: ''
+          - arch: aarch64
+            cross: 'aarch64-linux-gnu-'
+            cross_pkg: 'gcc-aarch64-linux-gnu'
+          - arch: armv7l
+            cross: 'arm-linux-gnueabihf-'
+            cross_pkg: 'gcc-arm-linux-gnueabihf'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install cross-compiler
+        if: matrix.cross_pkg != ''
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ${{ matrix.cross_pkg }}
+
+      - name: Read version
+        id: ver
+        shell: bash
+        run: |
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Build C agent
+        shell: bash
+        run: |
+          cd agent-c
+          make CROSS="${{ matrix.cross }}"
+          file perflens-agent
+
+      - name: Package
+        shell: bash
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          PKG_NAME="perflens-agent-c-${VERSION}-linux-${{ matrix.arch }}"
+          mkdir -p "build/${PKG_NAME}"
+          cp agent-c/perflens-agent "build/${PKG_NAME}/"
+          chmod +x "build/${PKG_NAME}/perflens-agent"
+          cp VERSION "build/${PKG_NAME}/VERSION"
+          mkdir -p dist
+          (cd build && tar -czf "../dist/${PKG_NAME}.tar.gz" "${PKG_NAME}")
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: perflens-agent-c-${{ matrix.arch }}
+          path: dist/perflens-agent-c-*.tar.gz
+          if-no-files-found: error
+
   release:
     name: release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-server, build-agent]
+    needs: [build-server, build-agent, build-agent-c]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -234,12 +293,15 @@ jobs:
             for f in release/perflens-*.tar.gz; do
               fname="$(basename "$f")"
               case "$fname" in
-                *linux-x86_64*)  plat="Linux x86_64 (server)" ;;
-                *macos-arm64*)   plat="macOS arm64 (server)" ;;
-                *macos-x86_64*)  plat="macOS x86_64 (server)" ;;
-                *windows-x86_64*) plat="Windows x86_64 (server)" ;;
-                *agent*)         plat="Agent (any Linux, Python 3.5+)" ;;
-                *)               plat="other" ;;
+                *agent-c*x86_64*)  plat="C Agent — Linux x86_64 (static binary)" ;;
+                *agent-c*aarch64*) plat="C Agent — Linux aarch64 (static binary)" ;;
+                *agent-c*armv7l*)  plat="C Agent — Linux armv7l (static binary)" ;;
+                *agent-[0-9]*)     plat="Python Agent (any Linux, Python 3.5+)" ;;
+                *linux-x86_64*)    plat="Server — Linux x86_64" ;;
+                *macos-arm64*)     plat="Server — macOS arm64" ;;
+                *macos-x86_64*)    plat="Server — macOS x86_64" ;;
+                *windows-x86_64*)  plat="Server — Windows x86_64" ;;
+                *)                 plat="other" ;;
               esac
               echo "| ${plat} | ${fname} |"
             done

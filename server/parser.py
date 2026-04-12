@@ -8,10 +8,22 @@ from collections import defaultdict
 
 PERF_STAT_MARKER = '### PERF_STAT ###'
 
-# Header: "<comm> <pid> <timestamp>: <count> <event>:"
+# Header: "<comm> <pid>[/<tid>] [<cpu>] <timestamp>: [<flags>] <count> <event>:"
+# Handles all known perf script output variations:
+#   - Kernel 2.6/3.x: no [cpu] field, no flags
+#   - Kernel 4.x+:    [cpu] field present by default
+#   - Kernel 5.x+:    optional 4-char flags field (e.g. ".... " or "d.b. ")
+#   - pid/tid format:  "1234/5678" (optional /tid is discarded)
+#   - Event modifiers: "cycles:u:" or "cycles:pp:" (normalized later)
+#   - Agent -F output: comm,pid,time,period,event,ip,sym,dso (same shape)
 # comm may contain spaces — non-greedy, backtrack finds pid+timestamp
 HEADER_RE = re.compile(
-    r'^(.+?)\s+(\d+)\s+[\d.]+:\s+(\d+)\s+(\S+):\s*$'
+    r'^(.+?)\s+(\d+)(?:/\d+)?\s+'       # comm + pid (optional /tid)
+    r'(?:\[\d+\]\s+)?'                    # optional [cpu]
+    r'[\d.]+:\s+'                          # timestamp:
+    r'(?:[a-zA-Z.]{4}\s+)?'               # optional flags
+    r'(\d+)\s+'                            # count
+    r'(\S+):\s*$'                          # event:
 )
 
 # Stack frame with module (last parenthesized group on the line)
