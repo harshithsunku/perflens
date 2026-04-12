@@ -13,6 +13,14 @@
             <span id="status-dot" class="dot disconnected"></span>
             <span id="status-text">Connecting...</span>
             <button id="stop-btn" class="stop-btn hidden" title="Stop profiling">Stop</button>
+            <div class="export-dropdown">
+                <button id="export-btn" class="export-btn">Export</button>
+                <div id="export-menu" class="export-menu">
+                    <div class="export-item" data-action="svg">Download Flamegraph SVG</div>
+                    <div class="export-item" data-action="collapsed">Download Collapsed Stacks</div>
+                    <div class="export-item" data-action="json">Download Session JSON</div>
+                </div>
+            </div>
         </div>
     </header>
 

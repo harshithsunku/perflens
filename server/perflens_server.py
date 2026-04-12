@@ -386,6 +386,143 @@ def _save_session(session_dir, session_id, addr, raw_chunks,
 
 
 # ---------------------------------------------------------------------------
+# Export helpers
+# ---------------------------------------------------------------------------
+
+def _load_session_samples(session_id):
+    """Load all samples from a saved session. Returns (samples, metadata) or (None, None)."""
+    session_dir = os.path.join(config.sessions_dir, session_id)
+    meta_path = os.path.join(session_dir, 'metadata.json')
+    if not os.path.isfile(meta_path):
+        return None, None
+
+    with open(meta_path) as f:
+        metadata = json.load(f)
+
+    all_samples = []
+    chunk_files = sorted(
+        f for f in os.listdir(session_dir)
+        if f.startswith('chunk_') and f.endswith('.txt')
+    )
+    for fname in chunk_files:
+        fpath = os.path.join(session_dir, fname)
+        try:
+            with open(fpath) as f:
+                text = f.read()
+            script_text, _ = split_perf_data(text)
+            samples = parse_perf_script(script_text)
+            all_samples.extend(samples)
+        except (IOError, OSError):
+            pass
+
+    return all_samples, metadata
+
+
+def _export_collapsed(samples):
+    """Export samples in Brendan Gregg collapsed stack format.
+
+    Each line: semicolon-separated stack (bottom to top) followed by space
+    and sample count. Compatible with flamegraph.pl, speedscope, Perfetto.
+    """
+    stacks = {}
+    for sample in samples:
+        if not sample['frames']:
+            continue
+        # Build stack bottom-to-top (reversed frames, since frames[0] is leaf)
+        funcs = [f['func'] for f in reversed(sample['frames'])]
+        key = ';'.join(funcs)
+        stacks[key] = stacks.get(key, 0) + 1
+
+    lines = []
+    for stack, count in sorted(stacks.items()):
+        lines.append(f'{stack} {count}')
+    return '\n'.join(lines) + '\n' if lines else ''
+
+
+def _render_flamegraph_svg(fg_root, total_samples, event_type):
+    """Render flamegraph tree as standalone SVG with embedded styles."""
+    width = 1200
+    row_height = 18
+    font_size = 11
+    margin_top = 50  # space for title
+
+    # Flatten tree
+    rects = []
+    _flatten_for_svg(fg_root, 0, 0, width, rects, total_samples)
+    max_depth = max((r['depth'] for r in rects), default=0)
+    height = margin_top + (max_depth + 1) * row_height + 4
+
+    # Build SVG
+    lines = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}"'
+        f' viewBox="0 0 {width} {height}" font-family="monospace">',
+        '<style>',
+        '  rect:hover { stroke: #fff; stroke-width: 1; }',
+        '  text { pointer-events: none; fill: #fff; }',
+        '  .title { font-size: 16px; fill: #333; font-weight: bold; }',
+        '  .subtitle { font-size: 12px; fill: #666; }',
+        '</style>',
+        f'<rect width="{width}" height="{height}" fill="#f8f8f0"/>',
+        f'<text x="10" y="20" class="title">PerfLens Flamegraph — {_svg_escape(event_type)}</text>',
+        f'<text x="10" y="38" class="subtitle">{total_samples} samples</text>',
+    ]
+
+    for r in rects:
+        hue = 30 + (_hash_code(r['name']) % 30)
+        sat = 80 + (_hash_code(r['name'] + 'x') % 20)
+        light = 45 + (_hash_code(r['name'] + 'y') % 15)
+        color = f'hsl({hue}, {sat}%, {light}%)'
+        y = height - (r['depth'] + 1) * row_height
+        rw = max(r['w'] - 1, 1)
+
+        pct = f"{r['percent']:.1f}"
+        title = f"{_svg_escape(r['name'])} ({r['value']} samples, {pct}%)"
+        lines.append(f'<g>')
+        lines.append(f'  <rect x="{r["x"]:.1f}" y="{y}" width="{rw:.1f}"'
+                     f' height="{row_height - 1}" fill="{color}" rx="1">'
+                     f'<title>{title}</title></rect>')
+        if r['w'] > 40:
+            max_chars = int(r['w'] / 7)
+            label = r['name'][:max_chars] + '..' if len(r['name']) > max_chars else r['name']
+            lines.append(f'  <text x="{r["x"] + 3:.1f}" y="{y + 13}"'
+                         f' font-size="{font_size}">{_svg_escape(label)}</text>')
+        lines.append('</g>')
+
+    lines.append('</svg>')
+    return '\n'.join(lines)
+
+
+def _flatten_for_svg(node, depth, x, width, rects, total_samples):
+    """Flatten flamegraph tree into list of rects for SVG export."""
+    pct = (node['value'] / total_samples * 100) if total_samples > 0 else 0
+    rects.append({
+        'name': node['name'], 'value': node['value'], 'percent': pct,
+        'depth': depth, 'x': x, 'w': width,
+    })
+    child_x = x
+    for child in (node.get('children') or []):
+        cw = (child['value'] / node['value']) * width if node['value'] > 0 else 0
+        if cw >= 1:
+            _flatten_for_svg(child, depth + 1, child_x, cw, rects, total_samples)
+        child_x += cw
+
+
+def _hash_code(s):
+    """Simple string hash matching the JS hashCode function."""
+    h = 0
+    for c in s:
+        h = ((h << 5) - h) + ord(c)
+        h &= 0xFFFFFFFF
+    return h
+
+
+def _svg_escape(s):
+    """Escape text for SVG/XML."""
+    return (s.replace('&', '&amp;').replace('<', '&lt;')
+             .replace('>', '&gt;').replace('"', '&quot;'))
+
+
+# ---------------------------------------------------------------------------
 # TCP server
 # ---------------------------------------------------------------------------
 
@@ -437,6 +574,15 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
         elif path.startswith('/api/sessions/'):
             session_id = path.split('/api/sessions/')[1].rstrip('/')
             self._handle_session_replay(session_id)
+        elif path == '/api/export/flamegraph':
+            params = parse_qs(parsed.query)
+            event = params.get('event', ['cycles'])[0]
+            self._handle_export_flamegraph(event)
+        elif path.startswith('/api/export/session/'):
+            session_id = path.split('/api/export/session/')[1].rstrip('/')
+            params = parse_qs(parsed.query)
+            fmt = params.get('format', ['collapsed'])[0]
+            self._handle_export_session(session_id, fmt)
         elif path == '/api/source':
             params = parse_qs(parsed.query)
             file_path = params.get('file', [None])[0]
@@ -583,6 +729,94 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
         else:
             self._send_json({'file': file_path, 'lines': [],
                              'error': 'no data for file'})
+
+    def _handle_export_flamegraph(self, event_type):
+        """Export current flamegraph as standalone SVG."""
+        with state.lock:
+            all_samples = list(state.all_samples)
+
+        if not all_samples:
+            self._send_json({'error': 'no data available'})
+            return
+
+        evt_samples = filter_samples_by_event(all_samples, event_type)
+        if not evt_samples:
+            self._send_json({'error': f'no samples for event {event_type}'})
+            return
+
+        fg = build_flamegraph_data(evt_samples)
+        total = len(evt_samples)
+        svg = _render_flamegraph_svg(fg, total, event_type)
+
+        body = svg.encode('utf-8')
+        fname = f'perflens-flamegraph-{event_type}.svg'
+        self.send_response(200)
+        self.send_header('Content-Type', 'image/svg+xml')
+        self.send_header('Content-Disposition', f'attachment; filename="{fname}"')
+        self.send_header('Content-Length', len(body))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_export_session(self, session_id, fmt):
+        """Export session in collapsed or JSON format."""
+        # Load session samples
+        all_samples, metadata = _load_session_samples(session_id)
+        if all_samples is None:
+            # Try live data if session_id is 'live'
+            if session_id == 'live':
+                with state.lock:
+                    all_samples = list(state.all_samples)
+                    perf_stat = dict(state.perf_stat)
+                if not all_samples:
+                    self._send_json({'error': 'no live data'})
+                    return
+                event_types = get_event_types(all_samples)
+                metadata = {
+                    'session_id': 'live',
+                    'total_samples': len(all_samples),
+                    'event_types': event_types,
+                    'perf_stat': perf_stat,
+                }
+            else:
+                self._send_json({'error': 'session not found'})
+                return
+
+        if fmt == 'collapsed':
+            text = _export_collapsed(all_samples)
+            body = text.encode('utf-8')
+            fname = f'perflens-{session_id}.collapsed'
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/plain')
+            self.send_header('Content-Disposition',
+                             f'attachment; filename="{fname}"')
+            self.send_header('Content-Length', len(body))
+            self.end_headers()
+            self.wfile.write(body)
+
+        elif fmt == 'json':
+            event_types = get_event_types(all_samples)
+            per_event = {}
+            for evt in event_types:
+                evt_samples = filter_samples_by_event(all_samples, evt)
+                per_event[evt] = {
+                    'function_summary': build_function_summary(evt_samples),
+                    'flamegraph': build_flamegraph_data(evt_samples),
+                }
+            export_data = {
+                'metadata': metadata,
+                'per_event': per_event,
+            }
+            body = json.dumps(export_data, indent=2).encode('utf-8')
+            fname = f'perflens-{session_id}.json'
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Disposition',
+                             f'attachment; filename="{fname}"')
+            self.send_header('Content-Length', len(body))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self._send_json({'error': f'unknown format: {fmt}'})
 
     def _handle_sessions_list(self):
         """List all saved sessions."""

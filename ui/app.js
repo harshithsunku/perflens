@@ -117,6 +117,35 @@ document.getElementById('stop-btn').addEventListener('click', () => {
     }).catch(() => showError('Stop not available'));
 });
 
+// --- Export dropdown ---
+document.getElementById('export-btn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    document.getElementById('export-menu').classList.toggle('visible');
+});
+
+document.addEventListener('click', () => {
+    document.getElementById('export-menu').classList.remove('visible');
+});
+
+document.getElementById('export-menu').addEventListener('click', (e) => {
+    e.stopPropagation();
+    const item = e.target.closest('.export-item');
+    if (!item) return;
+    document.getElementById('export-menu').classList.remove('visible');
+
+    const action = item.dataset.action;
+    const event = state.selectedEvent;
+    const sessionId = state.replaySessionId || 'live';
+
+    if (action === 'svg') {
+        window.open('/api/export/flamegraph?event=' + encodeURIComponent(event), '_blank');
+    } else if (action === 'collapsed') {
+        window.open('/api/export/session/' + encodeURIComponent(sessionId) + '?format=collapsed', '_blank');
+    } else if (action === 'json') {
+        window.open('/api/export/session/' + encodeURIComponent(sessionId) + '?format=json', '_blank');
+    }
+});
+
 // --- Tab switching ---
 document.querySelectorAll('.tab').forEach(tab => {
     tab.addEventListener('click', () => {
