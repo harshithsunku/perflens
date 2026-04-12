@@ -86,6 +86,11 @@
         </div>
 
         <div id="tab-flamegraph" class="tab-content">
+            <div class="flamegraph-search">
+                <input type="text" id="fg-search" placeholder="Search functions..." />
+                <span id="fg-search-matches"></span>
+                <button id="fg-search-clear" class="hidden">&#x2715;</button>
+            </div>
             <div id="flamegraph-container">
                 <p class="empty">Waiting for data...</p>
             </div>

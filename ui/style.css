@@ -394,6 +394,47 @@ main {
 .heat-4 .line-samples { color: #e83; }
 .heat-5 .line-samples { color: #f44; }
 
+/* Flamegraph search */
+.flamegraph-search {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+#fg-search {
+    background: #16213e;
+    color: #e0e0e0;
+    border: 1px solid #0f3460;
+    border-radius: 4px;
+    padding: 6px 12px;
+    font-family: inherit;
+    font-size: 13px;
+    width: 260px;
+}
+#fg-search:focus { outline: 1px solid #53a8b6; }
+#fg-search::placeholder { color: #555; }
+
+#fg-search-matches {
+    color: #888;
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+#fg-search-clear {
+    background: none;
+    border: none;
+    color: #888;
+    font-size: 16px;
+    cursor: pointer;
+    padding: 0 4px;
+}
+#fg-search-clear:hover { color: #e0e0e0; }
+
+#flamegraph-container g.fg-dim rect { opacity: 0.2; }
+#flamegraph-container g.fg-dim text { opacity: 0.3; }
+#flamegraph-container g.fg-match rect { stroke: #fff; stroke-width: 1; }
+
 /* Flame graph */
 #flamegraph-container {
     background: #0d1117;

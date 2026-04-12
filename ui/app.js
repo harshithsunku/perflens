@@ -675,6 +675,12 @@ function renderFlamegraph(data, totalSamples) {
             if (evtData) renderFlamegraph(evtData.flamegraph, evtData.function_summary.total_samples);
         });
     }
+
+    // Re-apply active search after re-render
+    const searchInput = document.getElementById('fg-search');
+    if (searchInput && searchInput.value.trim()) {
+        applyFlamegraphSearch(searchInput.value.trim());
+    }
 }
 
 function flattenTree(node, depth, x, width, rects, totalSamples) {
@@ -706,6 +712,73 @@ window.addEventListener('resize', debounce(() => {
         renderFlamegraph(evtData.flamegraph, evtData.function_summary.total_samples);
     }
 }, 200));
+
+// --- Flamegraph search ---
+function applyFlamegraphSearch(query) {
+    const container = document.getElementById('flamegraph-container');
+    const matchesEl = document.getElementById('fg-search-matches');
+    const clearBtn = document.getElementById('fg-search-clear');
+    const groups = container.querySelectorAll('g[data-idx]');
+
+    if (!query) {
+        groups.forEach(g => { g.classList.remove('fg-dim', 'fg-match'); });
+        matchesEl.textContent = '';
+        clearBtn.classList.add('hidden');
+        return;
+    }
+
+    clearBtn.classList.remove('hidden');
+
+    let re;
+    try { re = new RegExp(query, 'i'); }
+    catch (e) { matchesEl.textContent = 'invalid regex'; return; }
+
+    let matchCount = 0;
+    let matchSamples = 0;
+    let totalFrames = flamegraphRects.length;
+
+    groups.forEach(g => {
+        const idx = parseInt(g.dataset.idx);
+        const rect = flamegraphRects[idx];
+        if (!rect) return;
+        if (re.test(rect.name)) {
+            g.classList.remove('fg-dim');
+            g.classList.add('fg-match');
+            matchCount++;
+            matchSamples += rect.value;
+        } else {
+            g.classList.add('fg-dim');
+            g.classList.remove('fg-match');
+        }
+    });
+
+    // Sample % relative to root
+    const rootValue = flamegraphRects.length > 0 ? flamegraphRects[0].value : 0;
+    const pct = rootValue > 0 ? (matchSamples / rootValue * 100).toFixed(1) : '0.0';
+    matchesEl.textContent = matchCount + ' / ' + totalFrames + ' frames (' + pct + '%)';
+}
+
+document.getElementById('fg-search').addEventListener('input', debounce((e) => {
+    applyFlamegraphSearch(e.target.value.trim());
+}, 200));
+
+document.getElementById('fg-search-clear').addEventListener('click', () => {
+    const input = document.getElementById('fg-search');
+    input.value = '';
+    applyFlamegraphSearch('');
+    input.focus();
+});
+
+// Ctrl+F focuses search when flamegraph tab active
+document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+        const fgTab = document.getElementById('tab-flamegraph');
+        if (fgTab && fgTab.classList.contains('active')) {
+            e.preventDefault();
+            document.getElementById('fg-search').focus();
+        }
+    }
+});
 
 // --- Sessions ---
 function loadSessions() {
