@@ -62,14 +62,16 @@ class Addr2LinePipe:
     This makes batch processing predictable — N addresses in → 2N lines out.
     """
 
-    def __init__(self, binary, addr2line_bin='addr2line'):
+    def __init__(self, binary, addr2line_bin='addr2line', inline=False):
         self.binary = binary
         self.addr2line_bin = addr2line_bin
+        self.inline = inline
         self._proc = None
 
     def _ensure_started(self):
         if self._proc is None or self._proc.poll() is not None:
-            cmd = [self.addr2line_bin, '-e', self.binary, '-f']
+            flags = ['-f', '-i'] if self.inline else ['-f']
+            cmd = [self.addr2line_bin, '-e', self.binary] + flags
             try:
                 self._proc = subprocess.Popen(
                     ['stdbuf', '-oL'] + cmd,
@@ -148,6 +150,64 @@ class Addr2LinePipe:
 
         return results
 
+    def resolve_inline(self, addrs):
+        """Resolve addresses with inline expansion via sentinel protocol.
+
+        Returns {addr: [(func, file, line), ...]} where index 0 is innermost.
+        Processes one address at a time with a 0x0 sentinel to delimit output.
+        """
+        if not addrs:
+            return {}
+        self._ensure_started()
+
+        results = {}
+        try:
+            for addr in addrs:
+                self._proc.stdin.write(hex(addr) + '\n')
+                self._proc.stdin.write('0x0\n')
+                self._proc.stdin.flush()
+
+                chain = []
+                while True:
+                    func_line = self._proc.stdout.readline().strip()
+                    file_line = self._proc.stdout.readline().strip()
+
+                    if not func_line or not file_line:
+                        break
+
+                    file_line = re.sub(r'\s*\(discriminator \d+\)', '', file_line)
+
+                    # Sentinel detection: 0x0 produces ?? / ??:0
+                    if func_line == '??' and file_line.startswith('??'):
+                        if not chain:
+                            # ?? was from the real address; sentinel still pending
+                            self._proc.stdout.readline()
+                            self._proc.stdout.readline()
+                        break
+
+                    idx = file_line.rfind(':')
+                    if idx > 0:
+                        fpath = file_line[:idx]
+                        try:
+                            lineno = int(file_line[idx + 1:])
+                            chain.append((func_line, fpath, lineno))
+                        except ValueError:
+                            chain.append((func_line, '??', 0))
+                    else:
+                        chain.append((func_line, '??', 0))
+
+                results[addr] = chain if chain else [('??', '??', 0)]
+        except (BrokenPipeError, OSError):
+            if self._proc:
+                try:
+                    self._proc.kill()
+                    self._proc.wait(timeout=2)
+                except Exception:
+                    pass
+            self._proc = None
+
+        return results
+
     def close(self):
         if self._proc and self._proc.poll() is None:
             try:
@@ -165,11 +225,12 @@ class SourceMapper:
     """
 
     def __init__(self, source_dir, binary_path=None, map_file_path=None,
-                 addr2line_bin=None, path_map=None):
+                 addr2line_bin=None, path_map=None, inline=False):
         self.source_dir = os.path.abspath(source_dir)
         self.binary_path = binary_path
         self.addr2line_bin = addr2line_bin
         self.path_map = path_map or {}
+        self.inline = inline
 
         # Map file symbols
         self._map_symbols = {}
@@ -183,10 +244,24 @@ class SourceMapper:
         self._addr2line_cache = {}
         # Persistent addr2line pipes per binary
         self._pipes = {}
+        # Inline addr2line pipes per binary (use -i flag)
+        self._inline_pipes = {}
+        # Inline resolution cache: (binary, addr) -> [(func, file, line), ...] or None
+        self._inline_cache = {}
         # Source file index: basename -> [full_paths]
         self._source_index = None
         # Full path cache: reported_path -> actual_path
         self._path_cache = {}
+
+        # Probe inline support at startup
+        if self.inline:
+            if self._probe_inline_support():
+                print("[source_mapper] Inline resolution enabled (-i supported)",
+                      file=sys.stderr)
+            else:
+                self.inline = False
+                print("[source_mapper] Inline resolution disabled "
+                      "(-i not supported by addr2line)", file=sys.stderr)
 
     def _get_pipe(self, binary):
         """Get or create an addr2line pipe for a binary."""
@@ -196,6 +271,33 @@ class SourceMapper:
             else:
                 return None
         return self._pipes[binary]
+
+    def _get_inline_pipe(self, binary):
+        """Get or create an inline addr2line pipe for a binary."""
+        if binary not in self._inline_pipes:
+            if binary and os.path.isfile(binary) and self.addr2line_bin:
+                self._inline_pipes[binary] = Addr2LinePipe(
+                    binary, self.addr2line_bin, inline=True)
+            else:
+                return None
+        return self._inline_pipes[binary]
+
+    def _probe_inline_support(self):
+        """Check if addr2line supports the -i (inline) flag."""
+        binary = self.binary_path
+        if not binary or not self.addr2line_bin:
+            return False
+        if not os.path.isfile(binary):
+            return False
+        try:
+            r = subprocess.run(
+                [self.addr2line_bin, '-e', binary, '-f', '-i'],
+                input='0x0\n',
+                capture_output=True, text=True, timeout=5
+            )
+            return r.returncode == 0 and '??' in r.stdout
+        except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+            return False
 
     def _load_symbols(self, binary):
         """Load symbol table. Priority: map file → readelf."""
@@ -436,11 +538,82 @@ class SourceMapper:
         file_list.sort(key=lambda x: x['total_samples'], reverse=True)
         return file_list
 
+    def expand_inline_frames(self, samples):
+        """Expand inline frames in sample data using addr2line -i.
+
+        Returns a new sample list where each frame may be expanded into
+        multiple frames. Inlined frames have 'inlined': True.
+        Original samples are not modified.
+        """
+        if not self.inline:
+            return samples
+
+        # Step 1: Collect unique (binary, vaddr) pairs not yet cached
+        to_resolve = defaultdict(list)
+        for sample in samples:
+            for frame in sample['frames']:
+                binary = self.binary_path or frame.get('module', '')
+                if not binary:
+                    continue
+                vaddr = self._compute_vaddr(frame, binary)
+                if vaddr is not None and (binary, vaddr) not in self._inline_cache:
+                    to_resolve[binary].append(vaddr)
+
+        # Step 2: Resolve via inline pipes
+        for binary, addrs in to_resolve.items():
+            unique_addrs = list(set(addrs))
+            pipe = self._get_inline_pipe(binary)
+            if not pipe:
+                for addr in unique_addrs:
+                    self._inline_cache[(binary, addr)] = None
+                continue
+            results = pipe.resolve_inline(unique_addrs)
+            for addr in unique_addrs:
+                chain = results.get(addr)
+                if chain and len(chain) > 1:
+                    self._inline_cache[(binary, addr)] = chain
+                else:
+                    self._inline_cache[(binary, addr)] = None
+
+        # Step 3: Expand frames in each sample
+        expanded_samples = []
+        for sample in samples:
+            new_frames = []
+            for frame in sample['frames']:
+                binary = self.binary_path or frame.get('module', '')
+                vaddr = self._compute_vaddr(frame, binary) if binary else None
+                chain = self._inline_cache.get((binary, vaddr)) if vaddr else None
+
+                if chain:
+                    # chain[0] = innermost (most inlined)
+                    # chain[-1] = actual non-inlined function
+                    for j, (func, fpath, lineno) in enumerate(chain):
+                        new_frame = {
+                            'addr': frame['addr'],
+                            'func': func,
+                            'offset': frame['offset'] if j == len(chain) - 1 else '',
+                            'module': frame['module'],
+                        }
+                        if j < len(chain) - 1:
+                            new_frame['inlined'] = True
+                        new_frames.append(new_frame)
+                else:
+                    new_frames.append(frame)
+
+            expanded_sample = dict(sample)
+            expanded_sample['frames'] = new_frames
+            expanded_samples.append(expanded_sample)
+
+        return expanded_samples
+
     def close(self):
         """Clean up addr2line processes."""
         for pipe in self._pipes.values():
             pipe.close()
         self._pipes.clear()
+        for pipe in self._inline_pipes.values():
+            pipe.close()
+        self._inline_pipes.clear()
 
 
 def build_annotated_source(mapper, samples):

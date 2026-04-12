@@ -235,17 +235,22 @@ def build_flamegraph_data(samples):
             func_name = frame['func']
             child = node['_cmap'].get(func_name)
             if child is None:
-                child = {'name': func_name, 'value': 0, 'children': [], '_cmap': {}}
+                child = {'name': func_name, 'value': 0, 'children': [],
+                         '_cmap': {}, '_inlined': False}
                 node['children'].append(child)
                 node['_cmap'][func_name] = child
             child['value'] += 1
+            if frame.get('inlined'):
+                child['_inlined'] = True
             node = child
 
-    # Strip internal lookup maps before returning
+    # Strip internal lookup maps; promote _inlined to 'inlined' only when True
     stack = [root]
     while stack:
         n = stack.pop()
         del n['_cmap']
+        if n.pop('_inlined', False):
+            n['inlined'] = True
         stack.extend(n['children'])
 
     return root

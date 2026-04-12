@@ -37,6 +37,7 @@ class ServerConfig:
     tcp_port: int = 9999
     http_port: int = 8080
     ui_dir: str = ''
+    inline: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +176,13 @@ def probe_tools(cfg):
     if cfg.path_map:
         for k, v in cfg.path_map.items():
             print(f"[server]   path-map: {k} → {v}", file=sys.stderr)
+
+    # Inline resolution
+    if cfg.inline:
+        print("[server]   inline: enabled (will probe at mapper init)",
+              file=sys.stderr)
+    else:
+        print("[server]   inline: disabled (--no-inline)", file=sys.stderr)
 
     print("[server] ================================", file=sys.stderr)
 
@@ -320,16 +328,8 @@ def handle_agent_connection(conn, addr):
                   f"{len(samples)} new samples, {len(all_samples)} total, "
                   f"events: {event_types}", file=sys.stderr)
 
-            # Build per-event summaries
-            per_event = {}
-            for evt in event_types:
-                evt_samples = filter_samples_by_event(all_samples, evt)
-                per_event[evt] = {
-                    'function_summary': build_function_summary(evt_samples),
-                    'flamegraph': build_flamegraph_data(evt_samples),
-                    'source_files': mapper.get_files_with_samples(evt_samples)
-                                    if mapper else [],
-                }
+            # Build per-event summaries (with inline expansion)
+            per_event = build_per_event_data(all_samples, event_types, mapper)
 
             # Broadcast to UI
             broadcast_sse('event_types', event_types)
@@ -383,6 +383,43 @@ def _save_session(session_dir, session_id, addr, raw_chunks,
               file=sys.stderr)
     except Exception as e:
         print(f"[server] Error saving session: {e}", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# Per-event data builder (inline expansion + summaries)
+# ---------------------------------------------------------------------------
+
+def build_per_event_data(all_samples, event_types, mapper, source=False):
+    """Build per-event data dict for UI consumption.
+
+    Expands inline frames (if mapper has inline enabled) before building
+    flamegraph trees and function summaries.
+
+    Args:
+        all_samples: raw sample list
+        event_types: list of event type strings
+        mapper: SourceMapper instance (or None)
+        source: if True, include annotated source in the output
+    """
+    expanded = mapper.expand_inline_frames(all_samples) if mapper else all_samples
+
+    per_event = {}
+    for evt in event_types:
+        evt_expanded = filter_samples_by_event(expanded, evt)
+        evt_orig = filter_samples_by_event(all_samples, evt)
+        entry = {
+            'function_summary': build_function_summary(evt_expanded),
+            'flamegraph': build_flamegraph_data(evt_expanded),
+            'source_files': mapper.get_files_with_samples(evt_orig)
+                            if mapper else [],
+        }
+        if source:
+            if mapper:
+                entry['source'] = build_annotated_source(mapper, evt_orig)
+            else:
+                entry['source'] = {}
+        per_event[evt] = entry
+    return per_event
 
 
 # ---------------------------------------------------------------------------
@@ -468,18 +505,23 @@ def _render_flamegraph_svg(fg_root, total_samples, event_type):
     ]
 
     for r in rects:
+        inlined = r.get('inlined', False)
         hue = 30 + (_hash_code(r['name']) % 30)
-        sat = 80 + (_hash_code(r['name'] + 'x') % 20)
+        sat = 50 + (_hash_code(r['name'] + 'x') % 15) if inlined \
+            else 80 + (_hash_code(r['name'] + 'x') % 20)
         light = 45 + (_hash_code(r['name'] + 'y') % 15)
         color = f'hsl({hue}, {sat}%, {light}%)'
         y = height - (r['depth'] + 1) * row_height
         rw = max(r['w'] - 1, 1)
 
+        inlined_tag = ' (inlined)' if inlined else ''
         pct = f"{r['percent']:.1f}"
-        title = f"{_svg_escape(r['name'])} ({r['value']} samples, {pct}%)"
+        title = f"{_svg_escape(r['name'])}{inlined_tag} ({r['value']} samples, {pct}%)"
+        stroke = ' stroke-dasharray="3 2" stroke="rgba(0,0,0,0.3)" stroke-width="1"' \
+            if inlined else ''
         lines.append(f'<g>')
         lines.append(f'  <rect x="{r["x"]:.1f}" y="{y}" width="{rw:.1f}"'
-                     f' height="{row_height - 1}" fill="{color}" rx="1">'
+                     f' height="{row_height - 1}" fill="{color}" rx="1"{stroke}>'
                      f'<title>{title}</title></rect>')
         if r['w'] > 40:
             max_chars = int(r['w'] / 7)
@@ -495,10 +537,13 @@ def _render_flamegraph_svg(fg_root, total_samples, event_type):
 def _flatten_for_svg(node, depth, x, width, rects, total_samples):
     """Flatten flamegraph tree into list of rects for SVG export."""
     pct = (node['value'] / total_samples * 100) if total_samples > 0 else 0
-    rects.append({
+    entry = {
         'name': node['name'], 'value': node['value'], 'percent': pct,
         'depth': depth, 'x': x, 'w': width,
-    })
+    }
+    if node.get('inlined'):
+        entry['inlined'] = True
+    rects.append(entry)
     child_x = x
     for child in (node.get('children') or []):
         cw = (child['value'] / node['value']) * width if node['value'] > 0 else 0
@@ -661,15 +706,7 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
 
         if all_samples:
             mapper = state.source_mapper
-            per_event = {}
-            for evt in event_types:
-                evt_samples = filter_samples_by_event(all_samples, evt)
-                per_event[evt] = {
-                    'function_summary': build_function_summary(evt_samples),
-                    'flamegraph': build_flamegraph_data(evt_samples),
-                    'source_files': mapper.get_files_with_samples(evt_samples)
-                                    if mapper else [],
-                }
+            per_event = build_per_event_data(all_samples, event_types, mapper)
 
             for sse_event, data in [
                 ('event_types', event_types),
@@ -748,7 +785,10 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
             self._send_json({'error': 'no data available'})
             return
 
-        evt_samples = filter_samples_by_event(all_samples, event_type)
+        # Expand inline frames before building flamegraph
+        mapper = state.source_mapper
+        expanded = mapper.expand_inline_frames(all_samples) if mapper else all_samples
+        evt_samples = filter_samples_by_event(expanded, event_type)
         if not evt_samples:
             self._send_json({'error': f'no samples for event {event_type}'})
             return
@@ -804,13 +844,8 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
 
         elif fmt == 'json':
             event_types = get_event_types(all_samples)
-            per_event = {}
-            for evt in event_types:
-                evt_samples = filter_samples_by_event(all_samples, evt)
-                per_event[evt] = {
-                    'function_summary': build_function_summary(evt_samples),
-                    'flamegraph': build_flamegraph_data(evt_samples),
-                }
+            mapper = state.source_mapper
+            per_event = build_per_event_data(all_samples, event_types, mapper)
             export_data = {
                 'metadata': metadata,
                 'per_event': per_event,
@@ -882,21 +917,8 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
 
         event_types = get_event_types(all_samples)
         mapper = state.source_mapper
-
-        per_event = {}
-        for evt in event_types:
-            evt_samples = filter_samples_by_event(all_samples, evt)
-            entry = {
-                'function_summary': build_function_summary(evt_samples),
-                'flamegraph': build_flamegraph_data(evt_samples),
-            }
-            if mapper:
-                entry['source_files'] = mapper.get_files_with_samples(evt_samples)
-                entry['source'] = build_annotated_source(mapper, evt_samples)
-            else:
-                entry['source_files'] = []
-                entry['source'] = {}
-            per_event[evt] = entry
+        per_event = build_per_event_data(all_samples, event_types, mapper,
+                                         source=True)
 
         self._send_json({'metadata': metadata, 'per_event': per_event})
 
@@ -949,6 +971,12 @@ def main():
     parser.add_argument('--max-samples', type=int, default=500000,
                         help='Max accumulated samples before oldest are dropped '
                              '(default: 500000)')
+    parser.add_argument('--inline', action='store_true', default=True,
+                        dest='inline',
+                        help='Enable inline function resolution via '
+                             'addr2line -i (default)')
+    parser.add_argument('--no-inline', action='store_false', dest='inline',
+                        help='Disable inline function resolution')
     args = parser.parse_args()
 
     # Parse path-map
@@ -1009,6 +1037,7 @@ def main():
         tcp_port=args.port,
         http_port=args.http_port,
         ui_dir=ui_dir,
+        inline=args.inline,
     )
 
     os.makedirs(config.sessions_dir, exist_ok=True)
@@ -1027,6 +1056,7 @@ def main():
         map_file_path=config.map_file_path,
         addr2line_bin=config.addr2line_bin,
         path_map=config.path_map or {},
+        inline=config.inline,
     )
 
     # Create shared state

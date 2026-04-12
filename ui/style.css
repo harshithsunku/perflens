@@ -477,6 +477,14 @@ main {
 #flamegraph-container g.fg-dim text { opacity: 0.3; }
 #flamegraph-container g.fg-match rect { stroke: #fff; stroke-width: 1; }
 
+/* Inlined frames: dashed border + lower saturation */
+#flamegraph-container g[data-inlined] rect {
+    stroke-dasharray: 3 2;
+    stroke: rgba(255, 255, 255, 0.35);
+    stroke-width: 1;
+}
+#flamegraph-container g[data-inlined] text { opacity: 0.85; }
+
 /* Flame graph */
 #flamegraph-container {
     background: #0d1117;

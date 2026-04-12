@@ -643,16 +643,19 @@ function renderFlamegraph(data, totalSamples) {
     let svg = '<svg width="' + width + '" height="' + height + '" xmlns="http://www.w3.org/2000/svg">';
     for (let idx = 0; idx < flamegraphRects.length; idx++) {
         const r = flamegraphRects[idx];
+        const inlined = r.inlined;
         const hue = 30 + (hashCode(r.name) % 30);
-        const sat = 80 + (hashCode(r.name + 'x') % 20);
+        const sat = inlined ? 50 + (hashCode(r.name + 'x') % 15) : 80 + (hashCode(r.name + 'x') % 20);
         const light = 45 + (hashCode(r.name + 'y') % 15);
         const color = 'hsl(' + hue + ', ' + sat + '%, ' + light + '%)';
         const y = height - (r.depth + 1) * rowHeight;
+        const inlinedAttr = inlined ? ' data-inlined="1"' : '';
+        const inlinedTag = inlined ? ' (inlined)' : '';
 
-        svg += '<g data-idx="' + idx + '" style="cursor:pointer">';
+        svg += '<g data-idx="' + idx + '"' + inlinedAttr + ' style="cursor:pointer">';
         svg += '<rect x="' + r.x + '" y="' + y + '" width="' + Math.max(r.w - 1, 1) +
                '" height="' + (rowHeight - 1) + '" fill="' + color + '" rx="1">' +
-               '<title>' + escapeHtml(r.name) + ' (' + r.value + ' samples, ' +
+               '<title>' + escapeHtml(r.name) + inlinedTag + ' (' + r.value + ' samples, ' +
                r.percent.toFixed(1) + '%)</title></rect>';
         if (r.w > 40) {
             const maxChars = Math.floor(r.w / 7);
@@ -715,7 +718,8 @@ function renderFlamegraph(data, totalSamples) {
 
 function flattenTree(node, depth, x, width, rects, totalSamples) {
     const percent = totalSamples > 0 ? (node.value / totalSamples * 100) : 0;
-    rects.push({ name: node.name, value: node.value, percent, depth, x, w: width, node });
+    rects.push({ name: node.name, value: node.value, percent, depth, x, w: width,
+                 node, inlined: !!node.inlined });
 
     let maxDepth = depth;
     let childX = x;
