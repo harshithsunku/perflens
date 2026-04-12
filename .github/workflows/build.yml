@@ -195,23 +195,23 @@ jobs:
           - arch: x86_64
             cross: ''
             cross_pkg: ''
-            toolchain_url: ''
+            toolchain_asset: ''
           - arch: aarch64
             cross: 'aarch64-linux-gnu-'
             cross_pkg: 'gcc-aarch64-linux-gnu'
-            toolchain_url: ''
+            toolchain_asset: ''
           - arch: aarch64_be
             cross: 'aarch64_be-linux-musl-'
             cross_pkg: ''
-            toolchain_url: 'https://github.com/harshithsunku/perflens/releases/download/toolchains/aarch64_be-linux-musl-cross.tgz'
+            toolchain_asset: 'aarch64_be-linux-musl-cross.tgz'
           - arch: armv7l
             cross: 'arm-linux-gnueabihf-'
             cross_pkg: 'gcc-arm-linux-gnueabihf'
-            toolchain_url: ''
+            toolchain_asset: ''
           - arch: armeb
             cross: 'armeb-linux-musleabihf-'
             cross_pkg: ''
-            toolchain_url: 'https://github.com/harshithsunku/perflens/releases/download/toolchains/armeb-linux-musleabihf-cross.tgz'
+            toolchain_asset: 'armeb-linux-musleabihf-cross.tgz'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -223,17 +223,15 @@ jobs:
           sudo apt-get install -y -qq ${{ matrix.cross_pkg }}
 
       - name: Install cross-compiler (musl toolchain)
-        if: matrix.toolchain_url != ''
+        if: matrix.toolchain_asset != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          for attempt in 1 2 3; do
-            echo "Download attempt $attempt..."
-            if curl -fsSL --connect-timeout 30 --retry 3 \
-                 "${{ matrix.toolchain_url }}" | tar xz -C /opt; then
-              break
-            fi
-            [ "$attempt" -lt 3 ] && sleep 10
-          done
-          TOOLCHAIN_DIR="/opt/$(basename "${{ matrix.toolchain_url }}" .tgz)"
+          gh release download toolchains \
+            --pattern "${{ matrix.toolchain_asset }}" \
+            --dir /tmp
+          tar xzf "/tmp/${{ matrix.toolchain_asset }}" -C /opt
+          TOOLCHAIN_DIR="/opt/$(basename "${{ matrix.toolchain_asset }}" .tgz)"
           echo "${TOOLCHAIN_DIR}/bin" >> "$GITHUB_PATH"
           "${TOOLCHAIN_DIR}/bin/${{ matrix.cross }}gcc" --version | head -1
 
