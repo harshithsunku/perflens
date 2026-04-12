@@ -203,7 +203,7 @@ jobs:
           - arch: aarch64_be
             cross: 'aarch64_be-linux-musl-'
             cross_pkg: ''
-            toolchain_url: 'https://more.musl.cc/11/x86_64-linux-musl/aarch64_be-linux-musl-cross.tgz'
+            toolchain_url: 'https://github.com/harshithsunku/perflens/releases/download/toolchains/aarch64_be-linux-musl-cross.tgz'
           - arch: armv7l
             cross: 'arm-linux-gnueabihf-'
             cross_pkg: 'gcc-arm-linux-gnueabihf'
@@ -211,7 +211,7 @@ jobs:
           - arch: armeb
             cross: 'armeb-linux-musleabihf-'
             cross_pkg: ''
-            toolchain_url: 'https://more.musl.cc/11/x86_64-linux-musl/armeb-linux-musleabihf-cross.tgz'
+            toolchain_url: 'https://github.com/harshithsunku/perflens/releases/download/toolchains/armeb-linux-musleabihf-cross.tgz'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
