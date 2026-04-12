@@ -3,8 +3,9 @@
 # Usage:
 #   make                               # native build
 #   make CROSS=aarch64-linux-gnu-      # ARM64 little-endian
-#   make CROSS=aarch64_be-linux-gnu-   # ARM64 big-endian
-#   make CROSS=arm-linux-gnueabihf-    # ARMv7 32-bit
+#   make CROSS=aarch64_be-linux-musl-   # ARM64 big-endian (musl)
+#   make CROSS=arm-linux-gnueabihf-    # ARMv7 32-bit little-endian
+#   make CROSS=armeb-linux-musleabihf- # ARMv7 32-bit big-endian (musl)
 #   make CROSS=x86_64-linux-musl-      # x86_64 with musl (fully static)
 #   make all-cross                     # all cross targets
 #   make clean
@@ -36,7 +37,7 @@ clean:
 	rm -f $(TARGET) $(OBJS)
 
 # Cross-compile all supported targets — output into build/<arch>/
-CROSS_TARGETS = aarch64-linux-gnu- aarch64_be-linux-gnu- arm-linux-gnueabihf- x86_64-linux-musl-
+CROSS_TARGETS = aarch64-linux-gnu- aarch64_be-linux-musl- arm-linux-gnueabihf- armeb-linux-musleabihf- x86_64-linux-musl-
 
 all-cross:
 	@for cross in $(CROSS_TARGETS); do \
