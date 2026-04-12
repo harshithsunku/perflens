@@ -203,7 +203,7 @@ jobs:
           - arch: aarch64_be
             cross: 'aarch64_be-linux-musl-'
             cross_pkg: ''
-            toolchain_url: 'https://musl.cc/aarch64_be-linux-musl-cross.tgz'
+            toolchain_url: 'https://more.musl.cc/11/x86_64-linux-musl/aarch64_be-linux-musl-cross.tgz'
           - arch: armv7l
             cross: 'arm-linux-gnueabihf-'
             cross_pkg: 'gcc-arm-linux-gnueabihf'
@@ -211,7 +211,7 @@ jobs:
           - arch: armeb
             cross: 'armeb-linux-musleabihf-'
             cross_pkg: ''
-            toolchain_url: 'https://musl.cc/armeb-linux-musleabihf-cross.tgz'
+            toolchain_url: 'https://more.musl.cc/11/x86_64-linux-musl/armeb-linux-musleabihf-cross.tgz'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -225,9 +225,17 @@ jobs:
       - name: Install cross-compiler (musl toolchain)
         if: matrix.toolchain_url != ''
         run: |
-          curl -fsSL "${{ matrix.toolchain_url }}" | tar xz -C /opt
+          for attempt in 1 2 3; do
+            echo "Download attempt $attempt..."
+            if curl -fsSL --connect-timeout 30 --retry 3 \
+                 "${{ matrix.toolchain_url }}" | tar xz -C /opt; then
+              break
+            fi
+            [ "$attempt" -lt 3 ] && sleep 10
+          done
           TOOLCHAIN_DIR="/opt/$(basename "${{ matrix.toolchain_url }}" .tgz)"
           echo "${TOOLCHAIN_DIR}/bin" >> "$GITHUB_PATH"
+          "${TOOLCHAIN_DIR}/bin/${{ matrix.cross }}gcc" --version | head -1
 
       - name: Read version
         id: ver
