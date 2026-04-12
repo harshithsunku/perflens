@@ -27,7 +27,7 @@ No frontend frameworks. No pip dependencies. No Docker. Pure Python stdlib on th
 - **Interactive SVG flame graphs** — vanilla JS, no d3, no bundling; zoomable, hoverable
 - **ARM + x86** — same agent code runs on aarch64, aarch64_be, armv7l, x86_64
 - **Session save / replay** — raw chunks saved to disk, replayed lazily on demand via the UI's session list
-- **C agent option** — single static binary with vendored zstd, no runtime dependencies; cross-compiles to aarch64, armv7l, x86_64
+- **C agent option** — single static binary with vendored zstd, no runtime dependencies; cross-compiles to aarch64, aarch64_be, armv7l, armeb, x86_64
 - **Portable release packages** — PyInstaller-frozen server for Linux/macOS/Windows, scripted agent for any Python 3.5+ host
 - **Capability probing** — the agent discovers which perf events and call-graph modes (`fp` / `dwarf` / `lbr`) actually work on the target before collecting
 - **Zstd compression** — typical perf script payloads compress 20–40× before hitting the wire
@@ -112,6 +112,11 @@ Pre-built server tarballs are published on every tagged release for:
 | macOS arm64 (Apple Silicon) | `perflens-server-<ver>-macos-arm64.tar.gz` |
 | Windows x86_64 | `perflens-server-<ver>-windows-x86_64.tar.gz` |
 | Agent (any Linux, Python 3.5+) | `perflens-agent-<ver>.tar.gz` |
+| C Agent — Linux x86_64 (static binary) | `perflens-agent-c-<ver>-linux-x86_64.tar.gz` |
+| C Agent — Linux aarch64 (static binary) | `perflens-agent-c-<ver>-linux-aarch64.tar.gz` |
+| C Agent — Linux aarch64 BE (static binary) | `perflens-agent-c-<ver>-linux-aarch64_be.tar.gz` |
+| C Agent — Linux armv7l (static binary) | `perflens-agent-c-<ver>-linux-armv7l.tar.gz` |
+| C Agent — Linux armv7 BE (static binary) | `perflens-agent-c-<ver>-linux-armeb.tar.gz` |
 
 > **Intel Mac users:** GitHub retired the free `macos-13` runner, so there's no pre-built macOS x86_64 tarball. Either build from source (`./build_package.sh --no-freeze --server`) or run the Linux tarball under a VM/container.
 
@@ -120,8 +125,11 @@ Pre-built server tarballs are published on every tagged release for:
 ```bash
 # Build (on your build machine)
 cd agent-c
-make                              # native x86_64
-make CROSS=aarch64-linux-gnu-     # cross-compile for ARM64
+make                                    # native x86_64
+make CROSS=aarch64-linux-gnu-           # ARM64 little-endian
+make CROSS=aarch64_be-linux-musl-       # ARM64 big-endian
+make CROSS=arm-linux-gnueabihf-         # ARMv7 little-endian
+make CROSS=armeb-linux-musleabihf-      # ARMv7 big-endian
 
 # Deploy (single file, no dependencies)
 scp perflens-agent user@device:/tmp/
@@ -249,7 +257,7 @@ The agent launcher auto-prepends the correct arch directory to `$PATH` based on 
 
 ### CI
 
-[`.github/workflows/build.yml`](.github/workflows/build.yml) builds the server on four runners (`ubuntu-latest`, `macos-latest`, `macos-13`, `windows-latest`) plus the agent once on Linux. Tagged pushes (`v*`) create a GitHub Release and attach all five tarballs with a platform-keyed download table.
+[`.github/workflows/build.yml`](.github/workflows/build.yml) builds the server on three runners (`ubuntu-latest`, `macos-latest`, `windows-latest`), the Python agent once on Linux, and the C agent for five architectures (x86_64, aarch64, aarch64_be, armv7l, armeb). Big-endian targets use musl toolchains from musl.cc since Ubuntu only ships little-endian sysroots. Tagged pushes (`v*`) create a GitHub Release and attach all tarballs with a platform-keyed download table.
 
 ---
 
