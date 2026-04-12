@@ -577,7 +577,8 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
         elif path == '/api/export/flamegraph':
             params = parse_qs(parsed.query)
             event = params.get('event', ['cycles'])[0]
-            self._handle_export_flamegraph(event)
+            session_id = params.get('session', [None])[0]
+            self._handle_export_flamegraph(event, session_id)
         elif path.startswith('/api/export/session/'):
             session_id = path.split('/api/export/session/')[1].rstrip('/')
             params = parse_qs(parsed.query)
@@ -730,10 +731,18 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
             self._send_json({'file': file_path, 'lines': [],
                              'error': 'no data for file'})
 
-    def _handle_export_flamegraph(self, event_type):
-        """Export current flamegraph as standalone SVG."""
-        with state.lock:
-            all_samples = list(state.all_samples)
+    def _handle_export_flamegraph(self, event_type, session_id=None):
+        """Export flamegraph as standalone SVG. Uses session data if provided."""
+        all_samples = None
+
+        # Try session first (saved or live)
+        if session_id and session_id != 'live':
+            all_samples, _ = _load_session_samples(session_id)
+
+        # Fall back to live data
+        if not all_samples:
+            with state.lock:
+                all_samples = list(state.all_samples)
 
         if not all_samples:
             self._send_json({'error': 'no data available'})

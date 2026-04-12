@@ -138,7 +138,8 @@ document.getElementById('export-menu').addEventListener('click', (e) => {
     const sessionId = state.replaySessionId || 'live';
 
     if (action === 'svg') {
-        window.open('/api/export/flamegraph?event=' + encodeURIComponent(event), '_blank');
+        window.open('/api/export/flamegraph?event=' + encodeURIComponent(event) +
+            '&session=' + encodeURIComponent(sessionId), '_blank');
     } else if (action === 'collapsed') {
         window.open('/api/export/session/' + encodeURIComponent(sessionId) + '?format=collapsed', '_blank');
     } else if (action === 'json') {
