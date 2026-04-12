@@ -18,6 +18,8 @@ let state = {
 let evtSource = null;
 let flamegraphRects = [];   // parallel to SVG <g> elements for click handling
 let errorTimer = null;
+let fgClickTimer = null;    // single-click vs double-click disambiguation
+let fgContextMenu = null;   // persistent context menu element
 
 // --- Stat card config ---
 const STAT_ORDER = [
@@ -313,30 +315,57 @@ function findNodeByName(tree, name) {
 }
 
 // --- Function Table ---
+let functionSortKey = 'self';  // 'self' or 'total'
+
 function renderFunctionTable(data) {
     const tbody = document.getElementById('function-tbody');
     const scrollY = window.scrollY;
 
     if (!data.functions || data.functions.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="5" class="empty">No data yet</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="6" class="empty">No data yet</td></tr>';
         return;
     }
 
-    const maxPercent = data.functions[0].percent;
-    tbody.innerHTML = data.functions.map((f, i) => {
-        const barWidth = Math.max(2, (f.percent / Math.max(maxPercent, 1)) * 100);
-        const hue = Math.max(0, 120 - (f.percent / Math.max(maxPercent, 1)) * 120);
-        const barColor = 'hsl(' + hue + ', 70%, 45%)';
+    // Sort by selected column
+    const sorted = data.functions.slice().sort((a, b) => {
+        if (functionSortKey === 'total') {
+            return (b.total_samples || 0) - (a.total_samples || 0);
+        }
+        return (b.self_samples || b.samples) - (a.self_samples || a.samples);
+    });
+
+    const maxSelfPct = sorted.reduce((m, f) => Math.max(m, f.self_percent || f.percent || 0), 0);
+    const maxTotalPct = sorted.reduce((m, f) => Math.max(m, f.total_percent || 0), 0);
+
+    tbody.innerHTML = sorted.map((f, i) => {
+        const selfPct = f.self_percent !== undefined ? f.self_percent : (f.percent || 0);
+        const totalPct = f.total_percent || 0;
+        const selfSamples = f.self_samples !== undefined ? f.self_samples : (f.samples || 0);
+        const totalSamples = f.total_samples || 0;
+
+        // Self bar
+        const selfBarW = Math.max(2, (selfPct / Math.max(maxSelfPct, 1)) * 100);
+        const selfHue = Math.max(0, 120 - (selfPct / Math.max(maxSelfPct, 1)) * 120);
+        const selfColor = 'hsl(' + selfHue + ', 70%, 45%)';
+
+        // Total bar
+        const totalBarW = Math.max(2, (totalPct / Math.max(maxTotalPct, 1)) * 100);
+        const totalColor = 'hsl(210, 50%, 40%)';
+
         const moduleName = f.module ? f.module.split('/').pop() : '';
         return '<tr data-func="' + escapeAttr(f.name) + '">' +
             '<td>' + (i + 1) + '</td>' +
             '<td><strong>' + escapeHtml(f.name) + '</strong></td>' +
             '<td title="' + escapeAttr(f.module) + '">' + escapeHtml(moduleName) + '</td>' +
             '<td><div class="cpu-bar">' +
-                '<div class="cpu-bar-fill" style="width:' + barWidth + '%;background:' + barColor + '"></div>' +
-                '<span class="cpu-bar-text">' + f.percent.toFixed(1) + '%</span>' +
+                '<div class="cpu-bar-fill" style="width:' + selfBarW + '%;background:' + selfColor + '"></div>' +
+                '<span class="cpu-bar-text">' + selfPct.toFixed(1) + '%</span>' +
             '</div></td>' +
-            '<td>' + f.samples + '</td></tr>';
+            '<td><div class="cpu-bar total-bar">' +
+                '<div class="cpu-bar-fill" style="width:' + totalBarW + '%;background:' + totalColor + '"></div>' +
+                '<span class="cpu-bar-text">' + totalPct.toFixed(1) + '%</span>' +
+            '</div></td>' +
+            '<td title="self: ' + selfSamples + ' / total: ' + totalSamples + '">' + selfSamples + '</td></tr>';
     }).join('');
 
     // Restore scroll position
@@ -348,7 +377,21 @@ function renderFunctionTable(data) {
             showSourceForFunction(row.dataset.func);
         });
     });
+
+    // Sort header highlighting
+    document.querySelectorAll('#function-table th.sortable').forEach(th => {
+        th.classList.toggle('active', th.dataset.sort === functionSortKey);
+    });
 }
+
+// Column header sort click handler
+document.querySelectorAll('#function-table th.sortable').forEach(th => {
+    th.addEventListener('click', () => {
+        functionSortKey = th.dataset.sort;
+        const evtData = state.perEvent[state.selectedEvent];
+        if (evtData) renderFunctionTable(evtData.function_summary);
+    });
+});
 
 // --- Source: show for function ---
 function showSourceForFunction(funcName) {
@@ -520,6 +563,24 @@ function renderSourceView(filePath, lines) {
             if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
         });
     }
+
+    // Highlight function name if navigating from flamegraph
+    if (state.pendingHighlight) {
+        const funcName = state.pendingHighlight;
+        state.pendingHighlight = null;
+        requestAnimationFrame(() => {
+            const sourceLines = container.querySelectorAll('.source-line');
+            for (const sl of sourceLines) {
+                const code = sl.querySelector('.line-code');
+                if (code && code.textContent.includes(funcName)) {
+                    sl.classList.add('source-flash');
+                    sl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    sl.addEventListener('animationend', () => sl.classList.remove('source-flash'), { once: true });
+                    break;
+                }
+            }
+        });
+    }
 }
 
 // --- Flame Graph ---
@@ -576,14 +637,32 @@ function renderFlamegraph(data, totalSamples) {
     html += svg;
     container.innerHTML = html;
 
-    // Click-to-zoom
+    // Single click → source, double click → zoom, right click → context menu
     container.querySelectorAll('g[data-idx]').forEach(g => {
         g.addEventListener('click', () => {
+            clearTimeout(fgClickTimer);
+            fgClickTimer = setTimeout(() => {
+                const rect = flamegraphRects[parseInt(g.dataset.idx)];
+                if (rect && rect.name !== 'root') {
+                    state.pendingHighlight = rect.name;
+                    showSourceForFunction(rect.name);
+                }
+            }, 250);
+        });
+
+        g.addEventListener('dblclick', () => {
+            clearTimeout(fgClickTimer);
             const rect = flamegraphRects[parseInt(g.dataset.idx)];
             if (rect && rect.node && rect.node.children && rect.node.children.length > 0) {
                 state.flamegraphZoom = { name: rect.name, node: rect.node };
                 renderFlamegraph(rect.node, rect.node.value);
             }
+        });
+
+        g.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            const rect = flamegraphRects[parseInt(g.dataset.idx)];
+            if (rect) showFgContextMenu(e.clientX, e.clientY, rect.name, parseInt(g.dataset.idx));
         });
     });
 
@@ -687,6 +766,57 @@ function replaySession(sessionId) {
             switchToTab('functions');
         })
         .catch(err => showError('Failed to load session: ' + err));
+}
+
+// --- Flamegraph context menu (created once, reused) ---
+(function initFgContextMenu() {
+    fgContextMenu = document.createElement('div');
+    fgContextMenu.id = 'fg-context-menu';
+    fgContextMenu.className = 'fg-context-menu';
+    fgContextMenu.innerHTML =
+        '<div class="fg-ctx-item" data-action="source">View source</div>' +
+        '<div class="fg-ctx-item" data-action="zoom">Zoom in</div>' +
+        '<div class="fg-ctx-item" data-action="copy">Copy function name</div>';
+    document.body.appendChild(fgContextMenu);
+
+    fgContextMenu.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const item = e.target.closest('.fg-ctx-item');
+        if (!item) return;
+        const action = item.dataset.action;
+        const funcName = fgContextMenu.dataset.func;
+        const rectIdx = parseInt(fgContextMenu.dataset.idx);
+        hideFgContextMenu();
+
+        if (action === 'source' && funcName && funcName !== 'root') {
+            state.pendingHighlight = funcName;
+            showSourceForFunction(funcName);
+        } else if (action === 'zoom') {
+            const rect = flamegraphRects[rectIdx];
+            if (rect && rect.node && rect.node.children && rect.node.children.length > 0) {
+                state.flamegraphZoom = { name: rect.name, node: rect.node };
+                renderFlamegraph(rect.node, rect.node.value);
+            }
+        } else if (action === 'copy' && funcName) {
+            navigator.clipboard.writeText(funcName).catch(() => {});
+        }
+    });
+
+    document.addEventListener('click', hideFgContextMenu);
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideFgContextMenu(); });
+    window.addEventListener('scroll', hideFgContextMenu, true);
+})();
+
+function showFgContextMenu(x, y, funcName, rectIdx) {
+    fgContextMenu.dataset.func = funcName;
+    fgContextMenu.dataset.idx = rectIdx;
+    fgContextMenu.style.left = x + 'px';
+    fgContextMenu.style.top = y + 'px';
+    fgContextMenu.classList.add('visible');
+}
+
+function hideFgContextMenu() {
+    if (fgContextMenu) fgContextMenu.classList.remove('visible');
 }
 
 // --- Init ---

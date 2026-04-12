@@ -237,6 +237,24 @@ main {
     top: 0;
 }
 
+#function-table th.sortable {
+    cursor: pointer;
+    user-select: none;
+}
+
+#function-table th.sortable:hover {
+    color: #7ec8e3;
+}
+
+#function-table th.sortable.active {
+    color: #e94560;
+    border-bottom-color: #e94560;
+}
+
+.total-bar {
+    background: #0a2240;
+}
+
 #function-table td {
     padding: 6px 12px;
     border-bottom: 1px solid #1a1a3e;
@@ -452,6 +470,36 @@ main {
 }
 
 .replay-btn:hover { background: #53a8b6; color: #0d1117; }
+
+/* Flamegraph context menu */
+.fg-context-menu {
+    position: fixed;
+    background: #16213e;
+    border: 1px solid #0f3460;
+    border-radius: 4px;
+    padding: 4px 0;
+    min-width: 160px;
+    z-index: 1000;
+    display: none;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+}
+.fg-context-menu.visible { display: block; }
+
+.fg-ctx-item {
+    padding: 6px 16px;
+    font-size: 13px;
+    color: #e0e0e0;
+    cursor: pointer;
+    font-family: inherit;
+}
+.fg-ctx-item:hover { background: #0f3460; color: #53a8b6; }
+
+/* Source flash highlight (flamegraph → source navigation) */
+@keyframes source-flash {
+    0% { background: rgba(83, 168, 182, 0.35); }
+    100% { background: transparent; }
+}
+.source-flash { animation: source-flash 1.5s ease-out; }
 
 /* Loading animation */
 @keyframes pulse {

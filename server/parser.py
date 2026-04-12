@@ -172,22 +172,50 @@ def aggregate_functions(samples):
 
 
 def build_function_summary(samples):
-    """Build a sorted function summary for display."""
-    func_counts = aggregate_functions(samples)
+    """Build a sorted function summary for display.
+
+    Each function gets two counts:
+      - self_samples / self_percent: function was the leaf (top of stack)
+      - total_samples / total_percent: function appeared anywhere in the stack
+
+    For backward compat, 'samples' and 'percent' are aliases for self.
+    """
     total = len(samples)
     if total == 0:
         return {'total_samples': 0, 'functions': []}
 
+    # Self counts (leaf frame only)
+    self_counts = aggregate_functions(samples)
+
+    # Total/inclusive counts (function anywhere in the stack)
+    total_counts = defaultdict(int)
+    for sample in samples:
+        seen = set()
+        for frame in sample['frames']:
+            key = (frame['func'], frame['module'])
+            if key not in seen:
+                seen.add(key)
+                total_counts[key] += 1
+
+    # Merge into function list
+    all_keys = set(self_counts.keys()) | set(total_counts.keys())
     func_list = []
-    for (func, module), count in func_counts.items():
+    for key in all_keys:
+        func, module = key
+        sc = self_counts.get(key, 0)
+        tc = total_counts.get(key, 0)
         func_list.append({
             'name': func,
             'module': module,
-            'samples': count,
-            'percent': round(100.0 * count / total, 2)
+            'samples': sc,
+            'percent': round(100.0 * sc / total, 2),
+            'self_samples': sc,
+            'self_percent': round(100.0 * sc / total, 2),
+            'total_samples': tc,
+            'total_percent': round(100.0 * tc / total, 2),
         })
 
-    func_list.sort(key=lambda x: x['samples'], reverse=True)
+    func_list.sort(key=lambda x: x['self_samples'], reverse=True)
     return {'total_samples': total, 'functions': func_list}
 
 
@@ -318,7 +346,7 @@ if __name__ == '__main__':
         summary = build_function_summary(filtered)
         print(f"\n=== {evt} ({summary['total_samples']} samples) ===")
         for f in summary['functions'][:10]:
-            print(f"  {f['percent']:6.1f}%  {f['samples']:5d}  {f['name']:<30s}  ({f['module']})")
+            print(f"  self:{f['self_percent']:5.1f}%  total:{f['total_percent']:5.1f}%  {f['self_samples']:5d}/{f['total_samples']:5d}  {f['name']:<30s}  ({f['module']})")
 
     if stat_text:
         print("\n=== Perf Stat ===")
