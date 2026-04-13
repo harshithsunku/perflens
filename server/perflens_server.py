@@ -1021,6 +1021,13 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
             self._handle_source_request(file_path)
         elif path == '/api/wizard/state':
             self._send_json(get_wizard_state())
+        elif path == '/api/index/status':
+            mapper = state.source_mapper
+            if mapper:
+                self._send_json(mapper.get_index_status())
+            else:
+                self._send_json({'indexing': False, 'symbols_loaded': 0,
+                                 'source_files_found': 0})
         elif path == '/api/browse':
             params = parse_qs(parsed.query)
             browse_path = params.get('path', ['/'])[0]
@@ -1183,6 +1190,8 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
             inline=config.inline,
         )
         state.source_mapper = mapper
+        # Pre-index symbols and DWARF source files in background
+        threading.Thread(target=mapper.pre_index, daemon=True).start()
         update_wizard_state({'binary_path': path})
         self._send_json({'ok': True, 'path': path})
 
@@ -1215,6 +1224,8 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
             inline=config.inline,
         )
         state.source_mapper = mapper
+        # Pre-index in background
+        threading.Thread(target=mapper.pre_index, daemon=True).start()
         update_wizard_state({'source_dir': path})
         self._send_json({'ok': True, 'path': path})
 

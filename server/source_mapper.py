@@ -253,6 +253,12 @@ class SourceMapper:
         # Full path cache: reported_path -> actual_path
         self._path_cache = {}
 
+        # Pre-indexing state (populated by pre_index())
+        self._indexing = False
+        self._dwarf_source_files = []  # list of source file paths from DWARF
+        self._index_symbols_loaded = 0
+        self._index_source_files_found = 0
+
         # Probe inline support at startup
         if self.inline:
             if self._probe_inline_support():
@@ -661,6 +667,110 @@ class SourceMapper:
         for pipe in self._inline_pipes.values():
             pipe.close()
         self._inline_pipes.clear()
+
+    # ------------------------------------------------------------------
+    # Pre-indexing: eagerly load symbols and DWARF source file paths
+    # ------------------------------------------------------------------
+
+    def pre_index(self):
+        """Eagerly load symbol table and extract DWARF source files.
+
+        Called in a background thread when the user configures a binary.
+        Populates caches so the first profiling chunk is instant.
+        """
+        self._indexing = True
+        self._index_symbols_loaded = 0
+        self._index_source_files_found = 0
+        self._dwarf_source_files = []
+
+        try:
+            if self.binary_path:
+                # 1. Load symbol table (populates _symbol_cache)
+                symbols = self._load_symbols(self.binary_path)
+                self._index_symbols_loaded = len(symbols)
+                print(f"[source_mapper] Pre-indexed {len(symbols)} symbols",
+                      file=sys.stderr)
+
+                # 2. Extract DWARF compilation unit source files
+                dwarf_files = self._extract_dwarf_source_files(self.binary_path)
+                self._dwarf_source_files = dwarf_files
+                self._index_source_files_found = len(dwarf_files)
+                print(f"[source_mapper] DWARF: {len(dwarf_files)} source files",
+                      file=sys.stderr)
+
+            # 3. Build source directory index
+            self._build_source_index()
+            if self._source_index:
+                total = sum(len(v) for v in self._source_index.values())
+                print(f"[source_mapper] Source index: {total} files "
+                      f"in {self.source_dir}", file=sys.stderr)
+        finally:
+            self._indexing = False
+
+    def _extract_dwarf_source_files(self, binary):
+        """Extract source file paths from DWARF debug info.
+
+        Uses 'readelf --debug-dump=decodedline' to get compilation unit
+        file tables.  Returns a sorted list of unique absolute paths
+        that appear in the debug info.
+        """
+        if not binary or not os.path.isfile(binary):
+            return []
+
+        files = set()
+        proc = None
+        try:
+            proc = subprocess.Popen(
+                ['readelf', '--debug-dump=decodedline', '-W', binary],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                bufsize=1,
+            )
+            # The decoded line table has lines like:
+            #   /full/path/to/file.c                          42       0x401234  ...
+            # or CU header lines like:
+            #   CU: /full/path/to/file.c:
+            for line in proc.stdout:
+                line = line.strip()
+                if not line or line.startswith('Decoded'):
+                    continue
+                # CU header: "CU: path/to/file.c:"
+                if line.startswith('CU:'):
+                    cu_path = line[3:].strip().rstrip(':')
+                    if cu_path and cu_path != '.' and '/' in cu_path:
+                        files.add(cu_path)
+                    continue
+                # Decoded line entry: path  line  addr  [flags]
+                # The path has no spaces (or is the first space-delimited token)
+                parts = line.split()
+                if len(parts) >= 3 and '/' in parts[0]:
+                    # Validate: second field should be a line number
+                    try:
+                        int(parts[1])
+                        files.add(parts[0])
+                    except ValueError:
+                        pass
+            proc.wait(timeout=300)
+        except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+            if proc:
+                proc.kill()
+                proc.wait()
+        finally:
+            if proc and proc.poll() is None:
+                proc.kill()
+                proc.wait()
+
+        return sorted(files)
+
+    def get_index_status(self):
+        """Return current indexing status for the UI."""
+        return {
+            'indexing': self._indexing,
+            'symbols_loaded': self._index_symbols_loaded,
+            'source_files_found': self._index_source_files_found,
+            'dwarf_source_files': self._dwarf_source_files,
+        }
 
 
 def build_annotated_source(mapper, samples):

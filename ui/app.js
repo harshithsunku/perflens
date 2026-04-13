@@ -1054,7 +1054,7 @@ function wizardGoToStep(step) {
     // Footer buttons
     document.getElementById('wiz-back').style.display = step > 1 ? '' : 'none';
     document.getElementById('wiz-next').style.display = step < 6 ? '' : 'none';
-    document.getElementById('wiz-skip').style.display = step === 3 ? '' : 'none';
+    document.getElementById('wiz-skip').style.display = step === 4 ? '' : 'none';
 
     // Step-specific actions
     if (step === 2 && wizardData.connected) wizardVerifyPerf();
@@ -1068,9 +1068,9 @@ document.getElementById('wiz-back').addEventListener('click', function() {
 document.getElementById('wiz-next').addEventListener('click', function() {
     if (wizardStep < 6) {
         if (!wizardValidateStep(wizardStep)) return;
-        // Apply binary/source config when leaving step 3
-        if (wizardStep === 3) {
-            wizardApplyStep3(function() { wizardGoToStep(wizardStep + 1); });
+        // Apply binary/source config when leaving step 4 (Binary)
+        if (wizardStep === 4) {
+            wizardApplyStep4(function() { wizardGoToStep(wizardStep + 1); });
             return;
         }
         wizardGoToStep(wizardStep + 1);
@@ -1078,7 +1078,7 @@ document.getElementById('wiz-next').addEventListener('click', function() {
 });
 
 document.getElementById('wiz-skip').addEventListener('click', function() {
-    // Skip is only visible on step 3 (binary/source)
+    // Skip is only visible on step 4 (binary/source)
     wizardGoToStep(wizardStep + 1);
 });
 
@@ -1087,7 +1087,7 @@ function wizardValidateStep(step) {
         wizardSetStatus('wiz-connect-status', 'Connect to agent first', 'error');
         return false;
     }
-    if (step === 4) {
+    if (step === 3) {
         var pid = document.getElementById('wiz-pid').value;
         if (!pid) {
             wizardSetStatus('wiz-pid-status', 'Select or enter a PID', 'error');
@@ -1148,10 +1148,11 @@ document.getElementById('wiz-connect-btn').addEventListener('click', function() 
     });
 });
 
-// --- Step 2: Verify Perf ---
+// --- Step 2: Verify Perf & Probe Capabilities ---
 function wizardVerifyPerf() {
     var result = document.getElementById('wiz-perf-result');
     result.innerHTML = '<div class="wiz-spinner">Verifying perf tool...</div>';
+    document.getElementById('wiz-caps-section').classList.add('hidden');
 
     fetch('/api/agent/command', {
         method: 'POST',
@@ -1179,14 +1180,59 @@ function wizardVerifyPerf() {
                 html += '<div class="wiz-warn">&#9888; perf_event_paranoid=' + data.perf_event_paranoid +
                     ' &mdash; some events may be unavailable</div>';
             }
+            result.innerHTML = html;
+            // Now probe capabilities
+            if (data.functional) wizardProbeCapabilities();
         } else {
             html += '<div class="wiz-err">&#10007; perf not found: ' +
                 escapeHtml(data.error || 'not available') + '</div>';
+            result.innerHTML = html;
         }
-        result.innerHTML = html;
     })
     .catch(function(err) {
         result.innerHTML = '<span class="wiz-err">Command failed: ' + escapeHtml(String(err)) + '</span>';
+    });
+}
+
+function wizardProbeCapabilities() {
+    var capsSection = document.getElementById('wiz-caps-section');
+    var eventsEl = document.getElementById('wiz-caps-events');
+    var cgEl = document.getElementById('wiz-caps-callgraph');
+
+    eventsEl.innerHTML = '<div class="wiz-spinner">Probing supported events...</div>';
+    capsSection.classList.remove('hidden');
+
+    fetch('/api/agent/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cmd: 'reprobe', args: {}, timeout: 120 }),
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (!data.ok) {
+            eventsEl.innerHTML = '<span class="wiz-err">' + escapeHtml(data.error || 'Probe failed') + '</span>';
+            return;
+        }
+        wizardData.capabilities = data;
+        var html = '';
+        (data.record_events || []).forEach(function(evt) {
+            html += '<span class="wiz-cap-tag record" title="Available for perf record">' + escapeHtml(evt) + '</span>';
+        });
+        (data.stat_only_events || []).forEach(function(evt) {
+            html += '<span class="wiz-cap-tag stat" title="perf stat only">' + escapeHtml(evt) + '</span>';
+        });
+        if (!html) html = '<span class="wiz-err">No events detected</span>';
+        eventsEl.innerHTML = html;
+
+        var cg = data.callgraph_method;
+        if (cg) {
+            cgEl.innerHTML = 'Call-graph mode: <strong>' + escapeHtml(cg) + '</strong>';
+        } else {
+            cgEl.innerHTML = '<span class="wiz-warn">&#9888; No call-graph support detected (flat profile only)</span>';
+        }
+    })
+    .catch(function(err) {
+        eventsEl.innerHTML = '<span class="wiz-err">Probe failed: ' + escapeHtml(String(err)) + '</span>';
     });
 }
 
@@ -1202,11 +1248,12 @@ document.querySelectorAll('.wiz-browse-btn').forEach(function(btn) {
     });
 });
 
-// Apply binary/source config when leaving step 3
-function wizardApplyStep3(callback) {
+// Apply binary/source config when leaving step 4
+function wizardApplyStep4(callback) {
     var binary = document.getElementById('wiz-binary').value.trim();
     var sourceDir = document.getElementById('wiz-source-dir').value.trim();
     var status = document.getElementById('wiz-binary-status');
+    var indexStatus = document.getElementById('wiz-index-status');
 
     var promises = [];
     if (binary) {
@@ -1242,7 +1289,17 @@ function wizardApplyStep3(callback) {
                 status.textContent = 'Applied';
                 status.className = 'wiz-status ok';
             }
-            if (callback) callback();
+            // Show indexing status if binary was provided
+            if (binary) {
+                indexStatus.textContent = 'Indexing symbols and source files...';
+                indexStatus.className = 'wiz-status info';
+                indexStatus.classList.remove('hidden');
+                wizardPollIndexStatus(function() {
+                    if (callback) callback();
+                });
+            } else {
+                if (callback) callback();
+            }
         }).catch(function(err) {
             status.textContent = 'Error: ' + err;
             status.className = 'wiz-status error';
@@ -1251,6 +1308,29 @@ function wizardApplyStep3(callback) {
     } else {
         if (callback) callback();
     }
+}
+
+function wizardPollIndexStatus(callback) {
+    var indexStatus = document.getElementById('wiz-index-status');
+    fetch('/api/index/status')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.indexing) {
+                indexStatus.textContent = 'Indexing: ' + (data.symbols_loaded || 0) + ' symbols, ' +
+                    (data.source_files_found || 0) + ' source files...';
+                indexStatus.className = 'wiz-status info';
+                setTimeout(function() { wizardPollIndexStatus(callback); }, 500);
+            } else {
+                indexStatus.textContent = 'Ready: ' + (data.symbols_loaded || 0) + ' symbols, ' +
+                    (data.source_files_found || 0) + ' source files from binary';
+                indexStatus.className = 'wiz-status ok';
+                if (callback) callback();
+            }
+        })
+        .catch(function() {
+            indexStatus.classList.add('hidden');
+            if (callback) callback();
+        });
 }
 
 // --- Step 4: Process selection ---

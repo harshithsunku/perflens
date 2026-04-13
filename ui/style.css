@@ -892,6 +892,29 @@ main {
     animation: pulse 1.5s ease-in-out infinite;
 }
 
+/* Wizard capabilities grid */
+.wiz-caps-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 8px 0 12px;
+}
+.wiz-caps-grid .wiz-cap-tag {
+    display: inline-block;
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-family: monospace;
+}
+.wiz-cap-tag.record { background: #1b4332; color: #95d5b2; }
+.wiz-cap-tag.stat { background: #3e2723; color: #ffab91; }
+.wiz-caps-callgraph {
+    font-size: 13px;
+    color: #aaa;
+    margin-top: 4px;
+}
+.wiz-caps-callgraph strong { color: #e0e0e0; }
+
 /* Wizard review summary */
 .wiz-review {
     background: #16213e;
