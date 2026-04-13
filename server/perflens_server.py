@@ -323,8 +323,6 @@ class AgentSession:
         self._session_dir = os.path.join(config.sessions_dir, self._session_id)
         os.makedirs(self._session_dir, exist_ok=True)
 
-        mapper = state.source_mapper
-
         while self.connected:
             try:
                 header = recv_exactly(self.sock, 5)
@@ -379,7 +377,7 @@ class AgentSession:
                           file=sys.stderr)
 
                     per_event = build_per_event_data(
-                        all_samples, event_types, mapper)
+                        all_samples, event_types, state.source_mapper)
                     broadcast_sse('event_types', event_types)
                     broadcast_sse('per_event', per_event)
                     if perf_stat:

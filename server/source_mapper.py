@@ -300,28 +300,45 @@ class SourceMapper:
             return False
 
     def _load_symbols(self, binary):
-        """Load symbol table. Priority: map file → readelf."""
+        """Load symbol table. Priority: map file → readelf.
+
+        Uses streaming parse for readelf output so that very large
+        binaries (100-200 MB+) don't require the entire symbol table
+        text to be held in memory at once.
+        """
         if binary in self._symbol_cache:
             return self._symbol_cache[binary]
 
         symbols = {}
 
-        # Try readelf first (per-binary, accurate)
+        # Try readelf first (per-binary, accurate).  Stream output
+        # line-by-line so we never hold the full symbol table in RAM.
         if binary and os.path.isfile(binary):
+            proc = None
             try:
-                result = subprocess.run(
+                proc = subprocess.Popen(
                     ['readelf', '-s', '-W', binary],
-                    capture_output=True, text=True, timeout=60
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    bufsize=1,
                 )
-                for line in result.stdout.split('\n'):
+                for line in proc.stdout:
                     parts = line.split()
                     if len(parts) >= 8 and parts[3] == 'FUNC':
                         addr = int(parts[1], 16)
                         name = parts[7]
                         if addr > 0:
                             symbols[name] = addr
-            except (subprocess.TimeoutExpired, FileNotFoundError):
-                pass
+                proc.wait(timeout=300)
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                if proc:
+                    proc.kill()
+                    proc.wait()
+            finally:
+                if proc and proc.poll() is None:
+                    proc.kill()
+                    proc.wait()
 
         # Supplement with map file symbols
         for name, addr in self._map_symbols.items():
@@ -419,6 +436,13 @@ class SourceMapper:
                 return file_path.replace(compile_prefix, server_prefix, 1)
         return file_path
 
+    # Directories that are never useful for source mapping.
+    _SKIP_DIRS = frozenset((
+        'node_modules', '__pycache__', '.git', '.svn', '.hg',
+        'build', 'cmake-build', '_build', 'obj', 'out', 'output',
+        'third_party', 'external', 'deps', 'vendor',
+    ))
+
     def _build_source_index(self):
         """Build an index of source files: basename -> [full_paths]."""
         if self._source_index is not None:
@@ -426,8 +450,7 @@ class SourceMapper:
         self._source_index = defaultdict(list)
         for root, dirs, files in os.walk(self.source_dir):
             dirs[:] = [d for d in dirs if not d.startswith('.')
-                       and d not in ('node_modules', '__pycache__',
-                                     '.git', 'build', 'cmake-build')]
+                       and d not in self._SKIP_DIRS]
             for fname in files:
                 full = os.path.join(root, fname)
                 self._source_index[fname].append(full)
@@ -474,6 +497,12 @@ class SourceMapper:
         self._path_cache[file_path] = result
         return result
 
+    # Hard cap on annotated-source lines returned.  Source files larger
+    # than this are truncated to keep JSON responses manageable.  The UI
+    # already caps rendering at ~2000 lines, so this avoids sending huge
+    # payloads for auto-generated code.
+    MAX_SOURCE_LINES = 15000
+
     def annotate_source(self, file_path, line_samples):
         """Read a source file and annotate it with sample data.
 
@@ -490,6 +519,14 @@ class SourceMapper:
 
         total_samples = sum(d['samples'] for d in line_samples.values())
 
+        # Find the hottest line so we guarantee it is within the window.
+        hottest_line = 0
+        hottest_samples = 0
+        for ln, d in line_samples.items():
+            if d['samples'] > hottest_samples:
+                hottest_samples = d['samples']
+                hottest_line = ln
+
         result = []
         try:
             with open(actual_path, 'r', errors='replace') as f:
@@ -504,6 +541,16 @@ class SourceMapper:
                     })
         except (FileNotFoundError, PermissionError):
             pass
+
+        # Truncate when the file is very large, keeping lines around
+        # the hottest region so the most relevant code is always visible.
+        if len(result) > self.MAX_SOURCE_LINES:
+            keep_start = max(0, hottest_line - self.MAX_SOURCE_LINES // 2)
+            keep_end = keep_start + self.MAX_SOURCE_LINES
+            if keep_end > len(result):
+                keep_end = len(result)
+                keep_start = max(0, keep_end - self.MAX_SOURCE_LINES)
+            result = result[keep_start:keep_end]
 
         return result
 
