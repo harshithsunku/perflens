@@ -19,7 +19,7 @@ jobs:
           - os: ubuntu-latest
             platform: linux-x86_64
             binary_name: perflens-server-bin
-            freeze_mode: manylinux
+            freeze_mode: script
           - os: macos-latest
             platform: macos-arm64
             binary_name: perflens-server-bin
@@ -47,6 +47,11 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pyinstaller
 
+      - name: Install staticx (Linux only)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: python -m pip install staticx patchelf-wrapper
+
       - name: Read version
         id: ver
         shell: bash
@@ -55,39 +60,38 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       # -------------------------------------------------------------------
-      # Linux x86_64: build inside a manylinux_2_28 container so the
-      # frozen binary requires only glibc >= 2.28 (RHEL 8 / Ubuntu 20.04+
-      # / Debian 10+) instead of the glibc on the ubuntu-latest runner
-      # (currently 2.39), which caused 'GLIBC_2.38 not found' errors on
-      # older targets.
+      # Linux / macOS: the build script does all the packaging work.
       # -------------------------------------------------------------------
-      - name: Build server package (Linux x86_64 – manylinux)
-        if: matrix.freeze_mode == 'manylinux'
-        run: |
-          chmod +x build_package.sh
-          docker run --rm \
-            -v "$PWD:/work" -w /work \
-            quay.io/pypa/manylinux_2_28_x86_64 \
-            bash -c '
-              set -ex
-              /opt/python/cp311-cp311/bin/pip install --quiet pyinstaller
-              export PATH="/opt/python/cp311-cp311/bin:$PATH"
-              ./build_package.sh --server
-            '
-
-      - name: Fix ownership after manylinux Docker build
-        if: matrix.freeze_mode == 'manylinux'
-        run: sudo chown -R "$(id -u):$(id -g)" build dist
-
-      # -------------------------------------------------------------------
-      # macOS: the build script does all the packaging work.
-      # -------------------------------------------------------------------
-      - name: Build server package (macOS)
+      - name: Build server package (Linux/macOS)
         if: matrix.freeze_mode == 'script'
         shell: bash
         run: |
           chmod +x build_package.sh
           ./build_package.sh --server
+
+      # -------------------------------------------------------------------
+      # Linux: wrap the PyInstaller binary with staticx so it bundles all
+      # .so dependencies (including libc/libm) into a static bootloader.
+      # The result runs on any Linux kernel regardless of host glibc.
+      # -------------------------------------------------------------------
+      - name: Make binary portable with staticx (Linux)
+        if: runner.os == 'Linux' && matrix.freeze_mode == 'script'
+        shell: bash
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          PKG="build/perflens-server-${VERSION}"
+          BIN="$PKG/perflens-server-bin"
+          if [ -f "$BIN" ]; then
+            staticx "$BIN" "${BIN}.static"
+            mv "${BIN}.static" "$BIN"
+            chmod +x "$BIN"
+            echo "staticx: rewrapped $BIN"
+            # Re-pack the tarball with the static binary
+            (cd build && tar -czf "../dist/perflens-server-${VERSION}.tar.gz" \
+              "perflens-server-${VERSION}")
+          else
+            echo "::warning::perflens-server-bin not found, skipping staticx"
+          fi
 
       # -------------------------------------------------------------------
       # Windows: call PyInstaller directly (the bash build script relies on
