@@ -20,10 +20,6 @@ jobs:
             platform: linux-x86_64
             binary_name: perflens-server-bin
             freeze_mode: script
-          - os: ubuntu-22.04
-            platform: linux-x86_64-legacy
-            binary_name: perflens-server-bin
-            freeze_mode: script
           - os: macos-latest
             platform: macos-arm64
             binary_name: perflens-server-bin
@@ -164,6 +160,51 @@ jobs:
           path: dist/perflens-server-*-${{ matrix.platform }}.tar.gz
           if-no-files-found: error
 
+  build-server-legacy:
+    name: server (linux-x86_64-legacy)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read version
+        id: ver
+        run: echo "version=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Build inside AlmaLinux 8 (glibc 2.28)
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/src" \
+            -w /src \
+            almalinux:8 bash -c '
+              set -e
+              dnf install -y python39 python39-pip gcc make binutils
+              python3.9 -m pip install --upgrade pip
+              python3.9 -m pip install pyinstaller
+              chmod +x build_package.sh
+              ./build_package.sh --server
+            '
+          sudo chown -R "$(id -u):$(id -g)" build dist
+
+      - name: Verify binary exists
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          PKG="build/perflens-server-${VERSION}"
+          ls -la "$PKG"
+
+      - name: Rename tarball for platform
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          mv "dist/perflens-server-${VERSION}.tar.gz" \
+             "dist/perflens-server-${VERSION}-linux-x86_64-legacy.tar.gz"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: perflens-server-linux-x86_64-legacy
+          path: dist/perflens-server-*-linux-x86_64-legacy.tar.gz
+          if-no-files-found: error
+
   build-agent:
     name: agent
     runs-on: ubuntu-latest
@@ -275,7 +316,7 @@ jobs:
   release:
     name: release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-server, build-agent, build-agent-c]
+    needs: [build-server, build-server-legacy, build-agent, build-agent-c]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -327,7 +368,7 @@ jobs:
                 *agent-c*armv7l*)    plat="C Agent — Linux armv7l (static binary)" ;;
                 *agent-c*x86_64*)    plat="C Agent — Linux x86_64 (static binary)" ;;
                 *agent-[0-9]*)       plat="Python Agent (any Linux, Python 3.5+)" ;;
-                *linux-x86_64-legacy*)  plat="Server — Linux x86_64 (legacy glibc ≥ 2.35)" ;;
+                *linux-x86_64-legacy*)  plat="Server — Linux x86_64 (legacy glibc ≥ 2.28)" ;;
                 *linux-x86_64*)    plat="Server — Linux x86_64" ;;
                 *macos-arm64*)     plat="Server — macOS arm64" ;;
                 *macos-x86_64*)    plat="Server — macOS x86_64" ;;
