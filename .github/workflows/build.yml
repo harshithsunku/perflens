@@ -75,6 +75,10 @@ jobs:
               ./build_package.sh --server
             '
 
+      - name: Fix ownership after manylinux Docker build
+        if: matrix.freeze_mode == 'manylinux'
+        run: sudo chown -R "$(id -u):$(id -g)" build dist
+
       # -------------------------------------------------------------------
       # macOS: the build script does all the packaging work.
       # -------------------------------------------------------------------
