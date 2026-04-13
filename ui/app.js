@@ -206,6 +206,17 @@ function connectSSE() {
         updateStatBar();
     });
 
+    evtSource.addEventListener('agent_connected', (e) => {
+        const data = JSON.parse(e.data);
+        // Agent connected in (--server mode) — switch to profiling view
+        // and show control bar so user can start profiling via wizard or
+        // see the agent is ready
+        if (document.getElementById('view-landing') &&
+            document.getElementById('view-landing').classList.contains('active')) {
+            showProfilingView();
+        }
+    });
+
     evtSource.onerror = () => {
         evtSource.close();
         evtSource = null;
@@ -232,11 +243,6 @@ function updateStatus(data) {
         agentEl.textContent = data.agent;
         stopBtn.classList.remove('hidden');
         hideReplayBanner();
-        // Auto-switch to profiling view when legacy agent connects
-        if (!data.managed && document.getElementById('view-landing') &&
-            document.getElementById('view-landing').classList.contains('active')) {
-            showProfilingView();
-        }
     } else {
         dot.className = 'dot disconnected';
         text.textContent = 'Agent disconnected';
@@ -983,21 +989,6 @@ function showProfilingView() {
     showView('view-profiling');
 }
 
-// Auto-switch to profiling when legacy agent connects via SSE
-let _autoSwitched = false;
-function checkAutoSwitch() {
-    if (!_autoSwitched && state.totalSamples > 0) {
-        _autoSwitched = true;
-        showProfilingView();
-    }
-}
-
-// Patch renderCurrentEvent to also check auto-switch
-const _origRenderCurrentEvent = renderCurrentEvent;
-renderCurrentEvent = function() {
-    _origRenderCurrentEvent();
-    checkAutoSwitch();
-};
 
 // =====================================================================
 // Wizard
@@ -1575,11 +1566,7 @@ fetch('/api/status')
             // Agent already connected — skip to profiling view
             updateStatus({ connected: true, agent: data.agent_addr });
             showProfilingView();
-            _autoSwitched = true;
-            if (data.managed) {
-                state.managedAgent = true;
-                showControlBar(wizardData.pid || '?', '');
-            }
+            showControlBar(wizardData.pid || '?', '');
         }
         // Else: stay on landing page
     })

@@ -44,8 +44,8 @@
                         <p>Browse, replay, or import previously saved profiling sessions</p>
                     </div>
                 </div>
-                <div class="landing-legacy-note">
-                    Legacy agents (using <code>--server</code>) connect automatically &mdash; no wizard needed
+                <div class="landing-agent-note" id="landing-agent-note">
+                    Agents using <code>--server</code> connect in automatically &mdash; the UI will switch when an agent arrives
                 </div>
             </div>
         </div>
@@ -168,7 +168,7 @@
 
         <!-- ===== View: Profiling (existing content) ===== -->
         <div id="view-profiling" class="view">
-            <!-- Control bar for managed agent -->
+            <!-- Control bar -->
             <div id="control-bar" class="hidden">
                 <div class="ctrl-group">
                     <button id="ctrl-pause" class="ctrl-btn" title="Pause">&#9208;</button>

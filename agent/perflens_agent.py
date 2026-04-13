@@ -33,7 +33,7 @@ FLAG_DATA_ZSTD = 1      # agent -> server: zstd-compressed perf data
 FLAG_CMD_REQUEST = 2    # server -> agent: JSON command
 FLAG_CMD_RESPONSE = 3   # agent -> server: JSON response
 
-# Agent states (listen mode)
+# Agent states
 AGENT_IDLE = 'idle'
 AGENT_PROFILING = 'profiling'
 AGENT_PAUSED = 'paused'
@@ -393,67 +393,6 @@ class ShutdownFlag(object):
 
 
 # ---------------------------------------------------------------------------
-# TCP sender with reconnect
-# ---------------------------------------------------------------------------
-
-class TCPSender(object):
-    def __init__(self, host, port, shutdown):
-        self._host = host
-        self._port = port
-        self._shutdown = shutdown
-        self._sock = None
-
-    def connect(self):
-        """Connect with exponential backoff. Loops until connected or shutdown."""
-        delay = 1.0
-        max_delay = 30.0
-        while not self._shutdown.is_set:
-            s = None
-            try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(30)
-                s.connect((self._host, self._port))
-                self._sock = s
-                log("Connected to %s:%d" % (self._host, self._port))
-                return
-            except OSError as e:
-                log("Connection failed (%s), retrying in %.0fs..." % (e, delay))
-                if s is not None:
-                    try:
-                        s.close()
-                    except OSError:
-                        pass
-                self._shutdown.wait(delay)
-                delay = min(delay * 2, max_delay)
-        raise SystemExit("Shutdown during connect")
-
-    def send(self, payload, compression_flag):
-        """Send with 5-byte header. Reconnects on failure and retries once."""
-        header = struct.pack("!IB", len(payload), compression_flag)
-        data = header + payload
-        try:
-            self._sock.sendall(data)
-        except (IOError, OSError) as e:
-            log("Send failed (%s), reconnecting..." % e)
-            self.close()
-            self.connect()
-            try:
-                self._sock.sendall(data)
-            except (IOError, OSError) as e2:
-                log("Retry send also failed (%s)" % e2)
-                self.close()
-                raise
-
-    def close(self):
-        if self._sock:
-            try:
-                self._sock.close()
-            except OSError:
-                pass
-            self._sock = None
-
-
-# ---------------------------------------------------------------------------
 # Perf collector
 # ---------------------------------------------------------------------------
 
@@ -596,7 +535,7 @@ class PerfCollector(object):
 
 
 # ---------------------------------------------------------------------------
-# Listen-mode helpers
+# Helpers
 # ---------------------------------------------------------------------------
 
 def _get_local_ips():
@@ -716,16 +655,33 @@ def list_processes():
     return result[:200]
 
 
+def _process_exists(pid):
+    """Return True if the PID exists and we can see it. Raises on unknown error."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError as e:
+        if e.errno == errno.ESRCH:
+            return False
+        # EPERM means the process exists but we lack permission -- treat as alive
+        if e.errno == errno.EPERM:
+            return True
+        raise
+
+
 # ---------------------------------------------------------------------------
-# Listen-mode agent
+# Interactive agent (unified for --listen and --server modes)
 # ---------------------------------------------------------------------------
 
-class ListenModeAgent(object):
-    """Agent in --listen mode: binds a port, waits for server connection,
-    handles bidirectional command protocol."""
+class InteractiveAgent(object):
+    """Bidirectional agent for interactive sessions.
 
-    def __init__(self, port, shutdown):
-        self._port = port
+    Handles both --listen (server connects to us) and --server (we connect
+    to server) modes. After the TCP handshake, the protocol is identical:
+    agent sends hello, then processes commands and streams profiling data.
+    """
+
+    def __init__(self, shutdown):
         self._shutdown = shutdown
         self._sock = None
         self._sock_lock = threading.Lock()
@@ -748,6 +704,9 @@ class ListenModeAgent(object):
         self._collect_thread = None
         self._collect_stop = threading.Event()
 
+        # Per-session disconnect signal (set by recv loop on disconnect)
+        self._session_done = threading.Event()
+
     # --- Wire protocol ---
 
     def _send_msg(self, payload_bytes, flag):
@@ -767,13 +726,17 @@ class ListenModeAgent(object):
         self._send_msg(payload, comp_flag)
 
     def _recv_loop(self):
-        """Receiver thread: reads commands from server, puts on queue."""
-        while not self._shutdown.is_set:
+        """Receiver thread: reads commands from server, puts on queue.
+
+        Sets _session_done on disconnect (does NOT set _shutdown, so
+        daemon modes can re-accept or reconnect).
+        """
+        while not self._shutdown.is_set and not self._session_done.is_set():
             try:
                 header = recv_exactly(self._sock, 5)
                 if header is None:
                     log("Server disconnected")
-                    self._shutdown.set()
+                    self._session_done.set()
                     break
                 length, flag = struct.unpack("!IB", header)
                 if length == 0:
@@ -781,7 +744,7 @@ class ListenModeAgent(object):
                 payload = recv_exactly(self._sock, length)
                 if payload is None:
                     log("Server disconnected mid-message")
-                    self._shutdown.set()
+                    self._session_done.set()
                     break
                 if flag == FLAG_CMD_REQUEST:
                     try:
@@ -794,7 +757,7 @@ class ListenModeAgent(object):
             except (IOError, OSError) as e:
                 if not self._shutdown.is_set:
                     log("Recv error: %s" % e)
-                self._shutdown.set()
+                self._session_done.set()
                 break
 
     # --- Command dispatch ---
@@ -1067,7 +1030,9 @@ class ListenModeAgent(object):
     def _collection_loop(self, collector):
         comp = self._comp
         round_num = 0
-        while not self._collect_stop.is_set() and not self._shutdown.is_set:
+        while (not self._collect_stop.is_set()
+               and not self._shutdown.is_set
+               and not self._session_done.is_set()):
             with self._lock:
                 st = self._state
             if st == AGENT_PAUSED:
@@ -1084,7 +1049,8 @@ class ListenModeAgent(object):
             log("Round %d: collecting (%ds)..." % (round_num, self._duration))
             output = collector.collect()
 
-            if self._collect_stop.is_set() or self._shutdown.is_set:
+            if (self._collect_stop.is_set() or self._shutdown.is_set
+                    or self._session_done.is_set()):
                 break
             if not output:
                 log("Round %d: no data" % round_num)
@@ -1111,45 +1077,18 @@ class ListenModeAgent(object):
                 self._state = AGENT_IDLE
         log("Collection loop ended")
 
-    # --- Main entry point ---
+    # --- Interactive session (shared by listen and connect modes) ---
 
-    def run(self):
-        """Bind port, wait for server, process commands."""
-        self._platform = detect_platform()
-        self._comp = probe_compression()
-        ips = _get_local_ips()
+    def _run_interactive(self):
+        """Run one interactive session on self._sock.
 
-        # Bind and listen
-        listen_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        listen_sock.bind(("0.0.0.0", self._port))
-        listen_sock.listen(1)
-        listen_sock.settimeout(2.0)
+        Sends hello, starts recv loop, processes commands until the
+        connection drops or shutdown is signaled. Returns when session ends.
+        """
+        # Fresh per-session state
+        self._session_done = threading.Event()
 
-        log("Listening on port %d" % self._port)
-        log("Waiting for server connection...")
-        for ip in ips:
-            log("  Connect from server: %s:%d" % (ip, self._port))
-
-        # Accept server connection
-        while not self._shutdown.is_set:
-            try:
-                conn, addr = listen_sock.accept()
-                log("Server connected from %s:%d" % (addr[0], addr[1]))
-                self._sock = conn
-                break
-            except socket.timeout:
-                continue
-            except (IOError, OSError) as e:
-                if not self._shutdown.is_set:
-                    log("Accept error: %s" % e)
-                break
-
-        listen_sock.close()
-        if self._sock is None:
-            return
-
-        # Send hello handshake
+        # Send hello handshake (agent always sends hello first)
         hello = {
             "type": "hello",
             "version": 1,
@@ -1165,6 +1104,7 @@ class ListenModeAgent(object):
             self._send_msg(json.dumps(hello).encode("utf-8"), FLAG_CMD_RESPONSE)
         except (IOError, OSError) as e:
             log("Failed to send hello: %s" % e)
+            self._cleanup_session(None)
             return
 
         # Start receiver thread
@@ -1173,7 +1113,7 @@ class ListenModeAgent(object):
         recv_thread.start()
 
         # Command processing loop
-        while not self._shutdown.is_set:
+        while not self._shutdown.is_set and not self._session_done.is_set():
             try:
                 cmd = self._cmd_queue.get(timeout=1.0)
                 self._handle_command(cmd)
@@ -1182,62 +1122,151 @@ class ListenModeAgent(object):
             except Exception as e:
                 log("Command loop error: %s" % e)
 
-        # Cleanup
-        log("Shutting down listen mode agent")
+        # Cleanup session
+        self._cleanup_session(recv_thread)
+
+    def _cleanup_session(self, recv_thread):
+        """Stop collection, close socket, reset state for next session."""
+        log("Ending interactive session")
+
+        # Stop any active collection
         self._collect_stop.set()
         if self._collector:
             self._collector.terminate_all()
         if self._collect_thread:
             self._collect_thread.join(timeout=5)
+
+        # Close socket
         try:
             self._sock.close()
         except (IOError, OSError):
             pass
 
+        # Wait for recv thread to exit
+        if recv_thread is not None:
+            recv_thread.join(timeout=5)
 
-# ---------------------------------------------------------------------------
-# Signal handling
-# ---------------------------------------------------------------------------
+        # Reset state for next session
+        with self._lock:
+            self._state = AGENT_IDLE
+            self._collector = None
+        self._collect_thread = None
+        self._sock = None
+        self._collect_stop.clear()
 
-def install_signal_handlers(shutdown, collector, sender):
-    def handler(signum, frame):
+        # Drain command queue
+        while True:
+            try:
+                self._cmd_queue.get_nowait()
+            except queue.Empty:
+                break
+
+    # --- Entry points ---
+
+    def run_listen(self, port):
+        """Listen mode: bind port, accept connections in a loop (daemon).
+
+        After each session ends (server disconnects), the agent goes back
+        to accepting new connections until shutdown is signaled.
+        """
+        self._platform = detect_platform()
+        self._comp = probe_compression()
+        ips = _get_local_ips()
+
+        # Bind and listen
+        listen_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listen_sock.bind(("0.0.0.0", port))
+        listen_sock.listen(1)
+        listen_sock.settimeout(2.0)
+
+        log("Listening on port %d" % port)
+        log("Waiting for server connection...")
+        for ip in ips:
+            log("  Connect from server: %s:%d" % (ip, port))
+
+        while not self._shutdown.is_set:
+            # Accept loop
+            conn = None
+            while not self._shutdown.is_set:
+                try:
+                    conn, addr = listen_sock.accept()
+                    log("Server connected from %s:%d" % (addr[0], addr[1]))
+                    break
+                except socket.timeout:
+                    continue
+                except (IOError, OSError) as e:
+                    if not self._shutdown.is_set:
+                        log("Accept error: %s" % e)
+                    break
+
+            if conn is None:
+                continue
+
+            self._sock = conn
+            self._run_interactive()
+
+            if not self._shutdown.is_set:
+                log("Session ended, waiting for new connection...")
+
         try:
-            signame = signal.Signals(signum).name
-        except Exception:
-            signame = str(signum)
-        log("Received %s, shutting down..." % signame)
-        shutdown.set()
-        collector.terminate_all()
-        sender.close()
+            listen_sock.close()
+        except (IOError, OSError):
+            pass
 
-    signal.signal(signal.SIGINT, handler)
-    signal.signal(signal.SIGTERM, handler)
+    def run_connect(self, host, port):
+        """Connect mode: connect to server with backoff, reconnect on disconnect.
+
+        After each session ends (server disconnects or network error), the
+        agent reconnects with exponential backoff until shutdown is signaled.
+        """
+        self._platform = detect_platform()
+        self._comp = probe_compression()
+
+        while not self._shutdown.is_set:
+            # Connect with exponential backoff
+            delay = 1.0
+            max_delay = 30.0
+            sock = None
+            while not self._shutdown.is_set:
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(30)
+                    sock.connect((host, port))
+                    log("Connected to %s:%d" % (host, port))
+                    break
+                except OSError as e:
+                    log("Connection failed (%s), retrying in %.0fs..." % (e, delay))
+                    if sock is not None:
+                        try:
+                            sock.close()
+                        except OSError:
+                            pass
+                        sock = None
+                    self._shutdown.wait(delay)
+                    delay = min(delay * 2, max_delay)
+
+            if sock is None:
+                continue
+
+            sock.settimeout(None)
+            self._sock = sock
+            self._run_interactive()
+
+            if not self._shutdown.is_set:
+                log("Session ended, reconnecting...")
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
-def _process_exists(pid):
-    """Return True if the PID exists and we can see it. Raises on unknown error."""
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError as e:
-        if e.errno == errno.ESRCH:
-            return False
-        # EPERM means the process exists but we lack permission -- treat as alive
-        if e.errno == errno.EPERM:
-            return True
-        raise
-
-
 def main():
     argp = argparse.ArgumentParser(description="PerfLens Device Agent")
     argp.add_argument("--pid", type=int, default=None,
-                      help="PID of process to profile")
+                      help="PID of process to profile (headless mode)")
     argp.add_argument("--server", type=str, default=None,
-                      help="Server IP to stream data to (omit for stdout mode)")
+                      help="Server IP to connect to")
     argp.add_argument("--port", type=int, default=9999,
                       help="Server/listen port (default: 9999)")
     argp.add_argument("--frequency", type=int, default=99,
@@ -1246,137 +1275,91 @@ def main():
                       help="Duration of each collection in seconds (default: 8)")
     argp.add_argument("--listen", action="store_true", default=False,
                       help="Listen mode: bind port, wait for server to connect")
+    argp.add_argument("--rounds", type=int, default=None,
+                      help="Number of collection rounds (headless mode)")
+    argp.add_argument("--output", type=str, default=None,
+                      help="Output file for headless mode ('-' for stdout)")
     args = argp.parse_args()
 
-    # Listen mode: bidirectional, server connects to us
-    if args.listen:
-        shutdown = ShutdownFlag()
-        agent = ListenModeAgent(args.port, shutdown)
-
-        def _listen_sig_handler(signum, frame):
-            try:
-                signame = signal.Signals(signum).name
-            except Exception:
-                signame = str(signum)
-            log("Received %s, shutting down..." % signame)
-            shutdown.set()
-            if agent._collector:
-                agent._collector.terminate_all()
-            try:
-                if agent._sock:
-                    agent._sock.close()
-            except (IOError, OSError):
-                pass
-
-        signal.signal(signal.SIGINT, _listen_sig_handler)
-        signal.signal(signal.SIGTERM, _listen_sig_handler)
-        agent.run()
-        return
-
-    # Legacy mode requires --pid
-    if args.pid is None:
-        argp.error("--pid is required (unless using --listen mode)")
-
-    # Verify the process exists
-    if not _process_exists(args.pid):
-        log("Error: process %d not found" % args.pid)
-        sys.exit(1)
-
-    # Platform detection
-    detect_platform()
-
-    # Capability probing
-    caps = probe_capabilities(args.pid)
-
-    # Stdout mode -- single collection, print, exit
-    if not args.server:
-        log("Collecting perf data for PID %d (stdout mode)" % args.pid)
-        shutdown = ShutdownFlag()
-        collector = PerfCollector(args.pid, caps, args.frequency, args.duration, shutdown)
-        output = collector.collect()
-        if output:
-            try:
-                sys.stdout.write(output)
-                sys.stdout.flush()
-            except (IOError, OSError):
-                pass
-            log("Done. Output %d bytes." % len(output))
-        else:
-            log("No data collected.")
-            sys.exit(1)
-        return
-
-    # --- TCP streaming mode ---
-
-    # Compression
-    comp = probe_compression()
-
-    # Shutdown coordination
-    shutdown = ShutdownFlag()
-
-    # TCP sender
-    sender = TCPSender(args.server, args.port, shutdown)
-
-    # Collector
-    collector = PerfCollector(args.pid, caps, args.frequency, args.duration, shutdown)
-
-    # Signal handlers
-    install_signal_handlers(shutdown, collector, sender)
-
-    # Connect
-    log("Connecting to %s:%d..." % (args.server, args.port))
-    try:
-        sender.connect()
-    except SystemExit:
-        return
-
-    # Collection loop
-    round_num = 0
-    while not shutdown.is_set:
-        round_num += 1
-
-        # Process liveness check
+    # --- Headless mode: --pid + --output ---
+    if args.output is not None:
+        if args.pid is None:
+            argp.error("--pid is required for headless mode (--output)")
         if not _process_exists(args.pid):
-            log("Process %d has exited" % args.pid)
-            break
+            log("Error: process %d not found" % args.pid)
+            sys.exit(1)
 
-        log("Round %d: collecting (%ds)..." % (round_num, args.duration))
-        output = collector.collect()
+        rounds = args.rounds if args.rounds is not None else 1
+        detect_platform()
+        caps = probe_capabilities(args.pid)
+        if not caps.record_events:
+            log("Error: no perf record events available for PID %d" % args.pid)
+            sys.exit(1)
 
-        if shutdown.is_set:
-            break
-
-        if not output:
-            log("Round %d: no data, retrying..." % round_num)
-            time.sleep(1)
-            continue
-
-        raw_bytes = output.encode("utf-8")
-        raw_size = len(raw_bytes)
-
-        payload, flag = compress_data(raw_bytes, comp)
-        compressed_size = len(payload)
-
-        if flag == 1:
-            ratio = (raw_size / compressed_size) if compressed_size > 0 else 0
-            log("Round %d: perf script %d bytes, compressed %d bytes (ratio %.1fx)" % (
-                round_num, raw_size, compressed_size, ratio))
-        else:
-            log("Round %d: perf script %d bytes (uncompressed)" % (round_num, raw_size))
-
-        try:
-            sender.send(payload, flag)
-            log("Round %d: sent successfully" % round_num)
-        except (IOError, OSError) as e:
-            log("Round %d: send failed after reconnect: %s" % (round_num, e))
+        shutdown = ShutdownFlag()
+        collector = PerfCollector(args.pid, caps, args.frequency, args.duration,
+                                 shutdown)
+        chunks = []
+        for r in range(rounds):
             if shutdown.is_set:
                 break
-            time.sleep(1)
+            if not _process_exists(args.pid):
+                log("Process %d exited after %d rounds" % (args.pid, r))
+                break
+            log("Round %d/%d: collecting (%ds)..." % (r + 1, rounds, args.duration))
+            output = collector.collect()
+            if output:
+                chunks.append(output)
 
-    # Cleanup
-    log("Shutting down.")
-    collector.terminate_all()
-    sender.close()
+        if not chunks:
+            log("No data collected.")
+            sys.exit(1)
+
+        if args.output == "-":
+            for chunk in chunks:
+                try:
+                    sys.stdout.write(chunk)
+                    sys.stdout.flush()
+                except (IOError, OSError):
+                    pass
+        else:
+            with open(args.output, "w") as f:
+                for chunk in chunks:
+                    f.write(chunk)
+            log("Written %d rounds to %s" % (len(chunks), args.output))
+
+        log("Done.")
+        return
+
+    # --- Interactive modes: --listen or --server ---
+    if not args.listen and not args.server:
+        argp.error("Use --listen, --server HOST, or --output FILE")
+
+    shutdown = ShutdownFlag()
+    agent = InteractiveAgent(shutdown)
+
+    def _sig_handler(signum, frame):
+        try:
+            signame = signal.Signals(signum).name
+        except Exception:
+            signame = str(signum)
+        log("Received %s, shutting down..." % signame)
+        shutdown.set()
+        if agent._collector:
+            agent._collector.terminate_all()
+        try:
+            if agent._sock:
+                agent._sock.close()
+        except (IOError, OSError):
+            pass
+
+    signal.signal(signal.SIGINT, _sig_handler)
+    signal.signal(signal.SIGTERM, _sig_handler)
+
+    if args.listen:
+        agent.run_listen(args.port)
+    else:
+        agent.run_connect(args.server, args.port)
 
 
 if __name__ == "__main__":

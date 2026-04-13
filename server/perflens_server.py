@@ -258,10 +258,11 @@ def decompress_payload(payload, comp_flag):
 # ---------------------------------------------------------------------------
 
 class AgentSession:
-    """Manages a bidirectional connection to a listen-mode agent.
+    """Manages a bidirectional connection to an agent.
 
-    Handles outbound TCP connection, command/response relay via flag 2/3,
-    and receives profiling data (flag 0/1) from the agent.
+    Works identically regardless of who initiated the TCP connection
+    (server connecting out to --listen agent, or --server agent connecting
+    in). After the hello handshake, the protocol is the same.
     """
 
     def __init__(self, sock, addr):
@@ -358,7 +359,7 @@ class AgentSession:
                               file=sys.stderr)
 
                 elif flag in (FLAG_DATA_RAW, FLAG_DATA_ZSTD):
-                    # Profiling data — process same as legacy agent
+                    # Profiling data
                     text = decompress_payload(payload, flag)
                     if text is None:
                         continue
@@ -411,8 +412,8 @@ class AgentSession:
             t = threading.Thread(
                 target=_save_session,
                 args=(self._session_dir, self._session_id,
-                      (self.addr, 0), self._raw_chunks,
-                      all_samples, perf_stat_final),
+                      self.addr, self._raw_chunks,
+                      all_samples, perf_stat_final, self.hello),
                 daemon=True,
             )
             t.start()
@@ -487,8 +488,11 @@ def connect_to_agent(host, port, timeout=10):
         state.all_samples = []
         state.chunk_count = 0
 
-    broadcast_sse('status', {'connected': True, 'agent': addr_str,
-                             'managed': True})
+    broadcast_sse('status', {'connected': True, 'agent': addr_str})
+    broadcast_sse('agent_connected', {
+        'agent': addr_str,
+        'platform': hello.get('platform', {}),
+    })
 
     session.start()
     agent_session = session
@@ -562,104 +566,97 @@ def broadcast_sse(event_type, data):
 # Agent connection handler
 # ---------------------------------------------------------------------------
 
-def handle_agent_connection(conn, addr):
-    """Handle a single agent connection, reading 5-byte header messages."""
-    print(f"[server] Agent connected from {addr}", file=sys.stderr)
+def handle_inbound_agent(conn, addr):
+    """Handle an inbound agent connection (agent using --server mode).
 
+    Reads the hello handshake, creates an AgentSession, and starts the
+    bidirectional protocol. Identical to the outbound path (connect_to_agent)
+    after the TCP handshake.
+    """
+    global agent_session
+
+    addr_str = f'{addr[0]}:{addr[1]}'
+    print(f"[server] Agent connected from {addr_str}", file=sys.stderr)
+
+    # Close existing session if any
+    if agent_session and agent_session.connected:
+        print("[server] Replacing existing agent session", file=sys.stderr)
+        agent_session.close()
+
+    # Read hello message (flag 3) — agent always sends hello first
+    try:
+        conn.settimeout(10)
+        header = recv_exactly(conn, 5)
+        if header is None:
+            print(f"[server] Inbound agent {addr_str} disconnected before hello",
+                  file=sys.stderr)
+            conn.close()
+            return
+
+        length, flag = struct.unpack('!IB', header)
+        if flag != FLAG_CMD_RESPONSE:
+            print(f"[server] Inbound agent {addr_str}: expected hello (flag 3), "
+                  f"got flag {flag}", file=sys.stderr)
+            conn.close()
+            return
+
+        payload = recv_exactly(conn, length)
+        if payload is None:
+            print(f"[server] Inbound agent {addr_str} disconnected during hello",
+                  file=sys.stderr)
+            conn.close()
+            return
+
+        hello = json.loads(payload.decode('utf-8', errors='replace'))
+        if hello.get('type') != 'hello':
+            print(f"[server] Inbound agent {addr_str}: expected hello message, "
+                  f"got type={hello.get('type')}", file=sys.stderr)
+            conn.close()
+            return
+
+    except (IOError, OSError, ValueError) as e:
+        print(f"[server] Inbound agent {addr_str} hello failed: {e}",
+              file=sys.stderr)
+        try:
+            conn.close()
+        except OSError:
+            pass
+        return
+
+    # Clear connection timeout — recv loop must block indefinitely
+    conn.settimeout(None)
+
+    session = AgentSession(conn, addr_str)
+    session.hello = hello
+
+    # Update global state
     with state.lock:
         state.agent_connected = True
-        state.agent_addr = f"{addr[0]}:{addr[1]}"
+        state.agent_addr = addr_str
         state.agent_conn = conn
         state.all_samples = []
         state.chunk_count = 0
 
-    broadcast_sse('status', {'connected': True, 'agent': f"{addr[0]}:{addr[1]}"})
+    broadcast_sse('status', {'connected': True, 'agent': addr_str})
+    broadcast_sse('agent_connected', {
+        'agent': addr_str,
+        'platform': hello.get('platform', {}),
+    })
 
-    mapper = state.source_mapper
+    session.start()
+    agent_session = session
 
-    # Create session directory
-    session_id = datetime.now().strftime('%Y%m%d_%H%M%S') + f'_{addr[0]}'
-    session_dir = os.path.join(config.sessions_dir, session_id)
-    os.makedirs(session_dir, exist_ok=True)
-    raw_chunks = []
-
-    try:
-        while True:
-            # 5-byte header: 4 bytes length + 1 byte compression flag
-            header = recv_exactly(conn, 5)
-            if header is None:
-                print(f"[server] Agent {addr} disconnected", file=sys.stderr)
-                break
-
-            length, comp_flag = struct.unpack('!IB', header)
-            if length == 0:
-                continue
-
-            payload = recv_exactly(conn, length)
-            if payload is None:
-                print(f"[server] Agent {addr} disconnected mid-message",
-                      file=sys.stderr)
-                break
-
-            # Decompress if needed
-            text = decompress_payload(payload, comp_flag)
-            if text is None:
-                continue
-
-            raw_chunks.append(text)
-
-            # Split perf script and perf stat data
-            script_text, stat_text = split_perf_data(text)
-
-            # Parse this chunk
-            samples = parse_perf_script(script_text)
-            perf_stat = parse_perf_stat(stat_text) if stat_text else {}
-
-            # Skip empty chunks
-            if not samples:
-                print(f"[server] WARNING: chunk parsed to 0 samples, skipping",
-                      file=sys.stderr)
-                continue
-
-            all_samples, event_types = state.add_samples(samples, perf_stat)
-
-            print(f"[server] Chunk {state.chunk_count}: "
-                  f"{len(samples)} new samples, {len(all_samples)} total, "
-                  f"events: {event_types}", file=sys.stderr)
-
-            # Build per-event summaries (with inline expansion)
-            per_event = build_per_event_data(all_samples, event_types, mapper)
-
-            # Broadcast to UI
-            broadcast_sse('event_types', event_types)
-            broadcast_sse('per_event', per_event)
-            if perf_stat:
-                broadcast_sse('perf_stat', perf_stat)
-
-    except ConnectionResetError:
-        print(f"[server] Agent {addr} connection reset", file=sys.stderr)
-    finally:
-        conn.close()
-        with state.lock:
-            state.agent_connected = False
-            state.agent_conn = None
-            all_samples = list(state.all_samples)
-            perf_stat_final = dict(state.perf_stat)
-        broadcast_sse('status', {'connected': False, 'agent': None})
-
-        # Save session in background thread
-        t = threading.Thread(
-            target=_save_session,
-            args=(session_dir, session_id, addr, raw_chunks,
-                  all_samples, perf_stat_final),
-            daemon=True,
-        )
-        t.start()
+    print(f"[server] Inbound agent {addr_str} ready: "
+          f"platform={hello.get('platform', {}).get('arch', '?')}",
+          file=sys.stderr)
 
 
-def _save_session(session_dir, session_id, addr, raw_chunks,
-                  all_samples, perf_stat):
-    """Save profiling session to disk (raw chunks + metadata only)."""
+def _save_session(session_dir, session_id, agent_addr, raw_chunks,
+                  all_samples, perf_stat, hello=None):
+    """Save profiling session to disk (raw chunks + metadata).
+
+    Metadata schema version 0.4.0: includes platform info from agent hello.
+    """
     try:
         for i, chunk in enumerate(raw_chunks):
             with open(os.path.join(session_dir, f'chunk_{i:03d}.txt'), 'w') as f:
@@ -667,14 +664,18 @@ def _save_session(session_dir, session_id, addr, raw_chunks,
 
         event_types = get_event_types(all_samples)
         metadata = {
+            'version': '0.4.0',
             'session_id': session_id,
-            'agent': f"{addr[0]}:{addr[1]}",
+            'agent': agent_addr,
             'timestamp': datetime.now().isoformat(),
             'total_samples': len(all_samples),
             'chunks': len(raw_chunks),
             'event_types': event_types,
             'perf_stat': perf_stat,
         }
+        if hello and hello.get('platform'):
+            metadata['platform'] = hello['platform']
+
         with open(os.path.join(session_dir, 'metadata.json'), 'w') as f:
             json.dump(metadata, f, indent=2)
 
@@ -753,6 +754,7 @@ def import_perf_data(perf_data_path):
         f.write(script_text)
 
     metadata = {
+        'version': '0.4.0',
         'session_id': session_id,
         'agent': 'import',
         'timestamp': datetime.now().isoformat(),
@@ -968,7 +970,7 @@ def run_tcp_server(port):
     try:
         while True:
             conn, addr = sock.accept()
-            t = threading.Thread(target=handle_agent_connection,
+            t = threading.Thread(target=handle_inbound_agent,
                                  args=(conn, addr), daemon=True)
             t.start()
     except KeyboardInterrupt:
@@ -989,14 +991,12 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
         path = parsed.path
 
         if path == '/api/status':
-            managed = agent_session.connected if agent_session else False
             self._send_json({
                 'status': 'ok',
                 'agent_connected': state.agent_connected,
                 'agent_addr': state.agent_addr,
                 'total_samples': len(state.all_samples),
                 'chunk_count': state.chunk_count,
-                'managed': managed,
             })
         elif path == '/api/stop':
             self._handle_stop()
@@ -1069,7 +1069,6 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
     def _handle_stop(self):
         """Close the agent connection, triggering normal disconnect flow."""
         global agent_session
-        # Stop managed agent if active
         if agent_session and agent_session.connected:
             try:
                 agent_session.send_command('stop', timeout=5)
@@ -1077,16 +1076,6 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
                 pass
             agent_session.close()
             agent_session = None
-            self._send_json({'stopped': True})
-            return
-        # Legacy agent
-        with state.lock:
-            conn = state.agent_conn
-        if conn:
-            try:
-                conn.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
             self._send_json({'stopped': True})
         else:
             self._send_json({'stopped': False, 'reason': 'no agent connected'})
@@ -1551,14 +1540,6 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
 
         with open(meta_path) as f:
             metadata = json.load(f)
-
-        # Check for legacy pre-computed per_event.json
-        legacy_path = os.path.join(session_dir, 'per_event.json')
-        if os.path.isfile(legacy_path):
-            with open(legacy_path) as f:
-                per_event = json.load(f)
-            self._send_json({'metadata': metadata, 'per_event': per_event})
-            return
 
         # Lazy rebuild: load raw chunks, parse, build per-event data
         all_samples = []

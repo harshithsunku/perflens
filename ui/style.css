@@ -673,12 +673,12 @@ main {
     line-height: 1.5;
 }
 
-.landing-legacy-note {
+.landing-agent-note {
     margin-top: 40px;
     color: #555;
     font-size: 12px;
 }
-.landing-legacy-note code {
+.landing-agent-note code {
     color: #53a8b6;
     background: #0f3460;
     padding: 1px 6px;
