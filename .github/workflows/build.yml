@@ -20,6 +20,10 @@ jobs:
             platform: linux-x86_64
             binary_name: perflens-server-bin
             freeze_mode: script
+          - os: ubuntu-22.04
+            platform: linux-x86_64-legacy
+            binary_name: perflens-server-bin
+            freeze_mode: script
           - os: macos-latest
             platform: macos-arm64
             binary_name: perflens-server-bin
@@ -47,22 +51,6 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pyinstaller
 
-      - name: Install staticx (Linux only)
-        if: runner.os == 'Linux'
-        shell: bash
-        run: python -m pip install staticx patchelf-wrapper
-
-      - name: Strip RUNPATH from Python .so files (Linux only)
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          # actions/setup-python bakes absolute DT_RUNPATH into all .so files.
-          # PyInstaller bundles them as-is, and staticx refuses to wrap binaries
-          # containing .so files with absolute RUNPATH. Fix: strip RUNPATH before
-          # PyInstaller sees them.
-          find "$pythonLocation" -name '*.so*' -exec patchelf --remove-rpath {} \; 2>/dev/null || true
-          echo "Stripped RUNPATH from Python .so files in $pythonLocation"
-
       - name: Read version
         id: ver
         shell: bash
@@ -79,32 +67,6 @@ jobs:
         run: |
           chmod +x build_package.sh
           ./build_package.sh --server
-
-      # -------------------------------------------------------------------
-      # Linux: wrap the PyInstaller binary with staticx so it bundles all
-      # .so dependencies (including libc/libm) into a static bootloader.
-      # The result runs on any Linux kernel regardless of host glibc.
-      # -------------------------------------------------------------------
-      - name: Make binary portable with staticx (Linux)
-        if: runner.os == 'Linux' && matrix.freeze_mode == 'script'
-        shell: bash
-        run: |
-          VERSION="${{ steps.ver.outputs.version }}"
-          PKG="build/perflens-server-${VERSION}"
-          BIN="$PKG/perflens-server-bin"
-          if [ -f "$BIN" ]; then
-            # Strip RUNPATH from bundled .so files so staticx can process them
-            # (see https://github.com/JonathonReinhart/staticx/issues/188)
-            staticx "$BIN" "${BIN}.static"
-            mv "${BIN}.static" "$BIN"
-            chmod +x "$BIN"
-            echo "staticx: rewrapped $BIN"
-            # Re-pack the tarball with the static binary
-            (cd build && tar -czf "../dist/perflens-server-${VERSION}.tar.gz" \
-              "perflens-server-${VERSION}")
-          else
-            echo "::warning::perflens-server-bin not found, skipping staticx"
-          fi
 
       # -------------------------------------------------------------------
       # Windows: call PyInstaller directly (the bash build script relies on
@@ -365,6 +327,7 @@ jobs:
                 *agent-c*armv7l*)    plat="C Agent — Linux armv7l (static binary)" ;;
                 *agent-c*x86_64*)    plat="C Agent — Linux x86_64 (static binary)" ;;
                 *agent-[0-9]*)       plat="Python Agent (any Linux, Python 3.5+)" ;;
+                *linux-x86_64-legacy*)  plat="Server — Linux x86_64 (legacy glibc ≥ 2.35)" ;;
                 *linux-x86_64*)    plat="Server — Linux x86_64" ;;
                 *macos-arm64*)     plat="Server — macOS arm64" ;;
                 *macos-x86_64*)    plat="Server — macOS x86_64" ;;
