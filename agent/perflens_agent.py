@@ -7,8 +7,10 @@ where only Python 3.5 may be available.
 
 import argparse
 import errno
+import json
 import os
 import platform
+import queue
 import signal
 import socket
 import struct
@@ -24,6 +26,17 @@ LOG_PREFIX = "[perflens-agent]"
 # Binary name for perf; kept as a constant to make it easy to override
 # for testing and to avoid repeating the string throughout the file.
 PERF = 'perf'
+
+# Wire protocol flags (5-byte header: 4-byte length + 1-byte flag)
+FLAG_DATA_RAW = 0       # agent -> server: raw perf data
+FLAG_DATA_ZSTD = 1      # agent -> server: zstd-compressed perf data
+FLAG_CMD_REQUEST = 2    # server -> agent: JSON command
+FLAG_CMD_RESPONSE = 3   # agent -> server: JSON response
+
+# Agent states (listen mode)
+AGENT_IDLE = 'idle'
+AGENT_PROFILING = 'profiling'
+AGENT_PAUSED = 'paused'
 
 
 def log(msg):
@@ -62,6 +75,20 @@ def _run_cmd(cmd, input_data=None, timeout=None):
             pass
         raise
     return p.returncode, stdout, stderr
+
+
+def recv_exactly(sock, n):
+    """Receive exactly n bytes from a socket. Returns None on disconnect."""
+    data = b''
+    while len(data) < n:
+        try:
+            chunk = sock.recv(min(65536, n - len(data)))
+        except (IOError, OSError):
+            return None
+        if not chunk:
+            return None
+        data += chunk
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -569,6 +596,606 @@ class PerfCollector(object):
 
 
 # ---------------------------------------------------------------------------
+# Listen-mode helpers
+# ---------------------------------------------------------------------------
+
+def _get_local_ips():
+    """Get local non-loopback IP addresses for display."""
+    ips = []
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            if ip and ip != "0.0.0.0":
+                ips.append(ip)
+        except Exception:
+            pass
+        finally:
+            s.close()
+    except Exception:
+        pass
+    if not ips:
+        try:
+            ip = socket.gethostbyname(socket.gethostname())
+            if ip and ip != "127.0.0.1":
+                ips.append(ip)
+        except Exception:
+            pass
+    return ips or ["127.0.0.1"]
+
+
+def _read_total_cpu():
+    """Read total CPU jiffies from /proc/stat."""
+    try:
+        with open("/proc/stat") as f:
+            line = f.readline()
+        parts = line.split()
+        if parts[0] != "cpu":
+            return 0
+        total = 0
+        for x in parts[1:]:
+            total += int(x)
+        return total
+    except (IOError, OSError, ValueError):
+        return 0
+
+
+def list_processes():
+    """List running processes with CPU usage from /proc.
+
+    Takes two snapshots 0.5s apart to compute CPU%.
+    Returns list of dicts sorted by CPU descending.
+    """
+    pids = []
+    try:
+        for entry in os.listdir("/proc"):
+            try:
+                pids.append(int(entry))
+            except ValueError:
+                pass
+    except OSError:
+        return []
+
+    # Snapshot 1
+    snap1 = {}
+    total1 = _read_total_cpu()
+    for pid in pids:
+        try:
+            with open("/proc/%d/stat" % pid) as f:
+                parts = f.read().split()
+            snap1[pid] = int(parts[13]) + int(parts[14])
+        except (IOError, OSError, IndexError, ValueError):
+            pass
+
+    time.sleep(0.5)
+
+    # Snapshot 2
+    snap2 = {}
+    total2 = _read_total_cpu()
+    for pid in list(snap1.keys()):
+        try:
+            with open("/proc/%d/stat" % pid) as f:
+                parts = f.read().split()
+            snap2[pid] = int(parts[13]) + int(parts[14])
+        except (IOError, OSError, IndexError, ValueError):
+            pass
+
+    total_delta = total2 - total1
+    if total_delta <= 0:
+        total_delta = 1
+
+    result = []
+    for pid in snap2:
+        if pid not in snap1:
+            continue
+        cpu_pct = ((snap2[pid] - snap1[pid]) / float(total_delta)) * 100.0
+
+        comm = "?"
+        try:
+            with open("/proc/%d/comm" % pid) as f:
+                comm = f.read().strip()
+        except (IOError, OSError):
+            pass
+
+        cmdline = ""
+        try:
+            with open("/proc/%d/cmdline" % pid) as f:
+                cmdline = f.read().replace("\x00", " ").strip()[:200]
+        except (IOError, OSError):
+            pass
+
+        result.append({
+            "pid": pid,
+            "comm": comm,
+            "cmdline": cmdline,
+            "cpu": round(cpu_pct, 1),
+        })
+
+    result.sort(key=lambda p: p["cpu"], reverse=True)
+    return result[:200]
+
+
+# ---------------------------------------------------------------------------
+# Listen-mode agent
+# ---------------------------------------------------------------------------
+
+class ListenModeAgent(object):
+    """Agent in --listen mode: binds a port, waits for server connection,
+    handles bidirectional command protocol."""
+
+    def __init__(self, port, shutdown):
+        self._port = port
+        self._shutdown = shutdown
+        self._sock = None
+        self._sock_lock = threading.Lock()
+        self._cmd_queue = queue.Queue()
+        self._state = AGENT_IDLE
+        self._lock = threading.Lock()
+
+        # Profiling config (overridable via configure command)
+        self._pid = None
+        self._frequency = 99
+        self._duration = 8
+
+        # Probed state
+        self._platform = None
+        self._caps = None
+        self._comp = None
+
+        # Collection thread state
+        self._collector = None
+        self._collect_thread = None
+        self._collect_stop = threading.Event()
+
+    # --- Wire protocol ---
+
+    def _send_msg(self, payload_bytes, flag):
+        """Send message with 5-byte header. Thread-safe."""
+        header = struct.pack("!IB", len(payload_bytes), flag)
+        with self._sock_lock:
+            self._sock.sendall(header + payload_bytes)
+
+    def _send_response(self, cmd_id, data):
+        """Send command response (flag 3)."""
+        data["id"] = cmd_id
+        payload = json.dumps(data).encode("utf-8")
+        self._send_msg(payload, FLAG_CMD_RESPONSE)
+
+    def _send_data(self, payload, comp_flag):
+        """Send profiling data (flag 0 or 1)."""
+        self._send_msg(payload, comp_flag)
+
+    def _recv_loop(self):
+        """Receiver thread: reads commands from server, puts on queue."""
+        while not self._shutdown.is_set:
+            try:
+                header = recv_exactly(self._sock, 5)
+                if header is None:
+                    log("Server disconnected")
+                    self._shutdown.set()
+                    break
+                length, flag = struct.unpack("!IB", header)
+                if length == 0:
+                    continue
+                payload = recv_exactly(self._sock, length)
+                if payload is None:
+                    log("Server disconnected mid-message")
+                    self._shutdown.set()
+                    break
+                if flag == FLAG_CMD_REQUEST:
+                    try:
+                        cmd = json.loads(payload.decode("utf-8", "replace"))
+                        self._cmd_queue.put(cmd)
+                    except ValueError as e:
+                        log("Bad command JSON: %s" % e)
+                else:
+                    log("Unexpected flag %d from server" % flag)
+            except (IOError, OSError) as e:
+                if not self._shutdown.is_set:
+                    log("Recv error: %s" % e)
+                self._shutdown.set()
+                break
+
+    # --- Command dispatch ---
+
+    def _handle_command(self, cmd):
+        cmd_name = cmd.get("cmd", "")
+        cmd_id = cmd.get("id", "")
+        args = cmd.get("args") or {}
+
+        handlers = {
+            "ping": self._cmd_ping,
+            "status": self._cmd_status,
+            "list_processes": self._cmd_list_processes,
+            "verify_pid": self._cmd_verify_pid,
+            "verify_perf": self._cmd_verify_perf,
+            "reprobe": self._cmd_reprobe,
+            "start": self._cmd_start,
+            "stop": self._cmd_stop_profiling,
+            "pause": self._cmd_pause,
+            "resume": self._cmd_resume,
+            "configure": self._cmd_configure,
+        }
+
+        handler = handlers.get(cmd_name)
+        if handler:
+            try:
+                handler(cmd_id, args)
+            except Exception as e:
+                log("Command '%s' error: %s" % (cmd_name, e))
+                try:
+                    self._send_response(cmd_id, {"ok": False, "error": str(e)})
+                except (IOError, OSError):
+                    pass
+        else:
+            self._send_response(cmd_id, {
+                "ok": False, "error": "unknown command: %s" % cmd_name,
+            })
+
+    # --- Command handlers ---
+
+    def _cmd_ping(self, cmd_id, args):
+        self._send_response(cmd_id, {"ok": True})
+
+    def _cmd_status(self, cmd_id, args):
+        with self._lock:
+            data = {
+                "ok": True,
+                "state": self._state,
+                "pid": self._pid,
+                "frequency": self._frequency,
+                "duration": self._duration,
+            }
+            if self._platform:
+                data["platform"] = {
+                    "arch": self._platform.arch,
+                    "kernel": self._platform.kernel,
+                    "perf_version": self._platform.perf_version,
+                    "perf_event_paranoid": self._platform.perf_event_paranoid,
+                }
+            if self._caps:
+                data["capabilities"] = {
+                    "record_events": self._caps.record_events,
+                    "stat_only_events": self._caps.stat_only_events,
+                    "callgraph_method": self._caps.callgraph_method,
+                }
+        self._send_response(cmd_id, data)
+
+    def _cmd_list_processes(self, cmd_id, args):
+        procs = list_processes()
+        self._send_response(cmd_id, {"ok": True, "processes": procs})
+
+    def _cmd_verify_pid(self, cmd_id, args):
+        pid = args.get("pid")
+        if pid is None:
+            self._send_response(cmd_id, {"ok": False, "error": "pid required"})
+            return
+        pid = int(pid)
+        exists = _process_exists(pid)
+        info = {}
+        if exists:
+            try:
+                with open("/proc/%d/comm" % pid) as f:
+                    info["comm"] = f.read().strip()
+            except (IOError, OSError):
+                pass
+            try:
+                with open("/proc/%d/cmdline" % pid) as f:
+                    info["cmdline"] = f.read().replace("\x00", " ").strip()[:200]
+            except (IOError, OSError):
+                pass
+        self._send_response(cmd_id, {
+            "ok": True, "exists": exists, "pid": pid, "info": info,
+        })
+
+    def _cmd_verify_perf(self, cmd_id, args):
+        try:
+            rc, out, _ = _run_cmd([PERF, "--version"], timeout=5)
+            version = out.decode("utf-8", "replace").strip() if rc == 0 else None
+        except Exception:
+            version = None
+
+        if not version:
+            self._send_response(cmd_id, {
+                "ok": True, "available": False,
+                "error": "perf not found or not working",
+            })
+            return
+
+        # Quick functional check against self
+        self_pid = os.getpid()
+        try:
+            rc, _, stderr = _run_cmd(
+                [PERF, "stat", "-e", "cycles", "-p", str(self_pid),
+                 "--", "sleep", "0"],
+                timeout=10,
+            )
+            functional = (rc == 0)
+            err = None if functional else stderr.decode("utf-8", "replace").strip()
+        except Exception as e:
+            functional = False
+            err = str(e)
+
+        paranoid = self._platform.perf_event_paranoid if self._platform else -1
+        self._send_response(cmd_id, {
+            "ok": True, "available": True, "version": version,
+            "functional": functional, "error": err,
+            "perf_event_paranoid": paranoid,
+        })
+
+    def _cmd_reprobe(self, cmd_id, args):
+        pid = args.get("pid", self._pid)
+        if pid is None:
+            self._send_response(cmd_id, {"ok": False, "error": "pid required"})
+            return
+        pid = int(pid)
+        if not _process_exists(pid):
+            self._send_response(cmd_id, {
+                "ok": False, "error": "process %d not found" % pid,
+            })
+            return
+
+        log("Re-probing capabilities for PID %d..." % pid)
+        caps = probe_capabilities(pid)
+        with self._lock:
+            self._caps = caps
+            self._pid = pid
+        self._send_response(cmd_id, {
+            "ok": True,
+            "record_events": caps.record_events,
+            "stat_only_events": caps.stat_only_events,
+            "callgraph_method": caps.callgraph_method,
+        })
+
+    def _cmd_start(self, cmd_id, args):
+        with self._lock:
+            if self._state == AGENT_PROFILING:
+                self._send_response(cmd_id, {
+                    "ok": False, "error": "already profiling",
+                })
+                return
+
+        pid = args.get("pid", self._pid)
+        if pid is None:
+            self._send_response(cmd_id, {"ok": False, "error": "pid required"})
+            return
+        pid = int(pid)
+
+        if not _process_exists(pid):
+            self._send_response(cmd_id, {
+                "ok": False, "error": "process %d not found" % pid,
+            })
+            return
+
+        freq = int(args.get("frequency", self._frequency))
+        dur = int(args.get("duration", self._duration))
+
+        # Probe capabilities if needed
+        with self._lock:
+            if self._caps is None or self._pid != pid:
+                self._pid = pid
+        caps = probe_capabilities(pid)
+        with self._lock:
+            self._caps = caps
+            self._frequency = freq
+            self._duration = dur
+
+        if not caps.record_events:
+            self._send_response(cmd_id, {
+                "ok": False,
+                "error": "no perf record events available for PID %d" % pid,
+            })
+            return
+
+        # Start collection thread
+        self._collect_stop.clear()
+        collector = PerfCollector(pid, caps, freq, dur, self._shutdown)
+        with self._lock:
+            self._collector = collector
+            self._state = AGENT_PROFILING
+
+        self._collect_thread = threading.Thread(
+            target=self._collection_loop, args=(collector,),
+        )
+        self._collect_thread.daemon = True
+        self._collect_thread.start()
+
+        self._send_response(cmd_id, {
+            "ok": True, "pid": pid, "frequency": freq, "duration": dur,
+            "events": caps.record_events,
+            "callgraph": caps.callgraph_method,
+        })
+
+    def _cmd_stop_profiling(self, cmd_id, args):
+        with self._lock:
+            if self._state not in (AGENT_PROFILING, AGENT_PAUSED):
+                self._send_response(cmd_id, {
+                    "ok": False, "error": "not profiling",
+                })
+                return
+
+        self._collect_stop.set()
+        if self._collector:
+            self._collector.terminate_all()
+        if self._collect_thread:
+            self._collect_thread.join(timeout=15)
+            self._collect_thread = None
+
+        with self._lock:
+            self._state = AGENT_IDLE
+            self._collector = None
+
+        self._send_response(cmd_id, {"ok": True})
+
+    def _cmd_pause(self, cmd_id, args):
+        with self._lock:
+            if self._state != AGENT_PROFILING:
+                self._send_response(cmd_id, {
+                    "ok": False, "error": "not profiling",
+                })
+                return
+            self._state = AGENT_PAUSED
+        if self._collector:
+            self._collector.terminate_all()
+        self._send_response(cmd_id, {"ok": True})
+
+    def _cmd_resume(self, cmd_id, args):
+        with self._lock:
+            if self._state != AGENT_PAUSED:
+                self._send_response(cmd_id, {
+                    "ok": False, "error": "not paused",
+                })
+                return
+            self._state = AGENT_PROFILING
+        self._send_response(cmd_id, {"ok": True})
+
+    def _cmd_configure(self, cmd_id, args):
+        with self._lock:
+            if "frequency" in args:
+                self._frequency = int(args["frequency"])
+            if "duration" in args:
+                self._duration = int(args["duration"])
+        self._send_response(cmd_id, {
+            "ok": True,
+            "frequency": self._frequency,
+            "duration": self._duration,
+        })
+
+    # --- Collection loop (runs in separate thread) ---
+
+    def _collection_loop(self, collector):
+        comp = self._comp
+        round_num = 0
+        while not self._collect_stop.is_set() and not self._shutdown.is_set:
+            with self._lock:
+                st = self._state
+            if st == AGENT_PAUSED:
+                self._collect_stop.wait(1.0)
+                continue
+
+            if not _process_exists(self._pid):
+                log("Process %d exited" % self._pid)
+                with self._lock:
+                    self._state = AGENT_IDLE
+                break
+
+            round_num += 1
+            log("Round %d: collecting (%ds)..." % (round_num, self._duration))
+            output = collector.collect()
+
+            if self._collect_stop.is_set() or self._shutdown.is_set:
+                break
+            if not output:
+                log("Round %d: no data" % round_num)
+                self._collect_stop.wait(1.0)
+                continue
+
+            raw_bytes = output.encode("utf-8")
+            payload, flag = compress_data(raw_bytes, comp)
+
+            try:
+                self._send_data(payload, flag)
+                if flag == FLAG_DATA_ZSTD:
+                    ratio = len(raw_bytes) / float(len(payload)) if len(payload) > 0 else 0
+                    log("Round %d: sent %d bytes (%.1fx)" % (
+                        round_num, len(payload), ratio))
+                else:
+                    log("Round %d: sent %d bytes" % (round_num, len(payload)))
+            except (IOError, OSError) as e:
+                log("Round %d: send failed: %s" % (round_num, e))
+                break
+
+        with self._lock:
+            if self._state in (AGENT_PROFILING, AGENT_PAUSED):
+                self._state = AGENT_IDLE
+        log("Collection loop ended")
+
+    # --- Main entry point ---
+
+    def run(self):
+        """Bind port, wait for server, process commands."""
+        self._platform = detect_platform()
+        self._comp = probe_compression()
+        ips = _get_local_ips()
+
+        # Bind and listen
+        listen_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listen_sock.bind(("0.0.0.0", self._port))
+        listen_sock.listen(1)
+        listen_sock.settimeout(2.0)
+
+        log("Listening on port %d" % self._port)
+        log("Waiting for server connection...")
+        for ip in ips:
+            log("  Connect from server: %s:%d" % (ip, self._port))
+
+        # Accept server connection
+        while not self._shutdown.is_set:
+            try:
+                conn, addr = listen_sock.accept()
+                log("Server connected from %s:%d" % (addr[0], addr[1]))
+                self._sock = conn
+                break
+            except socket.timeout:
+                continue
+            except (IOError, OSError) as e:
+                if not self._shutdown.is_set:
+                    log("Accept error: %s" % e)
+                break
+
+        listen_sock.close()
+        if self._sock is None:
+            return
+
+        # Send hello handshake
+        hello = {
+            "type": "hello",
+            "version": 1,
+            "agent": "perflens",
+            "platform": {
+                "arch": self._platform.arch,
+                "kernel": self._platform.kernel,
+                "perf_version": self._platform.perf_version,
+                "perf_event_paranoid": self._platform.perf_event_paranoid,
+            },
+        }
+        try:
+            self._send_msg(json.dumps(hello).encode("utf-8"), FLAG_CMD_RESPONSE)
+        except (IOError, OSError) as e:
+            log("Failed to send hello: %s" % e)
+            return
+
+        # Start receiver thread
+        recv_thread = threading.Thread(target=self._recv_loop)
+        recv_thread.daemon = True
+        recv_thread.start()
+
+        # Command processing loop
+        while not self._shutdown.is_set:
+            try:
+                cmd = self._cmd_queue.get(timeout=1.0)
+                self._handle_command(cmd)
+            except queue.Empty:
+                continue
+            except Exception as e:
+                log("Command loop error: %s" % e)
+
+        # Cleanup
+        log("Shutting down listen mode agent")
+        self._collect_stop.set()
+        if self._collector:
+            self._collector.terminate_all()
+        if self._collect_thread:
+            self._collect_thread.join(timeout=5)
+        try:
+            self._sock.close()
+        except (IOError, OSError):
+            pass
+
+
+# ---------------------------------------------------------------------------
 # Signal handling
 # ---------------------------------------------------------------------------
 
@@ -607,17 +1234,48 @@ def _process_exists(pid):
 
 def main():
     argp = argparse.ArgumentParser(description="PerfLens Device Agent")
-    argp.add_argument("--pid", type=int, required=True,
+    argp.add_argument("--pid", type=int, default=None,
                       help="PID of process to profile")
     argp.add_argument("--server", type=str, default=None,
                       help="Server IP to stream data to (omit for stdout mode)")
     argp.add_argument("--port", type=int, default=9999,
-                      help="Server port (default: 9999)")
+                      help="Server/listen port (default: 9999)")
     argp.add_argument("--frequency", type=int, default=99,
                       help="Sampling frequency in Hz (default: 99)")
     argp.add_argument("--duration", type=int, default=8,
                       help="Duration of each collection in seconds (default: 8)")
+    argp.add_argument("--listen", action="store_true", default=False,
+                      help="Listen mode: bind port, wait for server to connect")
     args = argp.parse_args()
+
+    # Listen mode: bidirectional, server connects to us
+    if args.listen:
+        shutdown = ShutdownFlag()
+        agent = ListenModeAgent(args.port, shutdown)
+
+        def _listen_sig_handler(signum, frame):
+            try:
+                signame = signal.Signals(signum).name
+            except Exception:
+                signame = str(signum)
+            log("Received %s, shutting down..." % signame)
+            shutdown.set()
+            if agent._collector:
+                agent._collector.terminate_all()
+            try:
+                if agent._sock:
+                    agent._sock.close()
+            except (IOError, OSError):
+                pass
+
+        signal.signal(signal.SIGINT, _listen_sig_handler)
+        signal.signal(signal.SIGTERM, _listen_sig_handler)
+        agent.run()
+        return
+
+    # Legacy mode requires --pid
+    if args.pid is None:
+        argp.error("--pid is required (unless using --listen mode)")
 
     # Verify the process exists
     if not _process_exists(args.pid):

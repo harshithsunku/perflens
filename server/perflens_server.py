@@ -8,8 +8,10 @@ import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import uuid
 from datetime import datetime
 from http.server import SimpleHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
@@ -31,6 +33,7 @@ class ServerConfig:
     map_file_path: str = None
     addr2line_bin: str = None
     zstd_bin: str = None
+    perf_bin: str = None
     path_map: dict = None
     sessions_dir: str = ''
     max_samples: int = 500000
@@ -91,9 +94,17 @@ class ProfilingState:
             self.perf_stat = {}
 
 
+# Wire protocol flags (must match agent)
+FLAG_DATA_RAW = 0
+FLAG_DATA_ZSTD = 1
+FLAG_CMD_REQUEST = 2
+FLAG_CMD_RESPONSE = 3
+
 # Module-level instances, set in main()
 config: ServerConfig = None
 state: ProfilingState = None
+agent_session: 'AgentSession' = None  # managed agent connection
+wizard_state: dict = None              # wizard UI state
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +188,16 @@ def probe_tools(cfg):
         for k, v in cfg.path_map.items():
             print(f"[server]   path-map: {k} → {v}", file=sys.stderr)
 
+    # perf
+    found = _find_binary('perf')
+    if found:
+        cfg.perf_bin = found
+        print(f"[server]   perf: {found}", file=sys.stderr)
+    else:
+        cfg.perf_bin = None
+        print("[server]   perf: NOT FOUND (perf.data import disabled)",
+              file=sys.stderr)
+
     # Inline resolution
     if cfg.inline:
         print("[server]   inline: enabled (will probe at mapper init)",
@@ -230,6 +251,275 @@ def decompress_payload(payload, comp_flag):
     print(f"[server] WARNING: unknown compression flag {comp_flag}",
           file=sys.stderr)
     return None
+
+
+# ---------------------------------------------------------------------------
+# Managed agent session (bidirectional protocol)
+# ---------------------------------------------------------------------------
+
+class AgentSession:
+    """Manages a bidirectional connection to a listen-mode agent.
+
+    Handles outbound TCP connection, command/response relay via flag 2/3,
+    and receives profiling data (flag 0/1) from the agent.
+    """
+
+    def __init__(self, sock, addr):
+        self.sock = sock
+        self.addr = addr          # (host, port) string
+        self.lock = threading.Lock()
+        self.connected = True
+        self.hello = None         # agent hello payload
+        self._pending = {}        # cmd_id -> threading.Event
+        self._responses = {}      # cmd_id -> response dict
+        self._recv_thread = None
+
+        # Session persistence for profiling data
+        self._session_id = None
+        self._session_dir = None
+        self._raw_chunks = []
+
+    def start(self):
+        """Start the receiver thread. Call after reading the hello message."""
+        self._recv_thread = threading.Thread(target=self._recv_loop, daemon=True)
+        self._recv_thread.start()
+
+    def send_command(self, cmd, args=None, timeout=60):
+        """Send a command and wait for the response. Thread-safe.
+
+        Returns the response dict, or {'ok': False, 'error': '...'} on failure.
+        """
+        cmd_id = uuid.uuid4().hex[:12]
+        payload = json.dumps({
+            'id': cmd_id,
+            'cmd': cmd,
+            'args': args or {},
+        }).encode('utf-8')
+
+        event = threading.Event()
+        self._pending[cmd_id] = event
+
+        try:
+            header = struct.pack('!IB', len(payload), FLAG_CMD_REQUEST)
+            with self.lock:
+                self.sock.sendall(header + payload)
+        except (IOError, OSError) as e:
+            self._pending.pop(cmd_id, None)
+            return {'ok': False, 'error': f'send failed: {e}'}
+
+        # Wait for response
+        if not event.wait(timeout):
+            self._pending.pop(cmd_id, None)
+            return {'ok': False, 'error': 'command timed out'}
+
+        return self._responses.pop(cmd_id, {'ok': False, 'error': 'no response'})
+
+    def _recv_loop(self):
+        """Read messages from agent, dispatch by flag type."""
+        # Setup session for saving profiling data
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        self._session_id = f'{ts}_{self.addr}'
+        self._session_dir = os.path.join(config.sessions_dir, self._session_id)
+        os.makedirs(self._session_dir, exist_ok=True)
+
+        mapper = state.source_mapper
+
+        while self.connected:
+            try:
+                header = recv_exactly(self.sock, 5)
+                if header is None:
+                    print(f"[server] Managed agent {self.addr} disconnected",
+                          file=sys.stderr)
+                    break
+
+                length, flag = struct.unpack('!IB', header)
+                if length == 0:
+                    continue
+
+                payload = recv_exactly(self.sock, length)
+                if payload is None:
+                    print(f"[server] Managed agent {self.addr} disconnected mid-msg",
+                          file=sys.stderr)
+                    break
+
+                if flag == FLAG_CMD_RESPONSE:
+                    # Command response
+                    try:
+                        resp = json.loads(payload.decode('utf-8', errors='replace'))
+                        cmd_id = resp.get('id', '')
+                        if cmd_id in self._pending:
+                            self._responses[cmd_id] = resp
+                            self._pending[cmd_id].set()
+                        else:
+                            # Unsolicited response (e.g. hello) — ignore
+                            pass
+                    except (ValueError, KeyError) as e:
+                        print(f"[server] Bad agent response JSON: {e}",
+                              file=sys.stderr)
+
+                elif flag in (FLAG_DATA_RAW, FLAG_DATA_ZSTD):
+                    # Profiling data — process same as legacy agent
+                    text = decompress_payload(payload, flag)
+                    if text is None:
+                        continue
+
+                    self._raw_chunks.append(text)
+                    script_text, stat_text = split_perf_data(text)
+                    samples = parse_perf_script(script_text)
+                    perf_stat = parse_perf_stat(stat_text) if stat_text else {}
+
+                    if not samples:
+                        continue
+
+                    all_samples, event_types = state.add_samples(samples, perf_stat)
+
+                    print(f"[server] Managed agent chunk: "
+                          f"{len(samples)} new, {len(all_samples)} total",
+                          file=sys.stderr)
+
+                    per_event = build_per_event_data(
+                        all_samples, event_types, mapper)
+                    broadcast_sse('event_types', event_types)
+                    broadcast_sse('per_event', per_event)
+                    if perf_stat:
+                        broadcast_sse('perf_stat', perf_stat)
+
+                else:
+                    print(f"[server] Unknown flag {flag} from managed agent",
+                          file=sys.stderr)
+
+            except (ConnectionResetError, BrokenPipeError, OSError) as e:
+                print(f"[server] Managed agent recv error: {e}", file=sys.stderr)
+                break
+
+        self.connected = False
+        with state.lock:
+            state.agent_connected = False
+            state.agent_conn = None
+            all_samples = list(state.all_samples)
+            perf_stat_final = dict(state.perf_stat)
+        broadcast_sse('status', {'connected': False, 'agent': None})
+
+        # Save session
+        if self._raw_chunks:
+            t = threading.Thread(
+                target=_save_session,
+                args=(self._session_dir, self._session_id,
+                      (self.addr, 0), self._raw_chunks,
+                      all_samples, perf_stat_final),
+                daemon=True,
+            )
+            t.start()
+
+    def close(self):
+        """Disconnect from agent."""
+        self.connected = False
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+def connect_to_agent(host, port, timeout=10):
+    """Connect to a listen-mode agent. Returns AgentSession or raises."""
+    global agent_session
+
+    # Close existing session if any
+    if agent_session and agent_session.connected:
+        agent_session.close()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        sock.connect((host, port))
+    except (IOError, OSError) as e:
+        sock.close()
+        raise RuntimeError(f'Cannot connect to agent at {host}:{port}: {e}')
+
+    # Read hello message (flag 3)
+    header = recv_exactly(sock, 5)
+    if header is None:
+        sock.close()
+        raise RuntimeError('Agent disconnected before hello')
+
+    length, flag = struct.unpack('!IB', header)
+    if flag != FLAG_CMD_RESPONSE:
+        sock.close()
+        raise RuntimeError(f'Expected hello (flag 3), got flag {flag}')
+
+    payload = recv_exactly(sock, length)
+    if payload is None:
+        sock.close()
+        raise RuntimeError('Agent disconnected during hello')
+
+    try:
+        hello = json.loads(payload.decode('utf-8', errors='replace'))
+    except ValueError as e:
+        sock.close()
+        raise RuntimeError(f'Invalid hello JSON: {e}')
+
+    if hello.get('type') != 'hello':
+        sock.close()
+        raise RuntimeError(f'Expected hello message, got: {hello.get("type")}')
+
+    addr_str = f'{host}:{port}'
+    session = AgentSession(sock, addr_str)
+    session.hello = hello
+
+    # Update global state
+    with state.lock:
+        state.agent_connected = True
+        state.agent_addr = addr_str
+        state.agent_conn = sock
+        state.all_samples = []
+        state.chunk_count = 0
+
+    broadcast_sse('status', {'connected': True, 'agent': addr_str,
+                             'managed': True})
+
+    session.start()
+    agent_session = session
+
+    print(f"[server] Connected to managed agent at {addr_str}: "
+          f"platform={hello.get('platform', {}).get('arch', '?')}",
+          file=sys.stderr)
+
+    return session
+
+
+# ---------------------------------------------------------------------------
+# Wizard state management
+# ---------------------------------------------------------------------------
+
+def get_wizard_state():
+    """Get current wizard state (server-side, survives page refreshes)."""
+    global wizard_state
+    if wizard_state is None:
+        wizard_state = {
+            'step': 0,
+            'agent_host': '',
+            'agent_port': 9999,
+            'connected': False,
+            'perf_verified': False,
+            'binary_path': '',
+            'source_dir': '',
+            'pid': None,
+            'process_name': '',
+            'frequency': 99,
+            'duration': 8,
+        }
+    return wizard_state
+
+
+def update_wizard_state(updates):
+    """Merge updates into wizard state."""
+    ws = get_wizard_state()
+    ws.update(updates)
+    return ws
 
 
 # ---------------------------------------------------------------------------
@@ -383,6 +673,93 @@ def _save_session(session_dir, session_id, addr, raw_chunks,
               file=sys.stderr)
     except Exception as e:
         print(f"[server] Error saving session: {e}", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# perf.data import
+# ---------------------------------------------------------------------------
+
+MAX_IMPORT_SIZE = 500 * 1024 * 1024  # 500 MB
+
+def _run_perf_script(perf_data_path):
+    """Run perf script on a perf.data file. Returns perf script text or raises."""
+    if not config.perf_bin:
+        raise RuntimeError('perf not found on server — cannot import perf.data')
+
+    # Try with -F first (structured output, matches agent behavior)
+    try:
+        r = subprocess.run(
+            [config.perf_bin, 'script', '-F', 'comm,pid,time,period,event,ip,sym,dso',
+             '-i', perf_data_path],
+            capture_output=True, text=True, timeout=300,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout
+    except subprocess.TimeoutExpired:
+        raise RuntimeError('perf script timed out (file too large?)')
+    except Exception:
+        pass
+
+    # Fallback to plain perf script
+    try:
+        r = subprocess.run(
+            [config.perf_bin, 'script', '-i', perf_data_path],
+            capture_output=True, text=True, timeout=300,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout
+        stderr = r.stderr.strip() if r.stderr else 'unknown error'
+        raise RuntimeError(f'perf script failed: {stderr}')
+    except subprocess.TimeoutExpired:
+        raise RuntimeError('perf script timed out (file too large?)')
+
+
+def import_perf_data(perf_data_path):
+    """Import a perf.data file: run perf script, parse, save as session.
+
+    Returns (session_id, all_samples, metadata) on success.
+    Raises RuntimeError on failure.
+    """
+    if not os.path.isfile(perf_data_path):
+        raise RuntimeError(f'file not found: {perf_data_path}')
+
+    print(f"[server] Importing perf.data: {perf_data_path}", file=sys.stderr)
+    script_text = _run_perf_script(perf_data_path)
+
+    # Parse
+    samples = parse_perf_script(script_text)
+    if not samples:
+        raise RuntimeError('perf script produced no samples '
+                           '(file may be empty or corrupt)')
+
+    event_types = get_event_types(samples)
+    session_id = (datetime.now().strftime('%Y%m%d_%H%M%S')
+                  + f'_{os.getpid():04x}_import')
+
+    # Save as session (single chunk)
+    session_dir = os.path.join(config.sessions_dir, session_id)
+    os.makedirs(session_dir, exist_ok=True)
+
+    with open(os.path.join(session_dir, 'chunk_000.txt'), 'w') as f:
+        f.write(script_text)
+
+    metadata = {
+        'session_id': session_id,
+        'agent': 'import',
+        'timestamp': datetime.now().isoformat(),
+        'total_samples': len(samples),
+        'chunks': 1,
+        'event_types': event_types,
+        'perf_stat': {},
+    }
+    with open(os.path.join(session_dir, 'metadata.json'), 'w') as f:
+        json.dump(metadata, f, indent=2)
+
+    print(f"[server] Import complete: {session_id} "
+          f"({len(samples)} samples, events: {event_types})",
+          file=sys.stderr)
+
+    return session_id, samples, metadata
 
 
 # ---------------------------------------------------------------------------
@@ -603,12 +980,14 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
         path = parsed.path
 
         if path == '/api/status':
+            managed = agent_session.connected if agent_session else False
             self._send_json({
                 'status': 'ok',
                 'agent_connected': state.agent_connected,
                 'agent_addr': state.agent_addr,
                 'total_samples': len(state.all_samples),
                 'chunk_count': state.chunk_count,
+                'managed': managed,
             })
         elif path == '/api/stop':
             self._handle_stop()
@@ -633,6 +1012,12 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
             params = parse_qs(parsed.query)
             file_path = params.get('file', [None])[0]
             self._handle_source_request(file_path)
+        elif path == '/api/wizard/state':
+            self._send_json(get_wizard_state())
+        elif path == '/api/browse':
+            params = parse_qs(parsed.query)
+            browse_path = params.get('path', ['/'])[0]
+            self._handle_browse(browse_path)
         else:
             # Serve static files from UI directory
             if path == '/':
@@ -643,9 +1028,29 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
             else:
                 self.send_error(404)
 
-    def _send_json(self, data):
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if path == '/api/import':
+            self._handle_import()
+        elif path == '/api/connect':
+            self._handle_connect()
+        elif path == '/api/agent/command':
+            self._handle_agent_command()
+        elif path == '/api/wizard/state':
+            self._handle_wizard_state_update()
+        elif path == '/api/config/binary':
+            self._handle_config_binary()
+        elif path == '/api/config/source':
+            self._handle_config_source()
+        elif path == '/api/config/pathmap':
+            self._handle_config_pathmap()
+        else:
+            self.send_error(404)
+
+    def _send_json(self, data, status=200):
         body = json.dumps(data).encode('utf-8')
-        self.send_response(200)
+        self.send_response(status)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', len(body))
         self.send_header('Access-Control-Allow-Origin', '*')
@@ -654,6 +1059,18 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
 
     def _handle_stop(self):
         """Close the agent connection, triggering normal disconnect flow."""
+        global agent_session
+        # Stop managed agent if active
+        if agent_session and agent_session.connected:
+            try:
+                agent_session.send_command('stop', timeout=5)
+            except Exception:
+                pass
+            agent_session.close()
+            agent_session = None
+            self._send_json({'stopped': True})
+            return
+        # Legacy agent
         with state.lock:
             conn = state.agent_conn
         if conn:
@@ -664,6 +1081,197 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
             self._send_json({'stopped': True})
         else:
             self._send_json({'stopped': False, 'reason': 'no agent connected'})
+
+    def _read_json_body(self):
+        """Read and parse JSON POST body."""
+        length = int(self.headers.get('Content-Length', 0))
+        if length <= 0:
+            return {}
+        body = self.rfile.read(length)
+        return json.loads(body.decode('utf-8', errors='replace'))
+
+    def _handle_connect(self):
+        """POST /api/connect — connect to a listen-mode agent."""
+        try:
+            body = self._read_json_body()
+        except (ValueError, KeyError):
+            self._send_json({'error': 'invalid JSON'}, 400)
+            return
+
+        host = body.get('host', '').strip()
+        port = int(body.get('port', 9999))
+
+        if not host:
+            self._send_json({'error': 'host required'}, 400)
+            return
+
+        try:
+            session = connect_to_agent(host, port)
+            update_wizard_state({
+                'agent_host': host,
+                'agent_port': port,
+                'connected': True,
+            })
+            self._send_json({
+                'ok': True,
+                'hello': session.hello,
+                'addr': session.addr,
+            })
+        except RuntimeError as e:
+            self._send_json({'ok': False, 'error': str(e)}, 500)
+
+    def _handle_agent_command(self):
+        """POST /api/agent/command — relay command to managed agent."""
+        if not agent_session or not agent_session.connected:
+            self._send_json({'error': 'no managed agent connected'}, 400)
+            return
+
+        try:
+            body = self._read_json_body()
+        except (ValueError, KeyError):
+            self._send_json({'error': 'invalid JSON'}, 400)
+            return
+
+        cmd = body.get('cmd', '')
+        args = body.get('args') or {}
+        timeout = int(body.get('timeout', 60))
+
+        if not cmd:
+            self._send_json({'error': 'cmd required'}, 400)
+            return
+
+        # list_processes and reprobe can take longer
+        if cmd in ('list_processes', 'reprobe', 'start'):
+            timeout = max(timeout, 120)
+
+        resp = agent_session.send_command(cmd, args, timeout=timeout)
+        self._send_json(resp)
+
+    def _handle_wizard_state_update(self):
+        """POST /api/wizard/state — update wizard state."""
+        try:
+            body = self._read_json_body()
+        except (ValueError, KeyError):
+            self._send_json({'error': 'invalid JSON'}, 400)
+            return
+        ws = update_wizard_state(body)
+        self._send_json(ws)
+
+    def _handle_config_binary(self):
+        """POST /api/config/binary — set binary path for addr2line."""
+        try:
+            body = self._read_json_body()
+        except (ValueError, KeyError):
+            self._send_json({'error': 'invalid JSON'}, 400)
+            return
+
+        path = body.get('path', '').strip()
+        if not path:
+            config.binary_path = None
+            self._send_json({'ok': True, 'path': None})
+            return
+
+        path = os.path.abspath(path)
+        if not os.path.isfile(path):
+            self._send_json({'ok': False, 'error': f'file not found: {path}'}, 400)
+            return
+
+        config.binary_path = path
+        # Recreate source mapper with new binary
+        mapper = SourceMapper(
+            config.source_dir,
+            binary_path=config.binary_path,
+            map_file_path=config.map_file_path,
+            addr2line_bin=config.addr2line_bin,
+            path_map=config.path_map or {},
+            inline=config.inline,
+        )
+        state.source_mapper = mapper
+        update_wizard_state({'binary_path': path})
+        self._send_json({'ok': True, 'path': path})
+
+    def _handle_config_source(self):
+        """POST /api/config/source — set source directory."""
+        try:
+            body = self._read_json_body()
+        except (ValueError, KeyError):
+            self._send_json({'error': 'invalid JSON'}, 400)
+            return
+
+        path = body.get('path', '').strip()
+        if not path:
+            self._send_json({'ok': False, 'error': 'path required'}, 400)
+            return
+
+        path = os.path.abspath(path)
+        if not os.path.isdir(path):
+            self._send_json({'ok': False, 'error': f'directory not found: {path}'}, 400)
+            return
+
+        config.source_dir = path
+        # Recreate source mapper
+        mapper = SourceMapper(
+            config.source_dir,
+            binary_path=config.binary_path,
+            map_file_path=config.map_file_path,
+            addr2line_bin=config.addr2line_bin,
+            path_map=config.path_map or {},
+            inline=config.inline,
+        )
+        state.source_mapper = mapper
+        update_wizard_state({'source_dir': path})
+        self._send_json({'ok': True, 'path': path})
+
+    def _handle_config_pathmap(self):
+        """POST /api/config/pathmap — set path mapping."""
+        try:
+            body = self._read_json_body()
+        except (ValueError, KeyError):
+            self._send_json({'error': 'invalid JSON'}, 400)
+            return
+
+        path_map = body.get('path_map', {})
+        config.path_map = path_map if path_map else None
+        # Recreate source mapper
+        mapper = SourceMapper(
+            config.source_dir,
+            binary_path=config.binary_path,
+            map_file_path=config.map_file_path,
+            addr2line_bin=config.addr2line_bin,
+            path_map=config.path_map or {},
+            inline=config.inline,
+        )
+        state.source_mapper = mapper
+        self._send_json({'ok': True, 'path_map': path_map})
+
+    def _handle_browse(self, browse_path):
+        """GET /api/browse?path=/ — browse server filesystem for files."""
+        browse_path = os.path.abspath(browse_path)
+        if not os.path.isdir(browse_path):
+            self._send_json({'error': f'not a directory: {browse_path}'}, 400)
+            return
+
+        entries = []
+        try:
+            for name in sorted(os.listdir(browse_path)):
+                full = os.path.join(browse_path, name)
+                is_dir = os.path.isdir(full)
+                entry = {'name': name, 'path': full, 'is_dir': is_dir}
+                if not is_dir:
+                    try:
+                        entry['size'] = os.path.getsize(full)
+                    except OSError:
+                        entry['size'] = 0
+                entries.append(entry)
+        except PermissionError:
+            self._send_json({'error': f'permission denied: {browse_path}'}, 403)
+            return
+
+        self._send_json({
+            'path': browse_path,
+            'parent': os.path.dirname(browse_path),
+            'entries': entries[:500],  # cap at 500 entries
+        })
 
     def _serve_file(self, file_path):
         ext = os.path.splitext(file_path)[1]
@@ -862,6 +1470,51 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
         else:
             self._send_json({'error': f'unknown format: {fmt}'})
 
+    def _handle_import(self):
+        """Handle POST /api/import — import a perf.data file."""
+        content_length = int(self.headers.get('Content-Length', 0))
+        if content_length <= 0:
+            self._send_json({'error': 'empty request body'}, 400)
+            return
+        if content_length > MAX_IMPORT_SIZE:
+            self._send_json({
+                'error': f'file too large ({content_length} bytes, '
+                         f'max {MAX_IMPORT_SIZE // 1024 // 1024} MB)'
+            }, 413)
+            return
+        if not config.perf_bin:
+            self._send_json({
+                'error': 'perf not found on server — cannot import perf.data'
+            }, 500)
+            return
+
+        # Read upload into temp file
+        tmp = None
+        try:
+            tmp = tempfile.NamedTemporaryFile(suffix='.data', delete=False)
+            remaining = content_length
+            while remaining > 0:
+                chunk = self.rfile.read(min(65536, remaining))
+                if not chunk:
+                    break
+                tmp.write(chunk)
+                remaining -= len(chunk)
+            tmp.close()
+
+            session_id, samples, metadata = import_perf_data(tmp.name)
+            self._send_json({
+                'session_id': session_id,
+                'total_samples': len(samples),
+                'event_types': metadata['event_types'],
+            })
+        except RuntimeError as e:
+            self._send_json({'error': str(e)}, 500)
+        except Exception as e:
+            self._send_json({'error': f'import failed: {e}'}, 500)
+        finally:
+            if tmp and os.path.isfile(tmp.name):
+                os.unlink(tmp.name)
+
     def _handle_sessions_list(self):
         """List all saved sessions."""
         sessions = []
@@ -949,7 +1602,7 @@ def run_http_server(port):
 # ---------------------------------------------------------------------------
 
 def main():
-    global config, state
+    global config, state, agent_session, wizard_state
 
     import argparse
     parser = argparse.ArgumentParser(description='PerfLens Server')
@@ -977,6 +1630,10 @@ def main():
                              'addr2line -i (default)')
     parser.add_argument('--no-inline', action='store_false', dest='inline',
                         help='Disable inline function resolution')
+    parser.add_argument('--import', type=str, default=None, dest='import_file',
+                        metavar='FILE',
+                        help='Import a perf.data file at startup and make it '
+                             'available as a session')
     args = parser.parse_args()
 
     # Parse path-map
@@ -1062,6 +1719,23 @@ def main():
     # Create shared state
     state = ProfilingState(max_samples=config.max_samples)
     state.source_mapper = mapper
+
+    # CLI import: parse perf.data at startup
+    if args.import_file:
+        import_path = os.path.abspath(args.import_file)
+        if not os.path.isfile(import_path):
+            print(f"[server] Error: import file not found: {import_path}",
+                  file=sys.stderr)
+            sys.exit(1)
+        try:
+            session_id, samples, metadata = import_perf_data(import_path)
+            # Load into live state so UI shows data immediately
+            state.add_samples(samples)
+            print(f"[server] Imported {len(samples)} samples as session "
+                  f"{session_id}", file=sys.stderr)
+        except RuntimeError as e:
+            print(f"[server] Import failed: {e}", file=sys.stderr)
+            sys.exit(1)
 
     # Start TCP server in a thread
     tcp_thread = threading.Thread(target=run_tcp_server,

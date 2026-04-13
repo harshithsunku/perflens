@@ -25,90 +25,271 @@
     </header>
 
     <main>
-        <div id="error-banner">
-            <span id="error-text"></span>
-            <button id="error-close">&times;</button>
-        </div>
-
-        <div id="replay-banner">
-            <span id="replay-text"></span>
-        </div>
-
-        <!-- Perf Stat Summary Dashboard -->
-        <div id="perf-stat-bar">
-            <div class="stat-card" id="stat-card-samples">
-                <div class="stat-value" id="stat-samples">0</div>
-                <div class="stat-label">Samples</div>
-            </div>
-            <!-- Dynamic stat cards inserted here by JS -->
-            <div class="stat-card" id="stat-card-agent">
-                <div class="stat-value" id="stat-agent">--</div>
-                <div class="stat-label">Agent</div>
-            </div>
-        </div>
-
-        <div id="last-update"></div>
-
-        <!-- Event Type Selector -->
-        <div id="event-selector">
-            <label>Event: </label>
-            <select id="event-select">
-                <option value="cycles">cycles</option>
-            </select>
-        </div>
-
-        <div id="source-banner">
-            Source view unavailable &mdash; start server with <code>--binary</code> to enable
-        </div>
-
-        <div id="tabs">
-            <button class="tab active" data-tab="functions">Functions</button>
-            <button class="tab" data-tab="source">Source</button>
-            <button class="tab" data-tab="flamegraph">Flame Graph</button>
-            <button class="tab" data-tab="sessions">Sessions</button>
-        </div>
-
-        <div id="tab-functions" class="tab-content active">
-            <table id="function-table">
-                <thead>
-                    <tr>
-                        <th>#</th>
-                        <th>Function</th>
-                        <th>Module</th>
-                        <th class="sortable active" data-sort="self">Self %</th>
-                        <th class="sortable" data-sort="total">Total %</th>
-                        <th>Samples</th>
-                    </tr>
-                </thead>
-                <tbody id="function-tbody">
-                    <tr><td colspan="6" class="empty">Waiting for data...</td></tr>
-                </tbody>
-            </table>
-        </div>
-
-        <div id="tab-source" class="tab-content">
-            <div id="source-file-picker"></div>
-            <div id="source-view">
-                <p class="empty">Click a function in the table to view source code.</p>
+        <!-- ===== View: Landing ===== -->
+        <div id="view-landing" class="view active">
+            <div class="landing-container">
+                <div class="landing-hero">
+                    <h2>Real-time Linux Performance Profiler</h2>
+                    <p class="landing-sub">Connect to a remote agent, profile a process, explore results</p>
+                </div>
+                <div class="landing-cards">
+                    <div class="landing-card" id="card-live">
+                        <div class="landing-card-icon">&#9881;</div>
+                        <h3>Live Debug</h3>
+                        <p>Connect to an agent running on your target device and start a new profiling session</p>
+                    </div>
+                    <div class="landing-card" id="card-sessions">
+                        <div class="landing-card-icon">&#128193;</div>
+                        <h3>Saved Sessions</h3>
+                        <p>Browse, replay, or import previously saved profiling sessions</p>
+                    </div>
+                </div>
+                <div class="landing-legacy-note">
+                    Legacy agents (using <code>--server</code>) connect automatically &mdash; no wizard needed
+                </div>
             </div>
         </div>
 
-        <div id="tab-flamegraph" class="tab-content">
-            <div class="flamegraph-search">
-                <input type="text" id="fg-search" placeholder="Search functions..." />
-                <span id="fg-search-matches"></span>
-                <button id="fg-search-clear" class="hidden">&#x2715;</button>
-            </div>
-            <div id="flamegraph-container">
-                <p class="empty">Waiting for data...</p>
+        <!-- ===== View: Wizard ===== -->
+        <div id="view-wizard" class="view">
+            <div class="wizard-container">
+                <div class="wizard-progress">
+                    <div class="wiz-prog-step" data-step="1"><span class="wiz-num">1</span> Connect</div>
+                    <div class="wiz-prog-step" data-step="2"><span class="wiz-num">2</span> Perf</div>
+                    <div class="wiz-prog-step" data-step="3"><span class="wiz-num">3</span> Binary</div>
+                    <div class="wiz-prog-step" data-step="4"><span class="wiz-num">4</span> Process</div>
+                    <div class="wiz-prog-step" data-step="5"><span class="wiz-num">5</span> Options</div>
+                    <div class="wiz-prog-step" data-step="6"><span class="wiz-num">6</span> Start</div>
+                </div>
+
+                <div class="wizard-body">
+                    <!-- Step 1: Connect to Agent -->
+                    <div id="wiz-step-1" class="wiz-step active">
+                        <h3>Connect to Agent</h3>
+                        <p>Enter the IP and port of the agent running in <code>--listen</code> mode on your target device.</p>
+                        <div class="wiz-form">
+                            <div class="wiz-row">
+                                <label>Host</label>
+                                <input type="text" id="wiz-host" placeholder="192.168.1.100" />
+                            </div>
+                            <div class="wiz-row">
+                                <label>Port</label>
+                                <input type="number" id="wiz-port" value="9999" />
+                            </div>
+                            <button id="wiz-connect-btn" class="wiz-btn wiz-btn-primary">Connect</button>
+                            <div id="wiz-connect-status" class="wiz-status"></div>
+                        </div>
+                    </div>
+
+                    <!-- Step 2: Verify Perf Tool -->
+                    <div id="wiz-step-2" class="wiz-step">
+                        <h3>Verify Perf Tool</h3>
+                        <p>Checking that <code>perf</code> is available and functional on the target.</p>
+                        <div id="wiz-perf-result" class="wiz-result">
+                            <div class="wiz-spinner">Checking...</div>
+                        </div>
+                    </div>
+
+                    <!-- Step 3: Binary & Source Mapping -->
+                    <div id="wiz-step-3" class="wiz-step">
+                        <h3>Binary &amp; Source Mapping</h3>
+                        <p>Provide paths on <strong>this server</strong> to the unstripped binary and source directory for line-level annotation. Optional &mdash; skip if not needed.</p>
+                        <div class="wiz-form">
+                            <div class="wiz-row">
+                                <label>Binary (debug symbols)</label>
+                                <div class="wiz-input-row">
+                                    <input type="text" id="wiz-binary" placeholder="/path/to/binary" />
+                                    <button class="wiz-browse-btn" data-target="wiz-binary">Browse</button>
+                                </div>
+                            </div>
+                            <div class="wiz-row">
+                                <label>Source directory</label>
+                                <div class="wiz-input-row">
+                                    <input type="text" id="wiz-source-dir" placeholder="/path/to/src" />
+                                    <button class="wiz-browse-btn" data-target="wiz-source-dir">Browse</button>
+                                </div>
+                            </div>
+                            <div id="wiz-binary-status" class="wiz-status"></div>
+                        </div>
+                    </div>
+
+                    <!-- Step 4: Select Process -->
+                    <div id="wiz-step-4" class="wiz-step">
+                        <h3>Select Process</h3>
+                        <p>Choose the process to profile on the target device.</p>
+                        <div class="wiz-form">
+                            <div class="wiz-row">
+                                <label>PID (or select from list)</label>
+                                <div class="wiz-input-row">
+                                    <input type="number" id="wiz-pid" placeholder="PID" />
+                                    <button id="wiz-refresh-procs" class="wiz-btn">Refresh</button>
+                                </div>
+                            </div>
+                            <div id="wiz-pid-status" class="wiz-status"></div>
+                        </div>
+                        <div id="wiz-proc-list" class="wiz-proc-list">
+                            <p class="empty">Click Refresh to load process list</p>
+                        </div>
+                    </div>
+
+                    <!-- Step 5: Profiling Options -->
+                    <div id="wiz-step-5" class="wiz-step">
+                        <h3>Profiling Options</h3>
+                        <p>Configure sampling parameters. Defaults work well for most cases.</p>
+                        <div class="wiz-form">
+                            <div class="wiz-row">
+                                <label>Sampling frequency (Hz)</label>
+                                <input type="number" id="wiz-frequency" value="99" min="1" max="10000" />
+                            </div>
+                            <div class="wiz-row">
+                                <label>Collection duration (seconds)</label>
+                                <input type="number" id="wiz-duration" value="8" min="1" max="300" />
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Step 6: Review & Start -->
+                    <div id="wiz-step-6" class="wiz-step">
+                        <h3>Review &amp; Start</h3>
+                        <div id="wiz-review-summary" class="wiz-review"></div>
+                        <button id="wiz-start-btn" class="wiz-btn wiz-btn-primary wiz-btn-large">Start Profiling</button>
+                        <div id="wiz-start-status" class="wiz-status"></div>
+                    </div>
+                </div>
+
+                <div class="wizard-footer">
+                    <button id="wiz-back" class="wiz-btn">Back</button>
+                    <div class="wiz-footer-spacer"></div>
+                    <button id="wiz-skip" class="wiz-btn">Skip</button>
+                    <button id="wiz-next" class="wiz-btn wiz-btn-primary">Next</button>
+                </div>
             </div>
         </div>
-        <div id="tab-sessions" class="tab-content">
-            <div id="sessions-list">
-                <p class="empty">Loading sessions...</p>
+
+        <!-- ===== View: Profiling (existing content) ===== -->
+        <div id="view-profiling" class="view">
+            <!-- Control bar for managed agent -->
+            <div id="control-bar" class="hidden">
+                <div class="ctrl-group">
+                    <button id="ctrl-pause" class="ctrl-btn" title="Pause">&#9208;</button>
+                    <button id="ctrl-resume" class="ctrl-btn hidden" title="Resume">&#9654;</button>
+                    <button id="ctrl-stop" class="ctrl-btn ctrl-btn-danger" title="Stop">&#9632;</button>
+                </div>
+                <div class="ctrl-status">
+                    <span id="ctrl-state">Profiling</span>
+                    <span id="ctrl-pid"></span>
+                </div>
+                <div class="ctrl-group">
+                    <button id="ctrl-settings" class="ctrl-btn" title="Settings">&#9881;</button>
+                </div>
+            </div>
+
+            <div id="error-banner">
+                <span id="error-text"></span>
+                <button id="error-close">&times;</button>
+            </div>
+
+            <div id="replay-banner">
+                <span id="replay-text"></span>
+            </div>
+
+            <!-- Perf Stat Summary Dashboard -->
+            <div id="perf-stat-bar">
+                <div class="stat-card" id="stat-card-samples">
+                    <div class="stat-value" id="stat-samples">0</div>
+                    <div class="stat-label">Samples</div>
+                </div>
+                <!-- Dynamic stat cards inserted here by JS -->
+                <div class="stat-card" id="stat-card-agent">
+                    <div class="stat-value" id="stat-agent">--</div>
+                    <div class="stat-label">Agent</div>
+                </div>
+            </div>
+
+            <div id="last-update"></div>
+
+            <!-- Event Type Selector -->
+            <div id="event-selector">
+                <label>Event: </label>
+                <select id="event-select">
+                    <option value="cycles">cycles</option>
+                </select>
+            </div>
+
+            <div id="source-banner">
+                Source view unavailable &mdash; start server with <code>--binary</code> to enable
+            </div>
+
+            <div id="tabs">
+                <button class="tab active" data-tab="functions">Functions</button>
+                <button class="tab" data-tab="source">Source</button>
+                <button class="tab" data-tab="flamegraph">Flame Graph</button>
+                <button class="tab" data-tab="sessions">Sessions</button>
+            </div>
+
+            <div id="tab-functions" class="tab-content active">
+                <table id="function-table">
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>Function</th>
+                            <th>Module</th>
+                            <th class="sortable active" data-sort="self">Self %</th>
+                            <th class="sortable" data-sort="total">Total %</th>
+                            <th>Samples</th>
+                        </tr>
+                    </thead>
+                    <tbody id="function-tbody">
+                        <tr><td colspan="6" class="empty">Waiting for data...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div id="tab-source" class="tab-content">
+                <div id="source-file-picker"></div>
+                <div id="source-view">
+                    <p class="empty">Click a function in the table to view source code.</p>
+                </div>
+            </div>
+
+            <div id="tab-flamegraph" class="tab-content">
+                <div class="flamegraph-search">
+                    <input type="text" id="fg-search" placeholder="Search functions..." />
+                    <span id="fg-search-matches"></span>
+                    <button id="fg-search-clear" class="hidden">&#x2715;</button>
+                </div>
+                <div id="flamegraph-container">
+                    <p class="empty">Waiting for data...</p>
+                </div>
+            </div>
+            <div id="tab-sessions" class="tab-content">
+                <div id="import-bar">
+                    <input type="file" id="import-file" hidden />
+                    <button id="import-btn" class="replay-btn">Import perf.data</button>
+                    <span id="import-status"></span>
+                </div>
+                <div id="sessions-list">
+                    <p class="empty">Loading sessions...</p>
+                </div>
             </div>
         </div>
     </main>
+
+    <!-- File browser modal -->
+    <div id="browse-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Browse Files</h3>
+                <button class="modal-close">&times;</button>
+            </div>
+            <div id="browse-path" class="browse-path"></div>
+            <div id="browse-entries" class="browse-entries"></div>
+            <div class="modal-footer">
+                <button id="browse-select" class="wiz-btn wiz-btn-primary">Select</button>
+                <button id="browse-cancel" class="wiz-btn">Cancel</button>
+            </div>
+        </div>
+    </div>
 
     <script src="app.js"></script>
 </body>

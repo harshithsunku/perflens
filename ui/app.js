@@ -232,6 +232,11 @@ function updateStatus(data) {
         agentEl.textContent = data.agent;
         stopBtn.classList.remove('hidden');
         hideReplayBanner();
+        // Auto-switch to profiling view when legacy agent connects
+        if (!data.managed && document.getElementById('view-landing') &&
+            document.getElementById('view-landing').classList.contains('active')) {
+            showProfilingView();
+        }
     } else {
         dot.className = 'dot disconnected';
         text.textContent = 'Agent disconnected';
@@ -926,15 +931,659 @@ function hideFgContextMenu() {
     if (fgContextMenu) fgContextMenu.classList.remove('visible');
 }
 
-// --- Init ---
-fetch('/api/status')
-    .then(r => r.json())
-    .then(data => {
-        if (data.agent_connected) {
-            updateStatus({ connected: true, agent: data.agent_addr });
+// --- Import perf.data ---
+(function initImport() {
+    var importBtn = document.getElementById('import-btn');
+    var importFile = document.getElementById('import-file');
+    var importStatus = document.getElementById('import-status');
+    if (!importBtn || !importFile) return;
+
+    importBtn.addEventListener('click', function () { importFile.click(); });
+
+    importFile.addEventListener('change', function () {
+        var file = importFile.files[0];
+        if (!file) return;
+        importFile.value = '';
+
+        importBtn.disabled = true;
+        importStatus.textContent = 'Importing ' + file.name + '...';
+
+        fetch('/api/import', { method: 'POST', body: file })
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                importBtn.disabled = false;
+                if (data.error) {
+                    importStatus.textContent = '';
+                    showError('Import failed: ' + data.error);
+                    return;
+                }
+                importStatus.textContent = 'Imported ' + data.total_samples + ' samples';
+                loadSessions();
+                replaySession(data.session_id);
+            })
+            .catch(function (err) {
+                importBtn.disabled = false;
+                importStatus.textContent = '';
+                showError('Import failed: ' + err);
+            });
+    });
+})();
+
+// =====================================================================
+// View management
+// =====================================================================
+
+function showView(viewId) {
+    document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+    const el = document.getElementById(viewId);
+    if (el) el.classList.add('active');
+}
+
+function showProfilingView() {
+    showView('view-profiling');
+}
+
+// Auto-switch to profiling when legacy agent connects via SSE
+let _autoSwitched = false;
+function checkAutoSwitch() {
+    if (!_autoSwitched && state.totalSamples > 0) {
+        _autoSwitched = true;
+        showProfilingView();
+    }
+}
+
+// Patch renderCurrentEvent to also check auto-switch
+const _origRenderCurrentEvent = renderCurrentEvent;
+renderCurrentEvent = function() {
+    _origRenderCurrentEvent();
+    checkAutoSwitch();
+};
+
+// =====================================================================
+// Wizard
+// =====================================================================
+
+let wizardStep = 1;
+let wizardData = {
+    host: '',
+    port: 9999,
+    connected: false,
+    perfVerified: false,
+    perfVersion: '',
+    binary: '',
+    sourceDir: '',
+    pid: null,
+    processName: '',
+    frequency: 99,
+    duration: 8,
+    agentHello: null,
+    capabilities: null,
+};
+
+// --- Landing page ---
+document.getElementById('card-live').addEventListener('click', function() {
+    showView('view-wizard');
+    wizardGoToStep(1);
+    // Try to load saved wizard state
+    fetch('/api/wizard/state')
+        .then(function(r) { return r.json(); })
+        .then(function(ws) {
+            if (ws.agent_host) document.getElementById('wiz-host').value = ws.agent_host;
+            if (ws.agent_port) document.getElementById('wiz-port').value = ws.agent_port;
+            if (ws.binary_path) document.getElementById('wiz-binary').value = ws.binary_path;
+            if (ws.source_dir) document.getElementById('wiz-source-dir').value = ws.source_dir;
+            if (ws.pid) document.getElementById('wiz-pid').value = ws.pid;
+            if (ws.frequency) document.getElementById('wiz-frequency').value = ws.frequency;
+            if (ws.duration) document.getElementById('wiz-duration').value = ws.duration;
+        })
+        .catch(function() {});
+});
+
+document.getElementById('card-sessions').addEventListener('click', function() {
+    showProfilingView();
+    switchToTab('sessions');
+    loadSessions();
+});
+
+// --- Wizard navigation ---
+function wizardGoToStep(step) {
+    wizardStep = step;
+    document.querySelectorAll('.wiz-step').forEach(function(el) { el.classList.remove('active'); });
+    var stepEl = document.getElementById('wiz-step-' + step);
+    if (stepEl) stepEl.classList.add('active');
+
+    // Update progress bar
+    document.querySelectorAll('.wiz-prog-step').forEach(function(el) {
+        var s = parseInt(el.dataset.step);
+        el.classList.remove('active', 'done');
+        if (s === step) el.classList.add('active');
+        else if (s < step) el.classList.add('done');
+    });
+
+    // Footer buttons
+    document.getElementById('wiz-back').style.display = step > 1 ? '' : 'none';
+    document.getElementById('wiz-next').style.display = step < 6 ? '' : 'none';
+    document.getElementById('wiz-skip').style.display = step === 3 ? '' : 'none';
+
+    // Step-specific actions
+    if (step === 2 && wizardData.connected) wizardVerifyPerf();
+    if (step === 6) wizardBuildReview();
+}
+
+document.getElementById('wiz-back').addEventListener('click', function() {
+    if (wizardStep > 1) wizardGoToStep(wizardStep - 1);
+});
+
+document.getElementById('wiz-next').addEventListener('click', function() {
+    if (wizardStep < 6) {
+        if (!wizardValidateStep(wizardStep)) return;
+        // Apply binary/source config when leaving step 3
+        if (wizardStep === 3) {
+            wizardApplyStep3(function() { wizardGoToStep(wizardStep + 1); });
+            return;
+        }
+        wizardGoToStep(wizardStep + 1);
+    }
+});
+
+document.getElementById('wiz-skip').addEventListener('click', function() {
+    // Skip is only visible on step 3 (binary/source)
+    wizardGoToStep(wizardStep + 1);
+});
+
+function wizardValidateStep(step) {
+    if (step === 1 && !wizardData.connected) {
+        wizardSetStatus('wiz-connect-status', 'Connect to agent first', 'error');
+        return false;
+    }
+    if (step === 4) {
+        var pid = document.getElementById('wiz-pid').value;
+        if (!pid) {
+            wizardSetStatus('wiz-pid-status', 'Select or enter a PID', 'error');
+            return false;
+        }
+        wizardData.pid = parseInt(pid);
+    }
+    if (step === 5) {
+        wizardData.frequency = parseInt(document.getElementById('wiz-frequency').value) || 99;
+        wizardData.duration = parseInt(document.getElementById('wiz-duration').value) || 8;
+    }
+    return true;
+}
+
+function wizardSetStatus(id, msg, cls) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = msg;
+    el.className = 'wiz-status' + (cls ? ' ' + cls : '');
+}
+
+// --- Step 1: Connect ---
+document.getElementById('wiz-connect-btn').addEventListener('click', function() {
+    var host = document.getElementById('wiz-host').value.trim();
+    var port = parseInt(document.getElementById('wiz-port').value) || 9999;
+    if (!host) {
+        wizardSetStatus('wiz-connect-status', 'Enter host address', 'error');
+        return;
+    }
+
+    var btn = document.getElementById('wiz-connect-btn');
+    btn.disabled = true;
+    wizardSetStatus('wiz-connect-status', 'Connecting to ' + host + ':' + port + '...', 'info');
+
+    fetch('/api/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host: host, port: port }),
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        btn.disabled = false;
+        if (data.ok) {
+            wizardData.connected = true;
+            wizardData.host = host;
+            wizardData.port = port;
+            wizardData.agentHello = data.hello;
+            var platform = data.hello && data.hello.platform;
+            var info = platform ? platform.arch + ' / ' + platform.kernel : 'connected';
+            wizardSetStatus('wiz-connect-status', 'Connected: ' + info, 'ok');
+        } else {
+            wizardSetStatus('wiz-connect-status', data.error || 'Connection failed', 'error');
         }
     })
-    .catch(() => {});
+    .catch(function(err) {
+        btn.disabled = false;
+        wizardSetStatus('wiz-connect-status', 'Error: ' + err, 'error');
+    });
+});
+
+// --- Step 2: Verify Perf ---
+function wizardVerifyPerf() {
+    var result = document.getElementById('wiz-perf-result');
+    result.innerHTML = '<div class="wiz-spinner">Verifying perf tool...</div>';
+
+    fetch('/api/agent/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cmd: 'verify_perf' }),
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (!data.ok && data.error) {
+            result.innerHTML = '<span class="wiz-err">Error: ' + escapeHtml(data.error) + '</span>';
+            return;
+        }
+        var html = '';
+        if (data.available) {
+            html += '<div class="wiz-ok">&#10003; perf found: ' + escapeHtml(data.version || '?') + '</div>';
+            if (data.functional) {
+                html += '<div class="wiz-ok">&#10003; perf is functional</div>';
+                wizardData.perfVerified = true;
+                wizardData.perfVersion = data.version;
+            } else {
+                html += '<div class="wiz-err">&#10007; perf stat check failed: ' +
+                    escapeHtml(data.error || 'unknown error') + '</div>';
+            }
+            if (data.perf_event_paranoid > 1) {
+                html += '<div class="wiz-warn">&#9888; perf_event_paranoid=' + data.perf_event_paranoid +
+                    ' &mdash; some events may be unavailable</div>';
+            }
+        } else {
+            html += '<div class="wiz-err">&#10007; perf not found: ' +
+                escapeHtml(data.error || 'not available') + '</div>';
+        }
+        result.innerHTML = html;
+    })
+    .catch(function(err) {
+        result.innerHTML = '<span class="wiz-err">Command failed: ' + escapeHtml(String(err)) + '</span>';
+    });
+}
+
+// --- Step 3: Binary & Source ---
+document.querySelectorAll('.wiz-browse-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+        var target = btn.dataset.target;
+        var input = document.getElementById(target);
+        var startPath = input.value.trim() || '/';
+        openBrowseModal(startPath, target === 'wiz-source-dir' ? 'dir' : 'file', function(selected) {
+            input.value = selected;
+        });
+    });
+});
+
+// Apply binary/source config when leaving step 3
+function wizardApplyStep3(callback) {
+    var binary = document.getElementById('wiz-binary').value.trim();
+    var sourceDir = document.getElementById('wiz-source-dir').value.trim();
+    var status = document.getElementById('wiz-binary-status');
+
+    var promises = [];
+    if (binary) {
+        promises.push(
+            fetch('/api/config/binary', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: binary }),
+            }).then(function(r) { return r.json(); })
+        );
+        wizardData.binary = binary;
+    }
+    if (sourceDir) {
+        promises.push(
+            fetch('/api/config/source', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: sourceDir }),
+            }).then(function(r) { return r.json(); })
+        );
+        wizardData.sourceDir = sourceDir;
+    }
+
+    if (promises.length > 0) {
+        status.textContent = 'Applying...';
+        status.className = 'wiz-status info';
+        Promise.all(promises).then(function(results) {
+            var errors = results.filter(function(r) { return !r.ok; });
+            if (errors.length > 0) {
+                status.textContent = errors.map(function(e) { return e.error; }).join('; ');
+                status.className = 'wiz-status error';
+            } else {
+                status.textContent = 'Applied';
+                status.className = 'wiz-status ok';
+            }
+            if (callback) callback();
+        }).catch(function(err) {
+            status.textContent = 'Error: ' + err;
+            status.className = 'wiz-status error';
+            if (callback) callback();
+        });
+    } else {
+        if (callback) callback();
+    }
+}
+
+// --- Step 4: Process selection ---
+document.getElementById('wiz-refresh-procs').addEventListener('click', function() {
+    var list = document.getElementById('wiz-proc-list');
+    var status = document.getElementById('wiz-pid-status');
+    list.innerHTML = '<div class="wiz-spinner">Loading process list...</div>';
+    status.textContent = '';
+
+    fetch('/api/agent/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cmd: 'list_processes', timeout: 30 }),
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (!data.ok) {
+            list.innerHTML = '<p class="empty">' + escapeHtml(data.error || 'Failed') + '</p>';
+            return;
+        }
+        var procs = data.processes || [];
+        if (procs.length === 0) {
+            list.innerHTML = '<p class="empty">No processes found</p>';
+            return;
+        }
+        var html = '<table class="wiz-proc-table"><thead><tr>' +
+            '<th>PID</th><th>Name</th><th>CPU%</th><th>Command</th></tr></thead><tbody>';
+        procs.forEach(function(p) {
+            html += '<tr data-pid="' + p.pid + '">' +
+                '<td>' + p.pid + '</td>' +
+                '<td>' + escapeHtml(p.comm) + '</td>' +
+                '<td>' + p.cpu + '</td>' +
+                '<td title="' + escapeAttr(p.cmdline) + '">' +
+                    escapeHtml(p.cmdline.substring(0, 80)) + '</td></tr>';
+        });
+        html += '</tbody></table>';
+        list.innerHTML = html;
+
+        // Click to select process
+        list.querySelectorAll('tr[data-pid]').forEach(function(row) {
+            row.addEventListener('click', function() {
+                list.querySelectorAll('tr').forEach(function(r) { r.classList.remove('selected'); });
+                row.classList.add('selected');
+                var pid = parseInt(row.dataset.pid);
+                document.getElementById('wiz-pid').value = pid;
+                wizardData.pid = pid;
+                wizardData.processName = row.querySelector('td:nth-child(2)').textContent;
+                status.textContent = 'Selected PID ' + pid + ' (' + wizardData.processName + ')';
+                status.className = 'wiz-status ok';
+            });
+        });
+    })
+    .catch(function(err) {
+        list.innerHTML = '<p class="empty">Error: ' + escapeHtml(String(err)) + '</p>';
+    });
+});
+
+// --- Step 6: Review & Start ---
+function wizardBuildReview() {
+    wizardData.frequency = parseInt(document.getElementById('wiz-frequency').value) || 99;
+    wizardData.duration = parseInt(document.getElementById('wiz-duration').value) || 8;
+
+    var summary = document.getElementById('wiz-review-summary');
+    var platform = wizardData.agentHello && wizardData.agentHello.platform;
+    var html = '' +
+        '<div class="wiz-review-row"><span class="wiz-review-label">Agent</span>' +
+            '<span class="wiz-review-value">' + escapeHtml(wizardData.host + ':' + wizardData.port) + '</span></div>' +
+        '<div class="wiz-review-row"><span class="wiz-review-label">Platform</span>' +
+            '<span class="wiz-review-value">' + escapeHtml(platform ? platform.arch + ' / ' + platform.kernel : '?') + '</span></div>' +
+        '<div class="wiz-review-row"><span class="wiz-review-label">Process</span>' +
+            '<span class="wiz-review-value">PID ' + (wizardData.pid || '?') +
+            (wizardData.processName ? ' (' + escapeHtml(wizardData.processName) + ')' : '') + '</span></div>' +
+        '<div class="wiz-review-row"><span class="wiz-review-label">Frequency</span>' +
+            '<span class="wiz-review-value">' + wizardData.frequency + ' Hz</span></div>' +
+        '<div class="wiz-review-row"><span class="wiz-review-label">Duration</span>' +
+            '<span class="wiz-review-value">' + wizardData.duration + 's per round</span></div>';
+    if (wizardData.binary) {
+        html += '<div class="wiz-review-row"><span class="wiz-review-label">Binary</span>' +
+            '<span class="wiz-review-value">' + escapeHtml(wizardData.binary) + '</span></div>';
+    }
+    summary.innerHTML = html;
+}
+
+document.getElementById('wiz-start-btn').addEventListener('click', function() {
+    var btn = document.getElementById('wiz-start-btn');
+    btn.disabled = true;
+    wizardSetStatus('wiz-start-status', 'Starting profiling...', 'info');
+
+    fetch('/api/agent/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            cmd: 'start',
+            args: {
+                pid: wizardData.pid,
+                frequency: wizardData.frequency,
+                duration: wizardData.duration,
+            },
+            timeout: 120,
+        }),
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        btn.disabled = false;
+        if (data.ok) {
+            wizardSetStatus('wiz-start-status', 'Profiling started', 'ok');
+            // Save wizard state
+            fetch('/api/wizard/state', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    step: 6, pid: wizardData.pid, frequency: wizardData.frequency,
+                    duration: wizardData.duration,
+                }),
+            }).catch(function() {});
+
+            // Show profiling view with control bar
+            showProfilingView();
+            showControlBar(wizardData.pid, wizardData.processName);
+            state.managedAgent = true;
+        } else {
+            wizardSetStatus('wiz-start-status', data.error || 'Start failed', 'error');
+        }
+    })
+    .catch(function(err) {
+        btn.disabled = false;
+        wizardSetStatus('wiz-start-status', 'Error: ' + err, 'error');
+    });
+});
+
+// =====================================================================
+// Control Bar
+// =====================================================================
+
+function showControlBar(pid, name) {
+    var bar = document.getElementById('control-bar');
+    bar.classList.remove('hidden');
+    document.getElementById('ctrl-state').textContent = 'Profiling';
+    document.getElementById('ctrl-state').className = '';
+    document.getElementById('ctrl-pid').textContent = 'PID ' + pid + (name ? ' (' + name + ')' : '');
+    document.getElementById('ctrl-pause').classList.remove('hidden');
+    document.getElementById('ctrl-resume').classList.add('hidden');
+}
+
+function hideControlBar() {
+    document.getElementById('control-bar').classList.add('hidden');
+}
+
+document.getElementById('ctrl-pause').addEventListener('click', function() {
+    fetch('/api/agent/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cmd: 'pause' }),
+    }).then(function(r) { return r.json(); }).then(function(data) {
+        if (data.ok) {
+            document.getElementById('ctrl-state').textContent = 'Paused';
+            document.getElementById('ctrl-state').className = 'paused';
+            document.getElementById('ctrl-pause').classList.add('hidden');
+            document.getElementById('ctrl-resume').classList.remove('hidden');
+        }
+    }).catch(function() {});
+});
+
+document.getElementById('ctrl-resume').addEventListener('click', function() {
+    fetch('/api/agent/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cmd: 'resume' }),
+    }).then(function(r) { return r.json(); }).then(function(data) {
+        if (data.ok) {
+            document.getElementById('ctrl-state').textContent = 'Profiling';
+            document.getElementById('ctrl-state').className = '';
+            document.getElementById('ctrl-pause').classList.remove('hidden');
+            document.getElementById('ctrl-resume').classList.add('hidden');
+        }
+    }).catch(function() {});
+});
+
+document.getElementById('ctrl-stop').addEventListener('click', function() {
+    fetch('/api/stop').then(function(r) { return r.json(); }).then(function(data) {
+        if (data.stopped) {
+            document.getElementById('ctrl-state').textContent = 'Stopped';
+            document.getElementById('ctrl-state').className = 'paused';
+            state.managedAgent = false;
+        }
+    }).catch(function() {});
+});
+
+document.getElementById('ctrl-settings').addEventListener('click', function() {
+    // Quick settings: change frequency/duration via configure command
+    var freq = prompt('Sampling frequency (Hz):', wizardData.frequency);
+    if (freq === null) return;
+    var dur = prompt('Collection duration (seconds):', wizardData.duration);
+    if (dur === null) return;
+
+    fetch('/api/agent/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            cmd: 'configure',
+            args: { frequency: parseInt(freq), duration: parseInt(dur) },
+        }),
+    }).then(function(r) { return r.json(); }).then(function(data) {
+        if (data.ok) {
+            wizardData.frequency = data.frequency;
+            wizardData.duration = data.duration;
+        }
+    }).catch(function() {});
+});
+
+// =====================================================================
+// File Browser Modal
+// =====================================================================
+
+var browseCallback = null;
+var browseMode = 'file';  // 'file' or 'dir'
+var browseSelected = null;
+
+function openBrowseModal(startPath, mode, callback) {
+    browseCallback = callback;
+    browseMode = mode;
+    browseSelected = null;
+    document.getElementById('browse-modal').classList.remove('hidden');
+    browseTo(startPath);
+}
+
+function closeBrowseModal() {
+    document.getElementById('browse-modal').classList.add('hidden');
+    browseCallback = null;
+}
+
+function browseTo(path) {
+    var pathEl = document.getElementById('browse-path');
+    var entriesEl = document.getElementById('browse-entries');
+    pathEl.textContent = path;
+    entriesEl.innerHTML = '<div class="wiz-spinner">Loading...</div>';
+    browseSelected = (browseMode === 'dir') ? path : null;
+
+    fetch('/api/browse?path=' + encodeURIComponent(path))
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.error) {
+                entriesEl.innerHTML = '<p class="empty">' + escapeHtml(data.error) + '</p>';
+                return;
+            }
+            var html = '';
+            if (data.parent && data.parent !== data.path) {
+                html += '<div class="browse-entry" data-path="' + escapeAttr(data.parent) + '" data-dir="1">' +
+                    '<span class="be-icon">..</span><span class="be-name">..</span></div>';
+            }
+            (data.entries || []).forEach(function(e) {
+                html += '<div class="browse-entry" data-path="' + escapeAttr(e.path) + '"' +
+                    (e.is_dir ? ' data-dir="1"' : '') + '>' +
+                    '<span class="be-icon">' + (e.is_dir ? '&#128193;' : '&#128196;') + '</span>' +
+                    '<span class="be-name">' + escapeHtml(e.name) + '</span>' +
+                    (e.size !== undefined ? '<span class="be-size">' + formatNumber(e.size) + '</span>' : '') +
+                    '</div>';
+            });
+            entriesEl.innerHTML = html;
+
+            entriesEl.querySelectorAll('.browse-entry').forEach(function(entry) {
+                entry.addEventListener('click', function() {
+                    if (entry.dataset.dir === '1') {
+                        browseTo(entry.dataset.path);
+                    } else {
+                        entriesEl.querySelectorAll('.browse-entry').forEach(function(e) { e.classList.remove('selected'); });
+                        entry.classList.add('selected');
+                        browseSelected = entry.dataset.path;
+                    }
+                });
+                entry.addEventListener('dblclick', function() {
+                    if (entry.dataset.dir === '1') {
+                        browseTo(entry.dataset.path);
+                    } else {
+                        browseSelected = entry.dataset.path;
+                        confirmBrowse();
+                    }
+                });
+            });
+        })
+        .catch(function(err) {
+            entriesEl.innerHTML = '<p class="empty">Error: ' + escapeHtml(String(err)) + '</p>';
+        });
+}
+
+function confirmBrowse() {
+    if (browseSelected && browseCallback) {
+        browseCallback(browseSelected);
+    }
+    closeBrowseModal();
+}
+
+document.getElementById('browse-select').addEventListener('click', confirmBrowse);
+document.getElementById('browse-cancel').addEventListener('click', closeBrowseModal);
+document.querySelector('.modal-close').addEventListener('click', closeBrowseModal);
+
+// Close modal on Escape
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') {
+        var modal = document.getElementById('browse-modal');
+        if (!modal.classList.contains('hidden')) closeBrowseModal();
+    }
+});
+
+// =====================================================================
+// Init
+// =====================================================================
+
+fetch('/api/status')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (data.agent_connected) {
+            // Agent already connected — skip to profiling view
+            updateStatus({ connected: true, agent: data.agent_addr });
+            showProfilingView();
+            _autoSwitched = true;
+            if (data.managed) {
+                state.managedAgent = true;
+                showControlBar(wizardData.pid || '?', '');
+            }
+        }
+        // Else: stay on landing page
+    })
+    .catch(function() {});
 
 connectSSE();
 loadSessions();
