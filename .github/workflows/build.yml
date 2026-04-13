@@ -19,7 +19,7 @@ jobs:
           - os: ubuntu-latest
             platform: linux-x86_64
             binary_name: perflens-server-bin
-            freeze_mode: script
+            freeze_mode: manylinux
           - os: macos-latest
             platform: macos-arm64
             binary_name: perflens-server-bin
@@ -55,9 +55,30 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       # -------------------------------------------------------------------
-      # Linux / macOS: the build script does all the packaging work.
+      # Linux x86_64: build inside a manylinux_2_28 container so the
+      # frozen binary requires only glibc >= 2.28 (RHEL 8 / Ubuntu 20.04+
+      # / Debian 10+) instead of the glibc on the ubuntu-latest runner
+      # (currently 2.39), which caused 'GLIBC_2.38 not found' errors on
+      # older targets.
       # -------------------------------------------------------------------
-      - name: Build server package (Linux/macOS)
+      - name: Build server package (Linux x86_64 – manylinux)
+        if: matrix.freeze_mode == 'manylinux'
+        run: |
+          chmod +x build_package.sh
+          docker run --rm \
+            -v "$PWD:/work" -w /work \
+            quay.io/pypa/manylinux_2_28_x86_64 \
+            bash -c '
+              set -ex
+              /opt/python/cp311-cp311/bin/pip install --quiet pyinstaller
+              export PATH="/opt/python/cp311-cp311/bin:$PATH"
+              ./build_package.sh --server
+            '
+
+      # -------------------------------------------------------------------
+      # macOS: the build script does all the packaging work.
+      # -------------------------------------------------------------------
+      - name: Build server package (macOS)
         if: matrix.freeze_mode == 'script'
         shell: bash
         run: |
