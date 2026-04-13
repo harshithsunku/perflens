@@ -26,6 +26,21 @@ HEADER_RE = re.compile(
     r'(\S+):\s*$'                          # event:
 )
 
+# Same as HEADER_RE but for flat (no call-graph) output where the single
+# frame is appended on the same line after the event:
+#   comm pid [cpu] ts: count event:  addr func+off (module)
+HEADER_INLINE_RE = re.compile(
+    r'^(.+?)\s+(\d+)(?:/\d+)?\s+'       # comm + pid (optional /tid)
+    r'(?:\[\d+\]\s+)?'                    # optional [cpu]
+    r'[\d.]+:\s+'                          # timestamp:
+    r'(?:[a-zA-Z.]{4}\s+)?'               # optional flags
+    r'(\d+)\s+'                            # count
+    r'(\S+):\s+'                           # event:  (followed by frame)
+    r'([0-9a-f]+)\s+'                      # addr
+    r'(.+?)\s+'                            # func+offset
+    r'\((.+)\)\s*$'                        # (module)
+)
+
 # Stack frame with module (last parenthesized group on the line)
 # Handles C++ templates with <>, () in function names
 FRAME_MODULE_RE = re.compile(
@@ -129,6 +144,31 @@ def parse_perf_script(text):
                 'event_count': int(m.group(3)),
                 'event_type': _normalize_event(m.group(4)),
                 'frames': [],
+            }
+            continue
+
+        # Flat profile: header + frame on same line (no call-graph)
+        m = HEADER_INLINE_RE.match(line)
+        if m:
+            if current_sample:
+                samples.append(current_sample)
+            func_raw = m.group(6)
+            if '+' in func_raw:
+                parts = func_raw.rsplit('+', 1)
+                func, offset = parts[0], parts[1]
+            else:
+                func, offset = func_raw, ''
+            current_sample = {
+                'comm': m.group(1).strip(),
+                'pid': int(m.group(2)),
+                'event_count': int(m.group(3)),
+                'event_type': _normalize_event(m.group(4)),
+                'frames': [{
+                    'addr': m.group(5),
+                    'func': func,
+                    'offset': offset,
+                    'module': m.group(7),
+                }],
             }
             continue
 

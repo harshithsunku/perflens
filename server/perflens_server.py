@@ -391,6 +391,12 @@ class AgentSession:
             except (ConnectionResetError, BrokenPipeError, OSError) as e:
                 print(f"[server] Managed agent recv error: {e}", file=sys.stderr)
                 break
+            except Exception as e:
+                import traceback
+                print(f"[server] Managed agent recv unexpected error: {e}",
+                      file=sys.stderr)
+                traceback.print_exc(file=sys.stderr)
+                break
 
         self.connected = False
         with state.lock:
@@ -465,6 +471,9 @@ def connect_to_agent(host, port, timeout=10):
     if hello.get('type') != 'hello':
         sock.close()
         raise RuntimeError(f'Expected hello message, got: {hello.get("type")}')
+
+    # Clear connection timeout — recv loop must block indefinitely
+    sock.settimeout(None)
 
     addr_str = f'{host}:{port}'
     session = AgentSession(sock, addr_str)
