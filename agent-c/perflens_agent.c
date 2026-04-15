@@ -90,7 +90,7 @@
 
 /* Normalized field set for 'perf script -F'. Ensures consistent output
  * format across kernel versions. Requires perf >= ~3.12. */
-#define SCRIPT_FIELDS    "comm,pid,time,period,event,ip,sym,dso"
+#define SCRIPT_FIELDS    "comm,tid,pid,time,period,event,ip,sym,dso"
 
 static const char *CANDIDATE_EVENTS[] = {
     "cycles", "instructions", "cache-misses", "cache-references",

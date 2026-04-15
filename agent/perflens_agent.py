@@ -183,7 +183,7 @@ SKIP_PATTERNS = ["not supported", "invalid event", "unknown"]
 
 # Normalized field set for 'perf script -F'.  Ensures consistent output format
 # across kernel versions.  Requires perf >= ~3.12 (older versions lack -F).
-SCRIPT_FIELDS = "comm,pid,time,period,event,ip,sym,dso"
+SCRIPT_FIELDS = "comm,tid,pid,time,period,event,ip,sym,dso"
 
 
 def _event_works(event, pid):
