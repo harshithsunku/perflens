@@ -2736,17 +2736,16 @@ function renderThreadSourceFiles(sourceFiles, tid) {
     var html = '<div class="thread-source-file-list">';
     sourceFiles.forEach(function(f, i) {
         var basename = f.path.split('/').pop();
-        html += '<button class="thread-source-file-btn' + (i === 0 ? ' active' : '') +
+        html += '<button class="thread-source-file-btn' +
             '" data-path="' + escapeAttr(f.path) + '">' +
             escapeHtml(basename) + ' (' + f.total_samples + ')</button>';
     });
     html += '</div>';
     container.innerHTML = html;
 
-    // Load first file
-    if (sourceFiles.length > 0) {
-        loadThreadSource(sourceFiles[0].path, tid);
-    }
+    // Don't auto-load — wait for click
+    document.getElementById('thread-source-view').innerHTML =
+        '<p class="empty">Click a source file to view annotated source</p>';
 
     container.querySelectorAll('.thread-source-file-btn').forEach(function(btn) {
         btn.addEventListener('click', function() {
