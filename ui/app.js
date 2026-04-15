@@ -262,6 +262,7 @@ document.querySelectorAll('.tab').forEach(tab => {
         document.querySelectorAll('.tab-content').forEach(tc => tc.classList.remove('active'));
         tab.classList.add('active');
         document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+        if (tab.dataset.tab === 'threads') renderThreadsTab();
     });
 });
 
@@ -2502,6 +2503,364 @@ function loadReplayMetrics(metrics) {
         updateNetworkPanel(state.metricsNetwork, prev);
     }
 }
+
+// =====================================================================
+// Thread Analysis Tab
+// =====================================================================
+
+var _threadDetailState = { tid: null, comm: '', data: null };
+
+function renderThreadsTab() {
+    var overview = document.getElementById('threads-overview');
+    var detail = document.getElementById('thread-detail');
+    if (!overview) return;
+
+    // If in detail view, keep it
+    if (_threadDetailState.tid !== null && !detail.classList.contains('hidden')) return;
+
+    var evt = state.selectedEvent || 'cycles';
+    fetch('/api/thread-summary?event=' + encodeURIComponent(evt))
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (!data.threads || data.threads.length === 0) {
+                overview.innerHTML = '<p class="empty">No thread data yet</p>';
+                return;
+            }
+            renderThreadOverview(data);
+        })
+        .catch(function() {
+            overview.innerHTML = '<p class="empty">Failed to load thread data</p>';
+        });
+}
+
+function renderThreadOverview(data) {
+    var overview = document.getElementById('threads-overview');
+    var detail = document.getElementById('thread-detail');
+    overview.classList.remove('hidden');
+    detail.classList.add('hidden');
+    _threadDetailState.tid = null;
+
+    var html = '<table class="threads-table"><thead><tr>' +
+        '<th>Thread</th><th>TID</th><th>Samples</th><th>CPU %</th>' +
+        '<th>Top Function</th><th>Top Functions</th></tr></thead><tbody>';
+
+    data.threads.forEach(function(t) {
+        var barW = Math.max(2, Math.min(100, t.percent));
+        var topFuncsHtml = '';
+        if (t.top_functions && t.top_functions.length > 0) {
+            topFuncsHtml = t.top_functions.map(function(f) {
+                return escapeHtml(f.name) + ' <span style="opacity:0.5">' + f.percent + '%</span>';
+            }).join(', ');
+        }
+        html += '<tr class="thread-row" data-tid="' + t.tid + '" data-comm="' + escapeAttr(t.comm) + '">' +
+            '<td><strong>' + escapeHtml(t.comm || '(unnamed)') + '</strong></td>' +
+            '<td>' + t.tid + '</td>' +
+            '<td>' + t.samples.toLocaleString() + '</td>' +
+            '<td><span class="thread-cpu-bar" style="width:' + barW + 'px"></span>' + t.percent + '%</td>' +
+            '<td><code>' + escapeHtml(t.top_function || '-') + '</code></td>' +
+            '<td class="thread-top-funcs">' + topFuncsHtml + '</td>' +
+            '</tr>';
+    });
+    html += '</tbody></table>';
+    html += '<p style="font-size:11px;color:var(--text-tertiary);margin-top:8px;">' +
+        data.total_samples.toLocaleString() + ' total samples across ' +
+        data.threads.length + ' threads</p>';
+
+    overview.innerHTML = html;
+
+    // Click handlers
+    overview.querySelectorAll('.thread-row').forEach(function(row) {
+        row.addEventListener('click', function() {
+            var tid = parseInt(row.getAttribute('data-tid'));
+            var comm = row.getAttribute('data-comm');
+            openThreadDetail(tid, comm);
+        });
+    });
+}
+
+function openThreadDetail(tid, comm) {
+    var overview = document.getElementById('threads-overview');
+    var detail = document.getElementById('thread-detail');
+    overview.classList.add('hidden');
+    detail.classList.remove('hidden');
+
+    _threadDetailState.tid = tid;
+    _threadDetailState.comm = comm;
+
+    document.getElementById('thread-detail-title').textContent =
+        (comm || '(unnamed)') + ' (TID ' + tid + ')';
+
+    // Reset to functions tab
+    detail.querySelectorAll('.thread-dtab').forEach(function(t) { t.classList.remove('active'); });
+    detail.querySelectorAll('.thread-detail-panel').forEach(function(p) { p.classList.remove('active'); });
+    detail.querySelector('.thread-dtab[data-thread-tab="t-functions"]').classList.add('active');
+    document.getElementById('t-functions').classList.add('active');
+
+    // Load data
+    var evt = state.selectedEvent || 'cycles';
+    document.getElementById('thread-fn-table').innerHTML = '<p class="empty loading">Loading...</p>';
+    document.getElementById('thread-fg-container').innerHTML = '<p class="empty">Switch to Flame Graph tab to view</p>';
+    document.getElementById('thread-source-files').innerHTML = '';
+    document.getElementById('thread-source-view').innerHTML = '';
+
+    fetch('/api/thread-view?event=' + encodeURIComponent(evt) + '&tid=' + tid)
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            _threadDetailState.data = data;
+            renderThreadFunctions(data.function_summary);
+            renderThreadFlamegraph(data.flamegraph, data.function_summary.total_samples);
+            if (data.source_files && data.source_files.length > 0) {
+                renderThreadSourceFiles(data.source_files, tid);
+            }
+        })
+        .catch(function() {
+            document.getElementById('thread-fn-table').innerHTML =
+                '<p class="empty">Failed to load thread data</p>';
+        });
+}
+
+function renderThreadFunctions(data) {
+    var container = document.getElementById('thread-fn-table');
+    if (!data.functions || data.functions.length === 0) {
+        container.innerHTML = '<p class="empty">No function data</p>';
+        return;
+    }
+
+    var total = data.total_samples;
+    var html = '<table class="threads-table"><thead><tr>' +
+        '<th>Function</th><th>Self %</th><th>Self</th><th>Total %</th><th>Total</th><th>Module</th>' +
+        '</tr></thead><tbody>';
+
+    data.functions.forEach(function(f) {
+        var selfPct = f.self_percent || f.percent || 0;
+        var totalPct = f.total_percent || 0;
+        var barW = Math.max(1, Math.min(80, selfPct * 0.8));
+        html += '<tr class="thread-row" data-func="' + escapeAttr(f.name) + '">' +
+            '<td><code>' + escapeHtml(f.name) + '</code></td>' +
+            '<td><span class="thread-cpu-bar" style="width:' + barW + 'px;background:' +
+            heatColor(selfPct / 100) + '"></span>' + selfPct.toFixed(1) + '%</td>' +
+            '<td>' + (f.self_samples || f.samples) + '</td>' +
+            '<td>' + totalPct.toFixed(1) + '%</td>' +
+            '<td>' + (f.total_samples || 0) + '</td>' +
+            '<td style="font-size:11px;color:var(--text-tertiary)">' +
+            escapeHtml((f.module || '').split('/').pop()) + '</td></tr>';
+    });
+    html += '</tbody></table>';
+    html += '<p style="font-size:11px;color:var(--text-tertiary);margin-top:8px;">' +
+        total.toLocaleString() + ' samples in this thread</p>';
+    container.innerHTML = html;
+}
+
+function heatColor(ratio) {
+    // 0 = green, 1 = red
+    if (ratio < 0.33) return '#3fb950';
+    if (ratio < 0.66) return '#d29922';
+    return '#f85149';
+}
+
+function renderThreadFlamegraph(data, totalSamples) {
+    var container = document.getElementById('thread-fg-container');
+    if (!data || !data.children || data.children.length === 0) {
+        container.innerHTML = '<p class="empty">No flame graph data</p>';
+        return;
+    }
+
+    var width = container.clientWidth - 32;
+    if (width < 10) width = 600;
+    var rowHeight = 18;
+    var fontSize = 11;
+    var charWidth = 6.5;
+    totalSamples = totalSamples || data.value;
+
+    var rects = [];
+    var maxDepth = flattenTree(data, 0, 0, width, rects, totalSamples);
+    var height = (maxDepth + 1) * rowHeight + 4;
+    var fgTextColor = themeColor('--fg-text');
+
+    var svg = '<svg width="' + width + '" height="' + height + '" class="flamegraph-svg" ' +
+        'style="display:block;margin:0 auto;">';
+
+    rects.forEach(function(r) {
+        if (r.w < 0.5) return;
+        var y = height - (r.depth + 1) * rowHeight;
+        var color = fgModuleColor(r.name, r.module || '', r.inlined);
+
+        svg += '<g>';
+        svg += '<rect x="' + r.x + '" y="' + y + '" width="' + Math.max(r.w - 1, 1) +
+            '" height="' + (rowHeight - 1) + '" fill="' + color + '" rx="2"/>';
+        if (r.w > 36) {
+            var maxChars = Math.floor((r.w - 6) / charWidth);
+            if (maxChars > 1) {
+                var label = r.name.length > maxChars ? r.name.substring(0, maxChars - 1) + '\u2026' : r.name;
+                svg += '<text x="' + (r.x + 3) + '" y="' + (y + 13) + '" font-size="' + fontSize +
+                    '" fill="' + fgTextColor + '" pointer-events="none">' + escapeHtml(label) + '</text>';
+            }
+        }
+        svg += '<title>' + escapeHtml(r.name) + ' (' + r.value + ' samples, ' +
+            r.percent.toFixed(1) + '%)</title>';
+        svg += '</g>';
+    });
+    svg += '</svg>';
+
+    var html = svg;
+    html += '<div class="fg-info-bar">Hover over a frame to see details</div>';
+    container.innerHTML = html;
+
+    // Hover info
+    var infoBar = container.querySelector('.fg-info-bar');
+    var svgEl = container.querySelector('svg');
+    if (svgEl && infoBar) {
+        svgEl.addEventListener('mousemove', function(e) {
+            var g = e.target.closest('g');
+            if (!g) return;
+            var title = g.querySelector('title');
+            if (title) {
+                infoBar.textContent = title.textContent;
+                infoBar.classList.add('fg-info-active');
+            }
+        });
+        svgEl.addEventListener('mouseleave', function() {
+            infoBar.textContent = 'Hover over a frame to see details';
+            infoBar.classList.remove('fg-info-active');
+        });
+    }
+}
+
+function renderThreadSourceFiles(sourceFiles, tid) {
+    var container = document.getElementById('thread-source-files');
+    if (!sourceFiles || sourceFiles.length === 0) {
+        container.innerHTML = '';
+        return;
+    }
+
+    var html = '<div class="thread-source-file-list">';
+    sourceFiles.forEach(function(f, i) {
+        var basename = f.path.split('/').pop();
+        html += '<button class="thread-source-file-btn' + (i === 0 ? ' active' : '') +
+            '" data-path="' + escapeAttr(f.path) + '">' +
+            escapeHtml(basename) + ' (' + f.total_samples + ')</button>';
+    });
+    html += '</div>';
+    container.innerHTML = html;
+
+    // Load first file
+    if (sourceFiles.length > 0) {
+        loadThreadSource(sourceFiles[0].path, tid);
+    }
+
+    container.querySelectorAll('.thread-source-file-btn').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            container.querySelectorAll('.thread-source-file-btn').forEach(function(b) {
+                b.classList.remove('active');
+            });
+            btn.classList.add('active');
+            loadThreadSource(btn.getAttribute('data-path'), tid);
+        });
+    });
+}
+
+function loadThreadSource(filePath, tid) {
+    var container = document.getElementById('thread-source-view');
+    container.innerHTML = '<p class="empty loading">Loading source...</p>';
+
+    var evt = state.selectedEvent || 'cycles';
+    var url = '/api/source?file=' + encodeURIComponent(filePath) +
+        '&event=' + encodeURIComponent(evt) + '&tid=' + tid;
+
+    fetch(url)
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.lines && data.lines.length > 0) {
+                renderThreadSourceView(container, data.file, data.lines);
+            } else {
+                container.innerHTML = '<p class="empty">No source data for this thread in ' +
+                    escapeHtml(filePath) + '</p>';
+            }
+        })
+        .catch(function() {
+            container.innerHTML = '<p class="empty">Error loading source</p>';
+        });
+}
+
+function renderThreadSourceView(container, filePath, lines) {
+    if (!lines || lines.length === 0) {
+        container.innerHTML = '<p class="empty">No source data</p>';
+        return;
+    }
+
+    var totalSamples = 0;
+    var maxSamples = 0;
+    var hottestLine = 0;
+    lines.forEach(function(l) {
+        totalSamples += l.samples;
+        if (l.samples > maxSamples) {
+            maxSamples = l.samples;
+            hottestLine = l.line;
+        }
+    });
+
+    var maxLine = Math.max(2000, hottestLine + 100);
+    var displayLines = lines.length > maxLine ? lines.slice(0, maxLine) : lines;
+
+    var html = '<div class="source-header">' + escapeHtml(filePath) +
+        ' (' + totalSamples + ' samples, thread ' + _threadDetailState.comm + ')</div>';
+    html += '<div class="source-scroll">';
+
+    displayLines.forEach(function(l) {
+        var cls = 'source-line';
+        var heat = '';
+        if (l.samples > 0 && maxSamples > 0) {
+            var ratio = l.samples / maxSamples;
+            if (ratio > 0.6) { cls += ' hot-high'; heat = 'hot-high'; }
+            else if (ratio > 0.2) { cls += ' hot-mid'; heat = 'hot-mid'; }
+            else { cls += ' hot-low'; heat = 'hot-low'; }
+        }
+        var sampleText = l.samples > 0 ? l.samples.toString() : '';
+        var pctText = l.samples > 0 && totalSamples > 0 ?
+            (100 * l.samples / totalSamples).toFixed(1) + '%' : '';
+        html += '<div class="' + cls + '">' +
+            '<span class="line-num">' + l.line + '</span>' +
+            '<span class="line-samples">' + sampleText + '</span>' +
+            '<span class="line-pct">' + pctText + '</span>' +
+            '<span class="line-code">' + escapeHtml(l.code || '') + '</span></div>';
+    });
+    html += '</div>';
+    container.innerHTML = html;
+
+    // Scroll to hottest line
+    if (hottestLine > 0) {
+        var hotEl = container.querySelector('.hot-high, .hot-mid');
+        if (hotEl) hotEl.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
+}
+
+// Thread detail tab switching
+(function() {
+    var detail = document.getElementById('thread-detail');
+    if (!detail) return;
+    detail.querySelectorAll('.thread-dtab').forEach(function(tab) {
+        tab.addEventListener('click', function() {
+            var target = tab.getAttribute('data-thread-tab');
+            detail.querySelectorAll('.thread-dtab').forEach(function(t) { t.classList.remove('active'); });
+            detail.querySelectorAll('.thread-detail-panel').forEach(function(p) { p.classList.remove('active'); });
+            tab.classList.add('active');
+            var panel = document.getElementById(target);
+            if (panel) panel.classList.add('active');
+        });
+    });
+
+    // Back button
+    var backBtn = document.getElementById('thread-back-btn');
+    if (backBtn) {
+        backBtn.addEventListener('click', function() {
+            _threadDetailState.tid = null;
+            _threadDetailState.data = null;
+            document.getElementById('threads-overview').classList.remove('hidden');
+            detail.classList.add('hidden');
+            renderThreadsTab();
+        });
+    }
+})();
 
 // =====================================================================
 

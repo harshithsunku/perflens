@@ -1250,6 +1250,10 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
             event = params.get('event', ['cycles'])[0]
             tid = params.get('tid', [None])[0]
             self._handle_thread_view(event, tid)
+        elif path == '/api/thread-summary':
+            params = parse_qs(parsed.query)
+            event = params.get('event', ['cycles'])[0]
+            self._handle_thread_summary(event)
         elif path == '/api/source':
             params = parse_qs(parsed.query)
             file_path = params.get('file', [None])[0]
@@ -1635,7 +1639,7 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
                 state.sse_clients.discard(client)
 
     def _handle_thread_view(self, event_type, tid_str):
-        """GET /api/thread-view?event=X&tid=Y — per-thread flamegraph+summary."""
+        """GET /api/thread-view?event=X&tid=Y — per-thread flamegraph+summary+source_files."""
         if not tid_str:
             self._send_json({'error': 'tid parameter required'}, 400)
             return
@@ -1657,18 +1661,78 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
             self._send_json({'flamegraph': {'name': 'root', 'value': 0,
                                             'children': []},
                              'function_summary': {'total_samples': 0,
-                                                  'functions': []}})
+                                                  'functions': []},
+                             'source_files': []})
             return
 
         mapper = state.source_mapper
         expanded = mapper.expand_inline_frames(filtered) if mapper else filtered
-        self._send_json({
+        result = {
             'flamegraph': build_flamegraph_data(expanded),
             'function_summary': build_function_summary(expanded),
-        })
+        }
+        if mapper:
+            result['source_files'] = mapper.get_files_with_samples(filtered)
+        else:
+            result['source_files'] = []
+        self._send_json(result)
+
+    def _handle_thread_summary(self, event_type):
+        """GET /api/thread-summary?event=X — overview of all threads with CPU breakdown."""
+        with state.lock:
+            all_samples = list(state.all_samples)
+
+        filtered = filter_samples_by_event(all_samples, event_type)
+        total = len(filtered)
+        if total == 0:
+            self._send_json({'total_samples': 0, 'threads': []})
+            return
+
+        # Group samples by tid
+        by_tid = {}
+        for s in filtered:
+            tid = s.get('tid', s.get('pid', 0))
+            if tid not in by_tid:
+                by_tid[tid] = {'comm': s.get('comm', ''), 'samples': []}
+            by_tid[tid]['samples'].append(s)
+
+        # Build per-thread summary
+        mapper = state.source_mapper
+        threads = []
+        for tid, info in sorted(by_tid.items(), key=lambda x: len(x[1]['samples']), reverse=True):
+            count = len(info['samples'])
+            expanded = mapper.expand_inline_frames(info['samples']) if mapper else info['samples']
+            # Top function by self samples (leaf frame)
+            func_counts = {}
+            for s in expanded:
+                if s['frames']:
+                    fn = s['frames'][0]['func']
+                    func_counts[fn] = func_counts.get(fn, 0) + 1
+            top_func = ''
+            top_func_samples = 0
+            if func_counts:
+                top_func = max(func_counts, key=func_counts.get)
+                top_func_samples = func_counts[top_func]
+
+            # Top 5 functions for quick overview
+            top_funcs = sorted(func_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+            top_functions = [{'name': fn, 'samples': c, 'percent': round(100.0 * c / count, 1)}
+                            for fn, c in top_funcs]
+
+            threads.append({
+                'tid': tid,
+                'comm': info['comm'],
+                'samples': count,
+                'percent': round(100.0 * count / total, 1),
+                'top_function': top_func,
+                'top_function_samples': top_func_samples,
+                'top_functions': top_functions,
+            })
+
+        self._send_json({'total_samples': total, 'threads': threads})
 
     def _handle_source_request(self, file_path):
-        """Return annotated source for a specific file."""
+        """Return annotated source for a specific file. Optional tid filter."""
         if not file_path:
             self._send_json({'error': 'file parameter required'})
             return
@@ -1676,6 +1740,7 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
         event_type = params.get('event', [None])[0]
+        tid_str = params.get('tid', [None])[0]
 
         mapper = state.source_mapper
         if not mapper:
@@ -1688,6 +1753,14 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
 
         if event_type:
             all_samples = filter_samples_by_event(all_samples, event_type)
+
+        if tid_str:
+            try:
+                tid = int(tid_str)
+                all_samples = [s for s in all_samples
+                               if s.get('tid', s.get('pid', 0)) == tid]
+            except ValueError:
+                pass
 
         line_data = mapper.map_samples_to_lines(all_samples)
 

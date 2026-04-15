@@ -902,6 +902,106 @@ main {
     line-height: 1.3;
 }
 
+/* --- Threads tab --- */
+.threads-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+.threads-table th {
+    text-align: left;
+    padding: 8px 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    border-bottom: 2px solid var(--border-default);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.threads-table td {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border-subtle);
+    color: var(--text-primary);
+}
+.threads-table tr.thread-row { cursor: pointer; transition: background var(--transition); }
+.threads-table tr.thread-row:hover { background: var(--bg-surface-hover); }
+.thread-cpu-bar {
+    display: inline-block;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--accent);
+    vertical-align: middle;
+    margin-right: 6px;
+    min-width: 2px;
+}
+.thread-top-funcs {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin-top: 2px;
+}
+.thread-back-btn {
+    background: none;
+    border: 1px solid var(--border-default);
+    color: var(--text-secondary);
+    padding: 5px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+    transition: all var(--transition);
+}
+.thread-back-btn:hover { color: var(--text-primary); border-color: var(--accent); }
+.thread-detail-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+.thread-detail-title {
+    font-weight: 600;
+    font-size: 14px;
+    color: var(--text-primary);
+}
+.thread-detail-tabs {
+    display: flex;
+    gap: 0;
+    border-bottom: 1px solid var(--border-default);
+    margin-bottom: 16px;
+}
+.thread-dtab {
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--text-tertiary);
+    font-size: 12px;
+    font-weight: 600;
+    padding: 8px 16px;
+    cursor: pointer;
+    transition: color var(--transition), border-color var(--transition);
+}
+.thread-dtab:hover { color: var(--text-primary); }
+.thread-dtab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.thread-detail-panel { display: none; }
+.thread-detail-panel.active { display: block; }
+.thread-source-file-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 12px;
+}
+.thread-source-file-btn {
+    background: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    color: var(--text-secondary);
+    padding: 4px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 11px;
+    font-family: var(--font-mono);
+    transition: all var(--transition);
+}
+.thread-source-file-btn:hover { border-color: var(--accent); color: var(--text-primary); }
+.thread-source-file-btn.active { background: var(--accent-muted); border-color: var(--accent); color: var(--accent-text); }
+
 /* --- Sessions table --- */
 #sessions-table {
     width: 100%;

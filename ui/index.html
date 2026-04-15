@@ -306,6 +306,7 @@
                 <button class="tab active" data-tab="functions">Functions</button>
                 <button class="tab" data-tab="source">Source</button>
                 <button class="tab" data-tab="flamegraph">Flame Graph</button>
+                <button class="tab" data-tab="threads">Threads</button>
                 <button class="tab" data-tab="sessions">Sessions</button>
             </div>
 
@@ -346,6 +347,32 @@
                 </div>
                 <div id="flamegraph-container">
                     <p class="empty">Waiting for data...</p>
+                </div>
+            </div>
+            <div id="tab-threads" class="tab-content">
+                <div id="threads-overview">
+                    <p class="empty">Waiting for data...</p>
+                </div>
+                <div id="thread-detail" class="hidden">
+                    <div class="thread-detail-header">
+                        <button id="thread-back-btn" class="thread-back-btn">&larr; All Threads</button>
+                        <span id="thread-detail-title" class="thread-detail-title"></span>
+                    </div>
+                    <div class="thread-detail-tabs">
+                        <button class="thread-dtab active" data-thread-tab="t-functions">Functions</button>
+                        <button class="thread-dtab" data-thread-tab="t-flamegraph">Flame Graph</button>
+                        <button class="thread-dtab" data-thread-tab="t-source">Source</button>
+                    </div>
+                    <div id="t-functions" class="thread-detail-panel active">
+                        <div id="thread-fn-table"></div>
+                    </div>
+                    <div id="t-flamegraph" class="thread-detail-panel">
+                        <div id="thread-fg-container"></div>
+                    </div>
+                    <div id="t-source" class="thread-detail-panel">
+                        <div id="thread-source-files"></div>
+                        <div id="thread-source-view"></div>
+                    </div>
                 </div>
             </div>
             <div id="tab-sessions" class="tab-content">
