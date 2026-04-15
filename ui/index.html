@@ -65,8 +65,8 @@
             <div class="wizard-container">
                 <div class="wizard-progress">
                     <div class="wiz-prog-step" data-step="1"><span class="wiz-num">1</span> Connect</div>
-                    <div class="wiz-prog-step" data-step="2"><span class="wiz-num">2</span> Perf</div>
-                    <div class="wiz-prog-step" data-step="3"><span class="wiz-num">3</span> Process</div>
+                    <div class="wiz-prog-step" data-step="2"><span class="wiz-num">2</span> Process</div>
+                    <div class="wiz-prog-step" data-step="3"><span class="wiz-num">3</span> Perf</div>
                     <div class="wiz-prog-step" data-step="4"><span class="wiz-num">4</span> Binary</div>
                     <div class="wiz-prog-step" data-step="5"><span class="wiz-num">5</span> Options</div>
                     <div class="wiz-prog-step" data-step="6"><span class="wiz-num">6</span> Start</div>
@@ -91,22 +91,8 @@
                         </div>
                     </div>
 
-                    <!-- Step 2: Verify Perf Tool -->
+                    <!-- Step 2: Select Process -->
                     <div id="wiz-step-2" class="wiz-step">
-                        <h3>Perf Capabilities</h3>
-                        <p>Checking that <code>perf</code> is available on the target and probing supported events.</p>
-                        <div id="wiz-perf-result" class="wiz-result">
-                            <div class="wiz-spinner">Checking...</div>
-                        </div>
-                        <div id="wiz-caps-section" class="hidden">
-                            <h4>Supported Events</h4>
-                            <div id="wiz-caps-events" class="wiz-caps-grid"></div>
-                            <div id="wiz-caps-callgraph" class="wiz-caps-callgraph"></div>
-                        </div>
-                    </div>
-
-                    <!-- Step 3: Select Process -->
-                    <div id="wiz-step-3" class="wiz-step">
                         <h3>Select Process</h3>
                         <p>Choose the process to profile on the target device.</p>
                         <div class="wiz-form">
@@ -121,6 +107,20 @@
                         </div>
                         <div id="wiz-proc-list" class="wiz-proc-list">
                             <p class="empty">Click Refresh to load process list</p>
+                        </div>
+                    </div>
+
+                    <!-- Step 3: Verify Perf Tool -->
+                    <div id="wiz-step-3" class="wiz-step">
+                        <h3>Perf Capabilities</h3>
+                        <p>Checking that <code>perf</code> is available on the target and probing supported events.</p>
+                        <div id="wiz-perf-result" class="wiz-result">
+                            <div class="wiz-spinner">Checking...</div>
+                        </div>
+                        <div id="wiz-caps-section" class="hidden">
+                            <h4>Supported Events</h4>
+                            <div id="wiz-caps-events" class="wiz-caps-grid"></div>
+                            <div id="wiz-caps-callgraph" class="wiz-caps-callgraph"></div>
                         </div>
                     </div>
 

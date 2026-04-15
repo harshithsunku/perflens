@@ -1414,7 +1414,7 @@ function wizardGoToStep(step) {
     document.getElementById('wiz-skip').style.display = step === 4 ? '' : 'none';
 
     // Step-specific actions
-    if (step === 2 && wizardData.connected) wizardVerifyPerf();
+    if (step === 3 && wizardData.connected) wizardVerifyPerf();
     if (step === 6) wizardBuildReview();
 }
 
@@ -1444,7 +1444,7 @@ function wizardValidateStep(step) {
         wizardSetStatus('wiz-connect-status', 'Connect to agent first', 'error');
         return false;
     }
-    if (step === 3) {
+    if (step === 2) {
         var pid = document.getElementById('wiz-pid').value;
         if (!pid) {
             wizardSetStatus('wiz-pid-status', 'Select or enter a PID', 'error');
@@ -1562,7 +1562,7 @@ function wizardProbeCapabilities() {
     fetch('/api/agent/command', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cmd: 'reprobe', args: {}, timeout: 120 }),
+        body: JSON.stringify({ cmd: 'reprobe', args: { pid: wizardData.pid }, timeout: 120 }),
     })
     .then(function(r) { return r.json(); })
     .then(function(data) {
