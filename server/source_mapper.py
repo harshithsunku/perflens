@@ -225,12 +225,15 @@ class SourceMapper:
     """
 
     def __init__(self, source_dir, binary_path=None, map_file_path=None,
-                 addr2line_bin=None, path_map=None, inline=False):
+                 addr2line_bin=None, readelf_bin=None, path_map=None,
+                 inline=False, sysroot=None):
         self.source_dir = os.path.abspath(source_dir)
         self.binary_path = binary_path
         self.addr2line_bin = addr2line_bin
+        self.readelf_bin = readelf_bin or 'readelf'
         self.path_map = path_map or {}
         self.inline = inline
+        self.sysroot = sysroot
 
         # Map file symbols
         self._map_symbols = {}
@@ -325,7 +328,7 @@ class SourceMapper:
             proc = None
             try:
                 proc = subprocess.Popen(
-                    ['readelf', '-s', '-W', binary],
+                    [self.readelf_bin, '-s', '-W', binary],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,
                     text=True,
@@ -427,7 +430,7 @@ class SourceMapper:
             if not sample['frames']:
                 continue
             frame = sample['frames'][0]
-            binary = self.binary_path or frame.get('module', '')
+            binary = self.binary_path or self._resolve_module_path(frame.get('module', ''))
             if not binary:
                 continue
             vaddr = self._compute_vaddr(frame, binary)
@@ -448,6 +451,20 @@ class SourceMapper:
                 line_data[file_path][line_no]['samples'] += 1
 
         return dict(line_data)
+
+    def _resolve_module_path(self, module):
+        """Resolve a module path from perf output to a local binary.
+
+        If sysroot is set, prepends it to absolute paths (e.g.
+        /usr/lib/libc.so -> /opt/sysroot/usr/lib/libc.so).
+        """
+        if not module:
+            return module
+        if self.sysroot and module.startswith('/'):
+            candidate = os.path.join(self.sysroot, module.lstrip('/'))
+            if os.path.isfile(candidate):
+                return candidate
+        return module
 
     def _apply_path_map(self, file_path):
         """Apply compile-time path prefix mappings."""
@@ -488,7 +505,12 @@ class SourceMapper:
         # Try exact path
         if os.path.isfile(mapped):
             result = mapped
-        else:
+        elif self.sysroot and mapped.startswith('/'):
+            # Try sysroot-prefixed path (cross-compilation)
+            sysroot_path = os.path.join(self.sysroot, mapped.lstrip('/'))
+            if os.path.isfile(sysroot_path):
+                result = sysroot_path
+        if result is None:
             # Try basename matching
             self._build_source_index()
             basename = os.path.basename(mapped)
@@ -584,7 +606,7 @@ class SourceMapper:
             if not sample['frames']:
                 continue
             frame = sample['frames'][0]
-            binary = self.binary_path or frame.get('module', '')
+            binary = self.binary_path or self._resolve_module_path(frame.get('module', ''))
             vaddr = self._compute_vaddr(frame, binary)
             if vaddr is not None:
                 fpath, lineno = self._addr2line_cache.get(
@@ -619,7 +641,7 @@ class SourceMapper:
         to_resolve = defaultdict(list)
         for sample in samples:
             for frame in sample['frames']:
-                binary = self.binary_path or frame.get('module', '')
+                binary = self.binary_path or self._resolve_module_path(frame.get('module', ''))
                 if not binary:
                     continue
                 vaddr = self._compute_vaddr(frame, binary)
@@ -647,7 +669,7 @@ class SourceMapper:
         for sample in samples:
             new_frames = []
             for frame in sample['frames']:
-                binary = self.binary_path or frame.get('module', '')
+                binary = self.binary_path or self._resolve_module_path(frame.get('module', ''))
                 vaddr = self._compute_vaddr(frame, binary) if binary else None
                 chain = self._inline_cache.get((binary, vaddr)) if vaddr else None
 
@@ -735,7 +757,7 @@ class SourceMapper:
         proc = None
         try:
             proc = subprocess.Popen(
-                ['readelf', '--debug-dump=decodedline', '-W', binary],
+                [self.readelf_bin, '--debug-dump=decodedline', '-W', binary],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 text=True,

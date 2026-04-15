@@ -13,6 +13,7 @@ let state = {
     replaySessionId: null,
     flamegraphZoom: null,   // null or {name, node}
     flamegraphZoomPath: [], // breadcrumb trail of zoom history
+    selectedTid: null,      // null = all threads, or integer TID
     sourceFiles: [],        // [{path, found, total_samples, functions}] for current event
     metricsSystem: [],      // system metric snapshots (last ~150)
     metricsProcess: [],     // process metric snapshots
@@ -264,6 +265,16 @@ document.getElementById('event-select').addEventListener('change', (e) => {
     state.selectedEvent = e.target.value;
     state.flamegraphZoom = null;
     state.flamegraphZoomPath = [];
+    state.selectedTid = null;
+    functionShowCount = 200;
+    renderCurrentEvent();
+});
+
+document.getElementById('thread-filter').addEventListener('change', function(e) {
+    var val = e.target.value;
+    state.selectedTid = val ? parseInt(val) : null;
+    state.flamegraphZoom = null;
+    state.flamegraphZoomPath = [];
     functionShowCount = 200;
     renderCurrentEvent();
 });
@@ -453,23 +464,69 @@ setInterval(() => {
     el.textContent = ago < 2 ? 'Updated just now' : 'Updated ' + ago + 's ago';
 }, 1000);
 
-// --- Render current event ---
+// --- Thread filter ---
+function updateThreadFilter() {
+    var evtData = state.perEvent[state.selectedEvent];
+    var select = document.getElementById('thread-filter');
+    var label = document.getElementById('thread-filter-label');
+    if (!evtData || !evtData.threads || evtData.threads.length <= 1) {
+        select.classList.add('hidden');
+        label.classList.add('hidden');
+        state.selectedTid = null;
+        return;
+    }
+    select.classList.remove('hidden');
+    label.classList.remove('hidden');
+    var current = select.value;
+    select.innerHTML = '<option value="">All threads (' + evtData.threads.length + ')</option>';
+    evtData.threads.forEach(function(t) {
+        var opt = document.createElement('option');
+        opt.value = t.tid;
+        opt.textContent = t.comm + ' (' + t.tid + ')';
+        if (String(t.tid) === current) opt.selected = true;
+        select.appendChild(opt);
+    });
+}
+
+var _threadViewPending = false;
 function renderCurrentEvent() {
-    const evtData = state.perEvent[state.selectedEvent];
+    var evtData = state.perEvent[state.selectedEvent];
     if (!evtData) return;
 
-    renderFunctionTable(evtData.function_summary);
+    updateThreadFilter();
     updateSourceBanner();
+
+    if (state.selectedTid !== null) {
+        // Fetch per-thread view from server
+        if (_threadViewPending) return;
+        _threadViewPending = true;
+        fetch('/api/thread-view?event=' + encodeURIComponent(state.selectedEvent) +
+              '&tid=' + state.selectedTid)
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                _threadViewPending = false;
+                renderFunctionTable(data.function_summary);
+                state.flamegraphZoom = null;
+                state.flamegraphZoomPath = [];
+                state.selectedTid = null;
+                renderFlamegraph(data.flamegraph, data.function_summary.total_samples);
+            })
+            .catch(function() { _threadViewPending = false; });
+        return;
+    }
+
+    renderFunctionTable(evtData.function_summary);
 
     // Flamegraph: try to preserve zoom
     if (state.flamegraphZoom) {
-        const node = findNodeByName(evtData.flamegraph, state.flamegraphZoom.name);
+        var node = findNodeByName(evtData.flamegraph, state.flamegraphZoom.name);
         if (node) {
             state.flamegraphZoom.node = node;
             renderFlamegraph(node, node.value);
         } else {
             state.flamegraphZoom = null;
             state.flamegraphZoomPath = [];
+            state.selectedTid = null;
             renderFlamegraph(evtData.flamegraph, evtData.function_summary.total_samples);
         }
     } else {
@@ -984,6 +1041,7 @@ function renderFlamegraph(data, totalSamples) {
         resetBtn.addEventListener('click', () => {
             state.flamegraphZoom = null;
             state.flamegraphZoomPath = [];
+            state.selectedTid = null;
             const evtData = state.perEvent[state.selectedEvent];
             if (evtData) renderFlamegraph(evtData.flamegraph, evtData.function_summary.total_samples);
         });
@@ -1158,6 +1216,7 @@ function replaySession(sessionId) {
             state.totalSamples = data.metadata.total_samples;
             state.flamegraphZoom = null;
             state.flamegraphZoomPath = [];
+            state.selectedTid = null;
             state.lastUpdateTime = Date.now();
 
             showReplayBanner(sessionId, data.metadata.timestamp);
@@ -1526,7 +1585,8 @@ document.querySelectorAll('.wiz-browse-btn').forEach(function(btn) {
         var target = btn.dataset.target;
         var input = document.getElementById(target);
         var startPath = input.value.trim() || '/';
-        openBrowseModal(startPath, target === 'wiz-source-dir' ? 'dir' : 'file', function(selected) {
+        var browseMode = (target === 'wiz-source-dir' || target === 'wiz-sysroot') ? 'dir' : 'file';
+        openBrowseModal(startPath, browseMode, function(selected) {
             input.value = selected;
         });
     });
@@ -1536,35 +1596,60 @@ document.querySelectorAll('.wiz-browse-btn').forEach(function(btn) {
 function wizardApplyStep4(callback) {
     var binary = document.getElementById('wiz-binary').value.trim();
     var sourceDir = document.getElementById('wiz-source-dir').value.trim();
+    var toolchainPrefix = document.getElementById('wiz-toolchain-prefix').value.trim();
+    var sysroot = document.getElementById('wiz-sysroot').value.trim();
     var status = document.getElementById('wiz-binary-status');
     var indexStatus = document.getElementById('wiz-index-status');
 
-    var promises = [];
-    if (binary) {
-        promises.push(
-            fetch('/api/config/binary', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ path: binary }),
-            }).then(function(r) { return r.json(); })
-        );
-        wizardData.binary = binary;
-    }
-    if (sourceDir) {
-        promises.push(
-            fetch('/api/config/source', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ path: sourceDir }),
-            }).then(function(r) { return r.json(); })
-        );
-        wizardData.sourceDir = sourceDir;
+    status.textContent = 'Applying...';
+    status.className = 'wiz-status info';
+
+    // Toolchain config must complete first — it sets addr2line/readelf used by binary indexing
+    var toolchainStep = Promise.resolve();
+    if (toolchainPrefix || sysroot) {
+        var tcBody = {};
+        if (toolchainPrefix) tcBody.prefix = toolchainPrefix;
+        if (sysroot) tcBody.sysroot = sysroot;
+        toolchainStep = fetch('/api/config/toolchain', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(tcBody),
+        }).then(function(r) { return r.json(); }).then(function(r) {
+            if (!r.ok) throw new Error(r.error || 'Toolchain config failed');
+        });
     }
 
-    if (promises.length > 0) {
-        status.textContent = 'Applying...';
-        status.className = 'wiz-status info';
-        Promise.all(promises).then(function(results) {
+    toolchainStep.then(function() {
+        var promises = [];
+        if (binary) {
+            promises.push(
+                fetch('/api/config/binary', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path: binary }),
+                }).then(function(r) { return r.json(); })
+            );
+            wizardData.binary = binary;
+        }
+        if (sourceDir) {
+            promises.push(
+                fetch('/api/config/source', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path: sourceDir }),
+                }).then(function(r) { return r.json(); })
+            );
+            wizardData.sourceDir = sourceDir;
+        }
+
+        if (promises.length === 0) {
+            status.textContent = 'Applied';
+            status.className = 'wiz-status ok';
+            if (callback) callback();
+            return;
+        }
+
+        return Promise.all(promises).then(function(results) {
             var errors = results.filter(function(r) { return !r.ok; });
             if (errors.length > 0) {
                 status.textContent = errors.map(function(e) { return e.error; }).join('; ');
@@ -1573,7 +1658,6 @@ function wizardApplyStep4(callback) {
                 status.textContent = 'Applied';
                 status.className = 'wiz-status ok';
             }
-            // Show indexing status if binary was provided
             if (binary) {
                 indexStatus.textContent = 'Indexing symbols and source files...';
                 indexStatus.className = 'wiz-status info';
@@ -1584,14 +1668,12 @@ function wizardApplyStep4(callback) {
             } else {
                 if (callback) callback();
             }
-        }).catch(function(err) {
-            status.textContent = 'Error: ' + err;
-            status.className = 'wiz-status error';
-            if (callback) callback();
         });
-    } else {
+    }).catch(function(err) {
+        status.textContent = 'Error: ' + err;
+        status.className = 'wiz-status error';
         if (callback) callback();
-    }
+    });
 }
 
 function wizardPollIndexStatus(callback) {
@@ -1694,6 +1776,16 @@ function wizardBuildReview() {
     if (wizardData.binary) {
         html += '<div class="wiz-review-row"><span class="wiz-review-label">Binary</span>' +
             '<span class="wiz-review-value">' + escapeHtml(wizardData.binary) + '</span></div>';
+    }
+    var tcPrefix = document.getElementById('wiz-toolchain-prefix').value.trim();
+    var sysrootVal = document.getElementById('wiz-sysroot').value.trim();
+    if (tcPrefix) {
+        html += '<div class="wiz-review-row"><span class="wiz-review-label">Toolchain</span>' +
+            '<span class="wiz-review-value">' + escapeHtml(tcPrefix) + '</span></div>';
+    }
+    if (sysrootVal) {
+        html += '<div class="wiz-review-row"><span class="wiz-review-label">Sysroot</span>' +
+            '<span class="wiz-review-value">' + escapeHtml(sysrootVal) + '</span></div>';
     }
     summary.innerHTML = html;
 }

@@ -33,9 +33,11 @@ class ServerConfig:
     binary_path: str = None
     map_file_path: str = None
     addr2line_bin: str = None
+    readelf_bin: str = None
     zstd_bin: str = None
     perf_bin: str = None
     path_map: dict = None
+    sysroot: str = None
     sessions_dir: str = ''
     max_samples: int = 500000
     tcp_port: int = 9999
@@ -282,6 +284,45 @@ def probe_tools(cfg):
             print("[server]   addr2line: NOT FOUND (source mapping disabled)",
                   file=sys.stderr)
 
+    # readelf
+    if cfg.readelf_bin and os.path.isfile(cfg.readelf_bin):
+        print(f"[server]   readelf: {cfg.readelf_bin} (user-provided)",
+              file=sys.stderr)
+    elif cfg.readelf_bin:
+        # Toolchain-derived path — check if it exists on PATH
+        try:
+            r = subprocess.run(['which', cfg.readelf_bin], capture_output=True,
+                               text=True, timeout=5)
+            if r.returncode == 0:
+                cfg.readelf_bin = r.stdout.strip()
+                print(f"[server]   readelf: {cfg.readelf_bin} (toolchain)",
+                      file=sys.stderr)
+            else:
+                print(f"[server]   readelf: {cfg.readelf_bin} (NOT FOUND, "
+                      f"falling back to system)", file=sys.stderr)
+                cfg.readelf_bin = None
+        except Exception:
+            cfg.readelf_bin = None
+    if not cfg.readelf_bin:
+        found = _find_binary('readelf')
+        if found:
+            cfg.readelf_bin = found
+            label = 'bundled' if 'server/bin' in found else 'system'
+            print(f"[server]   readelf: {found} ({label})", file=sys.stderr)
+        else:
+            cfg.readelf_bin = 'readelf'  # fallback, may fail at runtime
+            print("[server]   readelf: NOT FOUND (using 'readelf' fallback)",
+                  file=sys.stderr)
+
+    # sysroot
+    if cfg.sysroot:
+        if os.path.isdir(cfg.sysroot):
+            print(f"[server]   sysroot: {cfg.sysroot}", file=sys.stderr)
+        else:
+            print(f"[server]   sysroot: {cfg.sysroot} (NOT FOUND)",
+                  file=sys.stderr)
+            cfg.sysroot = None
+
     # zstd
     found = _find_binary('zstd')
     if found:
@@ -316,6 +357,20 @@ def probe_tools(cfg):
         print("[server]   inline: disabled (--no-inline)", file=sys.stderr)
 
     print("[server] ================================", file=sys.stderr)
+
+
+def _create_source_mapper():
+    """Create a SourceMapper from current config. Used at startup and reconfiguration."""
+    return SourceMapper(
+        config.source_dir,
+        binary_path=config.binary_path,
+        map_file_path=config.map_file_path,
+        addr2line_bin=config.addr2line_bin,
+        readelf_bin=config.readelf_bin,
+        path_map=config.path_map or {},
+        inline=config.inline,
+        sysroot=config.sysroot,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -959,11 +1014,20 @@ def build_per_event_data(all_samples, event_types, mapper, source=False):
     for evt in event_types:
         evt_expanded = filter_samples_by_event(expanded, evt)
         evt_orig = filter_samples_by_event(all_samples, evt)
+        # Extract unique threads for this event
+        seen_tids = {}
+        for s in evt_expanded:
+            tid = s.get('tid', s.get('pid', 0))
+            if tid not in seen_tids:
+                seen_tids[tid] = s.get('comm', '')
+        threads = [{'tid': t, 'comm': c} for t, c in
+                   sorted(seen_tids.items(), key=lambda x: x[0])]
         entry = {
             'function_summary': build_function_summary(evt_expanded),
             'flamegraph': build_flamegraph_data(evt_expanded),
             'source_files': mapper.get_files_with_samples(evt_orig)
                             if mapper else [],
+            'threads': threads,
         }
         if source:
             if mapper:
@@ -1181,6 +1245,11 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
             params = parse_qs(parsed.query)
             fmt = params.get('format', ['collapsed'])[0]
             self._handle_export_session(session_id, fmt)
+        elif path == '/api/thread-view':
+            params = parse_qs(parsed.query)
+            event = params.get('event', ['cycles'])[0]
+            tid = params.get('tid', [None])[0]
+            self._handle_thread_view(event, tid)
         elif path == '/api/source':
             params = parse_qs(parsed.query)
             file_path = params.get('file', [None])[0]
@@ -1235,6 +1304,8 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
             self._handle_config_source()
         elif path == '/api/config/pathmap':
             self._handle_config_pathmap()
+        elif path == '/api/config/toolchain':
+            self._handle_config_toolchain()
         else:
             self.send_error(404)
 
@@ -1357,14 +1428,7 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
 
         config.binary_path = path
         # Recreate source mapper with new binary
-        mapper = SourceMapper(
-            config.source_dir,
-            binary_path=config.binary_path,
-            map_file_path=config.map_file_path,
-            addr2line_bin=config.addr2line_bin,
-            path_map=config.path_map or {},
-            inline=config.inline,
-        )
+        mapper = _create_source_mapper()
         state.source_mapper = mapper
         # Pre-index symbols and DWARF source files in background
         threading.Thread(target=mapper.pre_index, daemon=True).start()
@@ -1391,14 +1455,7 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
 
         config.source_dir = path
         # Recreate source mapper
-        mapper = SourceMapper(
-            config.source_dir,
-            binary_path=config.binary_path,
-            map_file_path=config.map_file_path,
-            addr2line_bin=config.addr2line_bin,
-            path_map=config.path_map or {},
-            inline=config.inline,
-        )
+        mapper = _create_source_mapper()
         state.source_mapper = mapper
         # Pre-index in background
         threading.Thread(target=mapper.pre_index, daemon=True).start()
@@ -1416,16 +1473,68 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
         path_map = body.get('path_map', {})
         config.path_map = path_map if path_map else None
         # Recreate source mapper
-        mapper = SourceMapper(
-            config.source_dir,
-            binary_path=config.binary_path,
-            map_file_path=config.map_file_path,
-            addr2line_bin=config.addr2line_bin,
-            path_map=config.path_map or {},
-            inline=config.inline,
-        )
+        mapper = _create_source_mapper()
         state.source_mapper = mapper
         self._send_json({'ok': True, 'path_map': path_map})
+
+    def _handle_config_toolchain(self):
+        """POST /api/config/toolchain — set toolchain prefix and sysroot."""
+        try:
+            body = self._read_json_body()
+        except (ValueError, KeyError):
+            self._send_json({'error': 'invalid JSON'}, 400)
+            return
+
+        prefix = body.get('prefix', '').strip()
+        sysroot = body.get('sysroot', '').strip()
+
+        result = {'ok': True}
+
+        if prefix:
+            a2l = prefix + 'addr2line'
+            rel = prefix + 'readelf'
+            # Verify at least addr2line exists
+            found = os.path.isfile(a2l)
+            if not found:
+                try:
+                    r = subprocess.run(['which', a2l], capture_output=True,
+                                       text=True, timeout=5)
+                    found = r.returncode == 0
+                    if found:
+                        a2l = r.stdout.strip()
+                        # Also resolve readelf
+                        r2 = subprocess.run(['which', rel], capture_output=True,
+                                            text=True, timeout=5)
+                        if r2.returncode == 0:
+                            rel = r2.stdout.strip()
+                except Exception:
+                    pass
+            if not found:
+                self._send_json({'ok': False,
+                                 'error': f'addr2line not found: {a2l}'}, 400)
+                return
+            config.addr2line_bin = a2l
+            config.readelf_bin = rel
+            result['addr2line'] = a2l
+            result['readelf'] = rel
+
+        if sysroot:
+            sysroot = os.path.abspath(sysroot)
+            if not os.path.isdir(sysroot):
+                self._send_json({'ok': False,
+                                 'error': f'sysroot not found: {sysroot}'}, 400)
+                return
+            config.sysroot = sysroot
+            result['sysroot'] = sysroot
+        elif 'sysroot' in body:
+            config.sysroot = None
+
+        # Recreate source mapper with new toolchain
+        mapper = _create_source_mapper()
+        state.source_mapper = mapper
+        if config.binary_path:
+            threading.Thread(target=mapper.pre_index, daemon=True).start()
+        self._send_json(result)
 
     def _handle_browse(self, browse_path):
         """GET /api/browse?path=/ — browse server filesystem for files."""
@@ -1524,6 +1633,39 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
         finally:
             with state.lock:
                 state.sse_clients.discard(client)
+
+    def _handle_thread_view(self, event_type, tid_str):
+        """GET /api/thread-view?event=X&tid=Y — per-thread flamegraph+summary."""
+        if not tid_str:
+            self._send_json({'error': 'tid parameter required'}, 400)
+            return
+        try:
+            tid = int(tid_str)
+        except ValueError:
+            self._send_json({'error': 'invalid tid'}, 400)
+            return
+
+        with state.lock:
+            all_samples = list(state.all_samples)
+
+        # Filter by event, then by tid
+        filtered = filter_samples_by_event(all_samples, event_type)
+        filtered = [s for s in filtered
+                    if s.get('tid', s.get('pid', 0)) == tid]
+
+        if not filtered:
+            self._send_json({'flamegraph': {'name': 'root', 'value': 0,
+                                            'children': []},
+                             'function_summary': {'total_samples': 0,
+                                                  'functions': []}})
+            return
+
+        mapper = state.source_mapper
+        expanded = mapper.expand_inline_frames(filtered) if mapper else filtered
+        self._send_json({
+            'flamegraph': build_flamegraph_data(expanded),
+            'function_summary': build_function_summary(expanded),
+        })
 
     def _handle_source_request(self, file_path):
         """Return annotated source for a specific file."""
@@ -1804,6 +1946,17 @@ def main():
                              '(e.g., /build/src=/home/user/src)')
     parser.add_argument('--addr2line', type=str, default=None,
                         help='Path to custom addr2line binary')
+    parser.add_argument('--readelf', type=str, default=None,
+                        help='Path to custom readelf binary')
+    parser.add_argument('--toolchain-prefix', type=str, default=None,
+                        help='Cross-toolchain prefix '
+                             '(e.g., arm-linux-gnueabihf- or '
+                             '/opt/toolchain/bin/aarch64-linux-gnu-). '
+                             'Derives addr2line and readelf from prefix.')
+    parser.add_argument('--sysroot', type=str, default=None,
+                        help='Target sysroot directory for resolving '
+                             'shared libraries and source files '
+                             '(like perf --symfs)')
     parser.add_argument('--max-samples', type=int, default=500000,
                         help='Max accumulated samples before oldest are dropped '
                              '(default: 500000)')
@@ -1826,6 +1979,22 @@ def main():
             if '=' in mapping:
                 src, dst = mapping.split('=', 1)
                 path_map[src] = dst
+
+    # Toolchain prefix: derive addr2line and readelf from prefix
+    if args.toolchain_prefix:
+        prefix = args.toolchain_prefix
+        if not args.addr2line:
+            args.addr2line = prefix + 'addr2line'
+        if not args.readelf:
+            args.readelf = prefix + 'readelf'
+        print(f"[server] Toolchain prefix: {prefix}", file=sys.stderr)
+    elif args.addr2line and not args.readelf:
+        # Infer readelf from addr2line path (same directory, same prefix)
+        a2l = args.addr2line
+        if 'addr2line' in os.path.basename(a2l):
+            inferred = a2l.replace('addr2line', 'readelf')
+            if os.path.isfile(inferred):
+                args.readelf = inferred
 
     # Build config.
     #
@@ -1871,7 +2040,9 @@ def main():
         binary_path=os.path.abspath(args.binary) if args.binary else None,
         map_file_path=os.path.abspath(args.map) if args.map else None,
         addr2line_bin=args.addr2line,
+        readelf_bin=args.readelf,
         path_map=path_map or None,
+        sysroot=os.path.abspath(args.sysroot) if args.sysroot else None,
         sessions_dir=sessions_dir,
         max_samples=args.max_samples,
         tcp_port=args.port,
@@ -1890,14 +2061,7 @@ def main():
     probe_tools(config)
 
     # Create shared SourceMapper (lives for the entire server lifetime)
-    mapper = SourceMapper(
-        config.source_dir,
-        binary_path=config.binary_path,
-        map_file_path=config.map_file_path,
-        addr2line_bin=config.addr2line_bin,
-        path_map=config.path_map or {},
-        inline=config.inline,
-    )
+    mapper = _create_source_mapper()
 
     # Create shared state
     state = ProfilingState(max_samples=config.max_samples)

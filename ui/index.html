@@ -143,6 +143,24 @@
                                     <button class="wiz-browse-btn" data-target="wiz-source-dir">Browse</button>
                                 </div>
                             </div>
+                            <details class="wiz-advanced">
+                                <summary>Toolchain &amp; Cross-compilation</summary>
+                                <div class="wiz-row">
+                                    <label>Toolchain prefix</label>
+                                    <div class="wiz-input-row">
+                                        <input type="text" id="wiz-toolchain-prefix" placeholder="e.g. arm-linux-gnueabihf- or /opt/toolchain/bin/aarch64-linux-gnu-" />
+                                    </div>
+                                    <div class="wiz-hint">Derives addr2line and readelf from the prefix. For cross-compiled targets.</div>
+                                </div>
+                                <div class="wiz-row">
+                                    <label>Sysroot</label>
+                                    <div class="wiz-input-row">
+                                        <input type="text" id="wiz-sysroot" placeholder="/opt/sysroot or /path/to/target/rootfs" />
+                                        <button class="wiz-browse-btn" data-target="wiz-sysroot">Browse</button>
+                                    </div>
+                                    <div class="wiz-hint">Target filesystem root for resolving shared libraries and source files (like perf --symfs).</div>
+                                </div>
+                            </details>
                             <div id="wiz-binary-status" class="wiz-status"></div>
                             <div id="wiz-index-status" class="wiz-status hidden"></div>
                         </div>
@@ -273,6 +291,10 @@
                 <label>Event: </label>
                 <select id="event-select">
                     <option value="cycles">cycles</option>
+                </select>
+                <label id="thread-filter-label" class="thread-filter-label hidden">Thread: </label>
+                <select id="thread-filter" class="hidden">
+                    <option value="">All threads</option>
                 </select>
             </div>
 
