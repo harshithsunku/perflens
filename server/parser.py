@@ -18,7 +18,7 @@ PERF_STAT_MARKER = '### PERF_STAT ###'
 #   - Agent -F output: comm,pid,time,period,event,ip,sym,dso (same shape)
 # comm may contain spaces — non-greedy, backtrack finds pid+timestamp
 HEADER_RE = re.compile(
-    r'^(.+?)\s+(\d+)(?:/\d+)?\s+'       # comm + pid (optional /tid)
+    r'^(.+?)\s+(\d+)(?:/(\d+))?\s+'      # comm + pid (optional /tid)
     r'(?:\[\d+\]\s+)?'                    # optional [cpu]
     r'[\d.]+:\s+'                          # timestamp:
     r'(?:[a-zA-Z.]{4}\s+)?'               # optional flags
@@ -30,7 +30,7 @@ HEADER_RE = re.compile(
 # frame is appended on the same line after the event:
 #   comm pid [cpu] ts: count event:  addr func+off (module)
 HEADER_INLINE_RE = re.compile(
-    r'^(.+?)\s+(\d+)(?:/\d+)?\s+'       # comm + pid (optional /tid)
+    r'^(.+?)\s+(\d+)(?:/(\d+))?\s+'      # comm + pid (optional /tid)
     r'(?:\[\d+\]\s+)?'                    # optional [cpu]
     r'[\d.]+:\s+'                          # timestamp:
     r'(?:[a-zA-Z.]{4}\s+)?'               # optional flags
@@ -138,11 +138,13 @@ def parse_perf_script(text):
         if m:
             if current_sample:
                 samples.append(current_sample)
+            tid_str = m.group(3)
             current_sample = {
                 'comm': m.group(1).strip(),
                 'pid': int(m.group(2)),
-                'event_count': int(m.group(3)),
-                'event_type': _normalize_event(m.group(4)),
+                'tid': int(tid_str) if tid_str else int(m.group(2)),
+                'event_count': int(m.group(4)),
+                'event_type': _normalize_event(m.group(5)),
                 'frames': [],
             }
             continue
@@ -152,22 +154,24 @@ def parse_perf_script(text):
         if m:
             if current_sample:
                 samples.append(current_sample)
-            func_raw = m.group(6)
+            func_raw = m.group(7)
             if '+' in func_raw:
                 parts = func_raw.rsplit('+', 1)
                 func, offset = parts[0], parts[1]
             else:
                 func, offset = func_raw, ''
+            tid_str = m.group(3)
             current_sample = {
                 'comm': m.group(1).strip(),
                 'pid': int(m.group(2)),
-                'event_count': int(m.group(3)),
-                'event_type': _normalize_event(m.group(4)),
+                'tid': int(tid_str) if tid_str else int(m.group(2)),
+                'event_count': int(m.group(4)),
+                'event_type': _normalize_event(m.group(5)),
                 'frames': [{
-                    'addr': m.group(5),
+                    'addr': m.group(6),
                     'func': func,
                     'offset': offset,
-                    'module': m.group(7),
+                    'module': m.group(8),
                 }],
             }
             continue
@@ -263,6 +267,7 @@ def build_flamegraph_data(samples):
     """Build hierarchical data for flame graph from stack traces.
 
     Uses a dict for children lookup to avoid O(n^2) list scan.
+    Stores module info for module-based coloring.
     """
     root = {'name': 'root', 'value': 0, 'children': [], '_cmap': {}}
 
@@ -276,7 +281,7 @@ def build_flamegraph_data(samples):
             child = node['_cmap'].get(func_name)
             if child is None:
                 child = {'name': func_name, 'value': 0, 'children': [],
-                         '_cmap': {}, '_inlined': False}
+                         '_cmap': {}, '_inlined': False, '_module': frame.get('module', '')}
                 node['children'].append(child)
                 node['_cmap'][func_name] = child
             child['value'] += 1
@@ -284,13 +289,16 @@ def build_flamegraph_data(samples):
                 child['_inlined'] = True
             node = child
 
-    # Strip internal lookup maps; promote _inlined to 'inlined' only when True
+    # Strip internal lookup maps; promote _inlined and _module
     stack = [root]
     while stack:
         n = stack.pop()
         del n['_cmap']
         if n.pop('_inlined', False):
             n['inlined'] = True
+        mod = n.pop('_module', '')
+        if mod:
+            n['module'] = mod
         stack.extend(n['children'])
 
     return root
@@ -351,6 +359,14 @@ def parse_perf_stat(text):
         metrics['ipc'] = {
             'value': round(instructions / cycles, 2),
             'comment': 'instructions per cycle',
+        }
+
+    cache_refs = metrics.get('cache-references', {}).get('value', 0)
+    cache_misses = metrics.get('cache-misses', {}).get('value', 0)
+    if cache_refs > 0 and cache_misses > 0:
+        metrics['cache_miss_rate'] = {
+            'value': round(100.0 * cache_misses / cache_refs, 2),
+            'comment': '% cache miss rate',
         }
 
     branches = 0

@@ -785,6 +785,87 @@ main {
     font-size: 12px;
 }
 
+/* Flamegraph breadcrumb trail */
+.fg-breadcrumb {
+    color: var(--text-tertiary);
+    font-size: 12px;
+    font-family: var(--font-mono);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.fg-crumb {
+    color: var(--accent-text);
+    cursor: pointer;
+    text-decoration: underline;
+    text-decoration-style: dotted;
+}
+.fg-crumb:hover { text-decoration-style: solid; }
+.fg-crumb-current {
+    color: var(--text-primary);
+    cursor: default;
+    text-decoration: none;
+    font-weight: 600;
+}
+
+/* Flamegraph info bar (persistent, below SVG) */
+.fg-info-bar {
+    padding: 8px 12px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text-tertiary);
+    border-top: 1px solid var(--border-subtle);
+    background: var(--bg-surface);
+    border-radius: 0 0 var(--radius-md) var(--radius-md);
+    min-height: 32px;
+    transition: color 0.15s;
+}
+.fg-info-bar.fg-info-active {
+    color: var(--text-primary);
+}
+
+/* --- Function toolbar --- */
+.fn-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 10px;
+}
+#fn-search {
+    background: var(--input-bg);
+    color: var(--text-primary);
+    border: 1px solid var(--input-border);
+    border-radius: var(--radius-sm);
+    padding: 7px 12px;
+    font-family: inherit;
+    font-size: 13px;
+    width: 280px;
+    transition: border-color var(--transition);
+}
+#fn-search:focus { outline: none; border-color: var(--input-focus); box-shadow: 0 0 0 3px var(--accent-muted); }
+#fn-search::placeholder { color: var(--text-disabled); }
+.fn-status {
+    color: var(--text-tertiary);
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+/* Show more button row */
+.fn-show-more-row td { text-align: center; padding: 12px !important; }
+.fn-show-more-btn {
+    background: var(--accent-muted);
+    color: var(--accent-text);
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    padding: 6px 18px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    transition: background var(--transition);
+}
+.fn-show-more-btn:hover { background: var(--accent); color: #fff; }
+
 /* --- Sessions table --- */
 #sessions-table {
     width: 100%;
@@ -1481,6 +1562,116 @@ main {
 }
 .metrics-network .net-iface { margin-bottom: 4px; }
 .metrics-network .net-label { color: var(--accent-text); font-weight: 600; }
+
+/* Platform info in header */
+.metrics-platform {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin-left: auto;
+    margin-right: 8px;
+    font-family: var(--font-mono);
+    letter-spacing: 0;
+    opacity: 0.8;
+}
+
+/* System + Process detail panels */
+.metrics-extras {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+@media (max-width: 768px) {
+    .metrics-extras { grid-template-columns: 1fr; }
+}
+.metrics-sys-detail,
+.metrics-proc-detail {
+    background: var(--bg-surface-2);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    padding: 10px;
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.detail-section {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 10px;
+    margin-bottom: 6px;
+}
+.detail-section:last-child { margin-bottom: 0; }
+
+.detail-label {
+    font-size: 10px;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-weight: 700;
+    min-width: 70px;
+}
+
+.detail-val {
+    font-weight: 600;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+}
+
+.detail-note {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    font-variant-numeric: tabular-nums;
+}
+.detail-note.sev-warn { color: var(--warning); font-weight: 600; }
+.detail-note.sev-crit { color: var(--error); font-weight: 600; }
+
+/* Per-core CPU bars */
+.core-bars {
+    display: flex;
+    gap: 2px;
+    align-items: flex-end;
+    height: 24px;
+    flex: 1;
+    min-width: 60px;
+    max-width: 300px;
+}
+.core-bar {
+    flex: 1;
+    max-width: 14px;
+    height: 100%;
+    background: var(--bg-surface-1);
+    border-radius: 2px;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    overflow: hidden;
+}
+.core-fill {
+    border-radius: 2px 2px 0 0;
+    transition: height 0.3s ease;
+}
+.core-ok { background: var(--accent); }
+.core-warn { background: var(--warning); }
+.core-crit { background: var(--error); }
+
+/* Memory breakdown bar */
+.mem-bar-wrap {
+    flex: 1;
+    min-width: 100px;
+    max-width: 300px;
+}
+.mem-bar {
+    display: flex;
+    height: 10px;
+    border-radius: 5px;
+    overflow: hidden;
+    background: var(--bg-surface-1);
+}
+.mem-seg { transition: width 0.3s ease; }
+.mem-used { background: var(--accent); }
+.mem-cached { background: var(--info); opacity: 0.6; }
+.mem-buffers { background: var(--warning); opacity: 0.5; }
 
 /* ===== Docs Drawer ===== */
 .docs-overlay {

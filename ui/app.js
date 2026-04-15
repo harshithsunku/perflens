@@ -12,6 +12,7 @@ let state = {
     isReplayMode: false,
     replaySessionId: null,
     flamegraphZoom: null,   // null or {name, node}
+    flamegraphZoomPath: [], // breadcrumb trail of zoom history
     sourceFiles: [],        // [{path, found, total_samples, functions}] for current event
     metricsSystem: [],      // system metric snapshots (last ~150)
     metricsProcess: [],     // process metric snapshots
@@ -113,13 +114,15 @@ initDocsDrawer();
 
 // --- Stat card config ---
 const STAT_ORDER = [
-    'ipc', 'cycles', 'instructions', 'cache-misses', 'cache-references',
+    'ipc', 'cycles', 'instructions',
+    'cache-misses', 'cache-references', 'cache_miss_rate',
     'branch-misses', 'branch-instructions', 'branch_miss_rate',
     'page-faults', 'context-switches', 'cpu-migrations', 'task-clock'
 ];
 const STAT_LABELS = {
     'ipc': 'IPC', 'cycles': 'Cycles', 'instructions': 'Instructions',
     'cache-misses': 'Cache Miss', 'cache-references': 'Cache Refs',
+    'cache_miss_rate': 'Cache Miss %',
     'branch-misses': 'Branch Miss', 'branch-instructions': 'Branches',
     'branch_miss_rate': 'Br Miss %', 'page-faults': 'Page Faults',
     'context-switches': 'Ctx Switch', 'cpu-migrations': 'CPU Migr',
@@ -260,6 +263,8 @@ function switchToTab(tabName) {
 document.getElementById('event-select').addEventListener('change', (e) => {
     state.selectedEvent = e.target.value;
     state.flamegraphZoom = null;
+    state.flamegraphZoomPath = [];
+    functionShowCount = 200;
     renderCurrentEvent();
 });
 
@@ -301,6 +306,7 @@ function connectSSE() {
         state.metricsSystem.push(m);
         if (state.metricsSystem.length > 150) state.metricsSystem = state.metricsSystem.slice(-150);
         updateMetricsCards(m);
+        updateSystemDetails(m);
         updateMetricsSparklines();
         showMetricsStrip();
     });
@@ -310,6 +316,7 @@ function connectSSE() {
         state.metricsProcess.push(m);
         if (state.metricsProcess.length > 150) state.metricsProcess = state.metricsProcess.slice(-150);
         updateProcessCard(m);
+        updateProcessDetails(m);
         updateMetricsSparklines();
     });
 
@@ -322,9 +329,8 @@ function connectSSE() {
 
     evtSource.addEventListener('agent_connected', (e) => {
         const data = JSON.parse(e.data);
-        // Agent connected in (--server mode) — switch to profiling view
-        // and show control bar so user can start profiling via wizard or
-        // see the agent is ready
+        state.platform = data.platform || {};
+        updatePlatformInfo(state.platform);
         if (document.getElementById('view-landing') &&
             document.getElementById('view-landing').classList.contains('active')) {
             showProfilingView();
@@ -463,6 +469,7 @@ function renderCurrentEvent() {
             renderFlamegraph(node, node.value);
         } else {
             state.flamegraphZoom = null;
+            state.flamegraphZoomPath = [];
             renderFlamegraph(evtData.flamegraph, evtData.function_summary.total_samples);
         }
     } else {
@@ -488,69 +495,108 @@ function findNodeByName(tree, name) {
 
 // --- Function Table ---
 let functionSortKey = 'self';  // 'self' or 'total'
+let functionFilter = '';       // search filter string
+let functionShowCount = 200;   // progressive display count
+let _lastFunctionData = null;  // cached for re-filter/re-sort
+
+function _buildFunctionRow(f, i, maxSelfPct, maxTotalPct) {
+    const selfPct = f.self_percent !== undefined ? f.self_percent : (f.percent || 0);
+    const totalPct = f.total_percent || 0;
+    const selfSamples = f.self_samples !== undefined ? f.self_samples : (f.samples || 0);
+    const totalSamples = f.total_samples || 0;
+
+    const selfBarW = Math.max(2, (selfPct / Math.max(maxSelfPct, 1)) * 100);
+    const selfHue = Math.max(0, 120 - (selfPct / Math.max(maxSelfPct, 1)) * 120);
+    const selfLight = isDark() ? 45 : 50;
+    const selfColor = 'hsl(' + selfHue + ', 70%, ' + selfLight + '%)';
+
+    const totalBarW = Math.max(2, (totalPct / Math.max(maxTotalPct, 1)) * 100);
+    const totalLight = isDark() ? 40 : 50;
+    const totalColor = 'hsl(210, 50%, ' + totalLight + '%)';
+
+    const moduleName = f.module ? f.module.split('/').pop() : '';
+    return '<tr data-func="' + escapeAttr(f.name) + '">' +
+        '<td>' + (i + 1) + '</td>' +
+        '<td><strong>' + escapeHtml(f.name) + '</strong></td>' +
+        '<td title="' + escapeAttr(f.module) + '">' + escapeHtml(moduleName) + '</td>' +
+        '<td><div class="cpu-bar">' +
+            '<div class="cpu-bar-fill" style="width:' + selfBarW + '%;background:' + selfColor + '"></div>' +
+            '<span class="cpu-bar-text">' + selfPct.toFixed(1) + '%</span>' +
+        '</div></td>' +
+        '<td><div class="cpu-bar total-bar">' +
+            '<div class="cpu-bar-fill" style="width:' + totalBarW + '%;background:' + totalColor + '"></div>' +
+            '<span class="cpu-bar-text">' + totalPct.toFixed(1) + '%</span>' +
+        '</div></td>' +
+        '<td title="self: ' + selfSamples + ' / total: ' + totalSamples + '">' + selfSamples + '</td></tr>';
+}
 
 function renderFunctionTable(data) {
+    _lastFunctionData = data;
     const tbody = document.getElementById('function-tbody');
     const scrollY = window.scrollY;
 
     if (!data.functions || data.functions.length === 0) {
         tbody.innerHTML = '<tr><td colspan="6" class="empty">No data yet</td></tr>';
+        _updateFunctionStatus(0, 0);
         return;
     }
 
-    // Sort by selected column
-    const sorted = data.functions.slice().sort((a, b) => {
-        if (functionSortKey === 'total') {
-            return (b.total_samples || 0) - (a.total_samples || 0);
-        }
+    // Sort
+    var sorted = data.functions.slice().sort(function(a, b) {
+        if (functionSortKey === 'total') return (b.total_samples || 0) - (a.total_samples || 0);
         return (b.self_samples || b.samples) - (a.self_samples || a.samples);
     });
+
+    // Filter
+    if (functionFilter) {
+        var re;
+        try { re = new RegExp(functionFilter, 'i'); } catch(e) { re = null; }
+        if (re) {
+            sorted = sorted.filter(function(f) {
+                return re.test(f.name) || re.test(f.module || '');
+            });
+        }
+    }
+
+    var totalFunctions = data.functions.length;
+    var filteredCount = sorted.length;
+    var showCount = Math.min(functionShowCount, sorted.length);
+    var visible = sorted.slice(0, showCount);
 
     const maxSelfPct = sorted.reduce((m, f) => Math.max(m, f.self_percent || f.percent || 0), 0);
     const maxTotalPct = sorted.reduce((m, f) => Math.max(m, f.total_percent || 0), 0);
 
-    tbody.innerHTML = sorted.map((f, i) => {
-        const selfPct = f.self_percent !== undefined ? f.self_percent : (f.percent || 0);
-        const totalPct = f.total_percent || 0;
-        const selfSamples = f.self_samples !== undefined ? f.self_samples : (f.samples || 0);
-        const totalSamples = f.total_samples || 0;
-
-        // Self bar
-        const selfBarW = Math.max(2, (selfPct / Math.max(maxSelfPct, 1)) * 100);
-        const selfHue = Math.max(0, 120 - (selfPct / Math.max(maxSelfPct, 1)) * 120);
-        const selfLight = isDark() ? 45 : 50;
-        const selfColor = 'hsl(' + selfHue + ', 70%, ' + selfLight + '%)';
-
-        // Total bar
-        const totalBarW = Math.max(2, (totalPct / Math.max(maxTotalPct, 1)) * 100);
-        const totalLight = isDark() ? 40 : 50;
-        const totalColor = 'hsl(210, 50%, ' + totalLight + '%)';
-
-        const moduleName = f.module ? f.module.split('/').pop() : '';
-        return '<tr data-func="' + escapeAttr(f.name) + '">' +
-            '<td>' + (i + 1) + '</td>' +
-            '<td><strong>' + escapeHtml(f.name) + '</strong></td>' +
-            '<td title="' + escapeAttr(f.module) + '">' + escapeHtml(moduleName) + '</td>' +
-            '<td><div class="cpu-bar">' +
-                '<div class="cpu-bar-fill" style="width:' + selfBarW + '%;background:' + selfColor + '"></div>' +
-                '<span class="cpu-bar-text">' + selfPct.toFixed(1) + '%</span>' +
-            '</div></td>' +
-            '<td><div class="cpu-bar total-bar">' +
-                '<div class="cpu-bar-fill" style="width:' + totalBarW + '%;background:' + totalColor + '"></div>' +
-                '<span class="cpu-bar-text">' + totalPct.toFixed(1) + '%</span>' +
-            '</div></td>' +
-            '<td title="self: ' + selfSamples + ' / total: ' + totalSamples + '">' + selfSamples + '</td></tr>';
+    var html = visible.map(function(f, i) {
+        return _buildFunctionRow(f, i, maxSelfPct, maxTotalPct);
     }).join('');
 
-    // Restore scroll position
+    // "Show more" row
+    var remaining = sorted.length - showCount;
+    if (remaining > 0) {
+        html += '<tr class="fn-show-more-row"><td colspan="6">' +
+            '<button class="fn-show-more-btn" id="fn-show-more">' +
+            'Show ' + Math.min(remaining, 200) + ' more (' + remaining + ' remaining)' +
+            '</button></td></tr>';
+    }
+
+    tbody.innerHTML = html;
+    _updateFunctionStatus(filteredCount, totalFunctions);
+
     window.scrollTo(0, scrollY);
 
     // Click handler for source view
-    tbody.querySelectorAll('tr').forEach(row => {
-        row.addEventListener('click', () => {
-            showSourceForFunction(row.dataset.func);
-        });
+    tbody.querySelectorAll('tr[data-func]').forEach(row => {
+        row.addEventListener('click', () => showSourceForFunction(row.dataset.func));
     });
+
+    // Show more button
+    var showMoreBtn = document.getElementById('fn-show-more');
+    if (showMoreBtn) {
+        showMoreBtn.addEventListener('click', function() {
+            functionShowCount += 200;
+            renderFunctionTable(data);
+        });
+    }
 
     // Sort header highlighting
     document.querySelectorAll('#function-table th.sortable').forEach(th => {
@@ -558,14 +604,36 @@ function renderFunctionTable(data) {
     });
 }
 
+function _updateFunctionStatus(shown, total) {
+    var el = document.getElementById('fn-status');
+    if (!el) return;
+    if (total === 0) { el.textContent = ''; return; }
+    if (shown === total) {
+        el.textContent = total + ' functions';
+    } else {
+        el.textContent = shown + ' of ' + total + ' functions';
+    }
+}
+
 // Column header sort click handler
 document.querySelectorAll('#function-table th.sortable').forEach(th => {
     th.addEventListener('click', () => {
         functionSortKey = th.dataset.sort;
-        const evtData = state.perEvent[state.selectedEvent];
-        if (evtData) renderFunctionTable(evtData.function_summary);
+        functionShowCount = 200;
+        if (_lastFunctionData) renderFunctionTable(_lastFunctionData);
     });
 });
+
+// Function search input handler
+(function() {
+    var input = document.getElementById('fn-search');
+    if (!input) return;
+    input.addEventListener('input', debounce(function() {
+        functionFilter = input.value.trim();
+        functionShowCount = 200;
+        if (_lastFunctionData) renderFunctionTable(_lastFunctionData);
+    }, 150));
+})();
 
 // --- Source: show for function ---
 function showSourceForFunction(funcName) {
@@ -758,6 +826,36 @@ function renderSourceView(filePath, lines) {
 }
 
 // --- Flame Graph ---
+// Module-based flamegraph color: kernel=warm, user binary=green, libraries=blue/purple
+function fgModuleColor(name, module, inlined) {
+    var dark = isDark();
+    var lightBase = dark ? 42 : 50;
+    var lightVar = hashCode(name + 'y') % 12;
+    var satBase = inlined ? 40 : 70;
+    var satVar = hashCode(name + 'x') % 15;
+    var hue;
+
+    if (!module || module === '[unknown]') {
+        // Unknown → grey
+        hue = 0;
+        satBase = 0;
+        lightBase = dark ? 35 : 60;
+        lightVar = hashCode(name + 'y') % 8;
+    } else if (module === '[kernel.kallsyms]' || module.indexOf('/vmlinux') >= 0 || module.indexOf('[kernel') >= 0) {
+        // Kernel → warm orange/red
+        hue = 20 + (hashCode(name) % 25);
+    } else if (module.indexOf('.so') >= 0 || module.indexOf('ld-linux') >= 0 || module.indexOf('libc') >= 0 ||
+               module.indexOf('libm') >= 0 || module.indexOf('libpthread') >= 0 || module.indexOf('libstdc++') >= 0) {
+        // Shared libraries → blue/aqua
+        hue = 190 + (hashCode(name) % 40);
+    } else {
+        // User binary → green
+        hue = 80 + (hashCode(name) % 40);
+    }
+
+    return 'hsl(' + hue + ', ' + Math.min(satBase + satVar, 100) + '%, ' + (lightBase + lightVar) + '%)';
+}
+
 function renderFlamegraph(data, totalSamples) {
     const container = document.getElementById('flamegraph-container');
     if (!data || !data.children || data.children.length === 0) {
@@ -769,6 +867,7 @@ function renderFlamegraph(data, totalSamples) {
     if (width < 10) return;
     const rowHeight = 18;
     const fontSize = 11;
+    const charWidth = 6.5;
     totalSamples = totalSamples || data.value;
 
     flamegraphRects = [];
@@ -777,56 +876,88 @@ function renderFlamegraph(data, totalSamples) {
 
     let html = '';
 
+    // Breadcrumb trail for zoom
     if (state.flamegraphZoom) {
         html += '<div class="flamegraph-controls">' +
-            '<button id="flamegraph-reset" class="fg-reset-btn">Reset Zoom</button>' +
-            '<span class="fg-zoom-label">Zoomed: ' + escapeHtml(state.flamegraphZoom.name) + '</span>' +
-            '</div>';
+            '<button id="flamegraph-reset" class="fg-reset-btn">Reset Zoom</button>';
+        // Build breadcrumb path
+        var crumbs = [];
+        var zPath = state.flamegraphZoomPath || [];
+        for (var ci = 0; ci < zPath.length; ci++) {
+            crumbs.push('<span class="fg-crumb" data-crumb-idx="' + ci + '">' + escapeHtml(zPath[ci].name) + '</span>');
+        }
+        crumbs.push('<span class="fg-crumb fg-crumb-current">' + escapeHtml(state.flamegraphZoom.name) + '</span>');
+        html += '<div class="fg-breadcrumb">root &rsaquo; ' + crumbs.join(' &rsaquo; ') + '</div>';
+        html += '</div>';
     }
 
-    const fgLightBase = isDark() ? 45 : 52;
-    const fgSatBoost = isDark() ? 0 : 15;
     const fgTextColor = themeColor('--fg-text');
 
     let svg = '<svg width="' + width + '" height="' + height + '" xmlns="http://www.w3.org/2000/svg">';
     for (let idx = 0; idx < flamegraphRects.length; idx++) {
         const r = flamegraphRects[idx];
         const inlined = r.inlined;
-        const hue = 30 + (hashCode(r.name) % 30);
-        const lightAdj = fgLightBase + (hashCode(r.name + 'y') % 15);
-        const satAdj = inlined ? 50 + fgSatBoost + (hashCode(r.name + 'x') % 15) : 80 + fgSatBoost + (hashCode(r.name + 'x') % 20);
-        const color = 'hsl(' + hue + ', ' + Math.min(satAdj, 100) + '%, ' + lightAdj + '%)';
+        const color = fgModuleColor(r.name, r.module || '', inlined);
         const y = height - (r.depth + 1) * rowHeight;
         const inlinedAttr = inlined ? ' data-inlined="1"' : '';
-        const inlinedTag = inlined ? ' (inlined)' : '';
 
         svg += '<g data-idx="' + idx + '"' + inlinedAttr + ' style="cursor:pointer">';
         svg += '<rect x="' + r.x + '" y="' + y + '" width="' + Math.max(r.w - 1, 1) +
-               '" height="' + (rowHeight - 1) + '" fill="' + color + '" rx="2">' +
-               '<title>' + escapeHtml(r.name) + inlinedTag + ' (' + r.value + ' samples, ' +
-               r.percent.toFixed(1) + '%)</title></rect>';
-        if (r.w > 40) {
-            const maxChars = Math.floor(r.w / 7);
-            const label = r.name.length > maxChars ? r.name.substring(0, maxChars) + '..' : r.name;
-            svg += '<text x="' + (r.x + 3) + '" y="' + (y + 13) + '" font-size="' + fontSize +
-                   '" fill="' + fgTextColor + '" pointer-events="none">' + escapeHtml(label) + '</text>';
+               '" height="' + (rowHeight - 1) + '" fill="' + color + '" rx="2"></rect>';
+        if (r.w > 36) {
+            const maxChars = Math.floor((r.w - 6) / charWidth);
+            if (maxChars > 1) {
+                const label = r.name.length > maxChars ? r.name.substring(0, maxChars - 1) + '\u2026' : r.name;
+                svg += '<text x="' + (r.x + 3) + '" y="' + (y + 13) + '" font-size="' + fontSize +
+                       '" fill="' + fgTextColor + '" pointer-events="none">' + escapeHtml(label) + '</text>';
+            }
         }
         svg += '</g>';
     }
     svg += '</svg>';
 
     html += svg;
+
+    // Info bar (persistent div below SVG, updated on hover)
+    html += '<div class="fg-info-bar" id="fg-info-bar">Hover over a frame to see details</div>';
+
     container.innerHTML = html;
 
-    // Single click → source, double click → zoom, right click → context menu
+    // Wire up hover for info bar
+    const infoBar = document.getElementById('fg-info-bar');
+    const svgEl = container.querySelector('svg');
+    if (svgEl && infoBar) {
+        svgEl.addEventListener('mousemove', function(e) {
+            var g = e.target.closest('g[data-idx]');
+            if (!g) return;
+            var rect = flamegraphRects[parseInt(g.dataset.idx)];
+            if (!rect) return;
+            var mod = rect.module || '';
+            var inlinedTag = rect.inlined ? ' [inlined]' : '';
+            infoBar.textContent = rect.name + inlinedTag + '  (' + rect.value + ' samples, ' +
+                rect.percent.toFixed(2) + '%)' + (mod ? '  \u2014 ' + mod : '');
+            infoBar.classList.add('fg-info-active');
+        });
+        svgEl.addEventListener('mouseleave', function() {
+            infoBar.textContent = 'Hover over a frame to see details';
+            infoBar.classList.remove('fg-info-active');
+        });
+    }
+
+    // Single click → zoom, right click → context menu
     container.querySelectorAll('g[data-idx]').forEach(g => {
         g.addEventListener('click', () => {
             clearTimeout(fgClickTimer);
             fgClickTimer = setTimeout(() => {
                 const rect = flamegraphRects[parseInt(g.dataset.idx)];
-                if (rect && rect.name !== 'root') {
-                    state.pendingHighlight = rect.name;
-                    showSourceForFunction(rect.name);
+                if (rect && rect.name !== 'root' && rect.node && rect.node.children && rect.node.children.length > 0) {
+                    // Push current zoom to path
+                    if (!state.flamegraphZoomPath) state.flamegraphZoomPath = [];
+                    if (state.flamegraphZoom) {
+                        state.flamegraphZoomPath.push(state.flamegraphZoom);
+                    }
+                    state.flamegraphZoom = { name: rect.name, node: rect.node };
+                    renderFlamegraph(rect.node, rect.node.value);
                 }
             }, 250);
         });
@@ -834,9 +965,9 @@ function renderFlamegraph(data, totalSamples) {
         g.addEventListener('dblclick', () => {
             clearTimeout(fgClickTimer);
             const rect = flamegraphRects[parseInt(g.dataset.idx)];
-            if (rect && rect.node && rect.node.children && rect.node.children.length > 0) {
-                state.flamegraphZoom = { name: rect.name, node: rect.node };
-                renderFlamegraph(rect.node, rect.node.value);
+            if (rect && rect.name !== 'root') {
+                state.pendingHighlight = rect.name;
+                showSourceForFunction(rect.name);
             }
         });
 
@@ -852,10 +983,24 @@ function renderFlamegraph(data, totalSamples) {
     if (resetBtn) {
         resetBtn.addEventListener('click', () => {
             state.flamegraphZoom = null;
+            state.flamegraphZoomPath = [];
             const evtData = state.perEvent[state.selectedEvent];
             if (evtData) renderFlamegraph(evtData.flamegraph, evtData.function_summary.total_samples);
         });
     }
+
+    // Breadcrumb click navigation
+    container.querySelectorAll('.fg-crumb[data-crumb-idx]').forEach(crumb => {
+        crumb.addEventListener('click', () => {
+            var idx = parseInt(crumb.dataset.crumbIdx);
+            var path = state.flamegraphZoomPath || [];
+            if (idx < path.length) {
+                state.flamegraphZoom = path[idx];
+                state.flamegraphZoomPath = path.slice(0, idx);
+                renderFlamegraph(state.flamegraphZoom.node, state.flamegraphZoom.node.value);
+            }
+        });
+    });
 
     // Re-apply active search after re-render
     const searchInput = document.getElementById('fg-search');
@@ -867,7 +1012,7 @@ function renderFlamegraph(data, totalSamples) {
 function flattenTree(node, depth, x, width, rects, totalSamples) {
     const percent = totalSamples > 0 ? (node.value / totalSamples * 100) : 0;
     rects.push({ name: node.name, value: node.value, percent, depth, x, w: width,
-                 node, inlined: !!node.inlined });
+                 node, inlined: !!node.inlined, module: node.module || '' });
 
     let maxDepth = depth;
     let childX = x;
@@ -1012,6 +1157,7 @@ function replaySession(sessionId) {
             state.selectedEvent = state.eventTypes[0] || 'cycles';
             state.totalSamples = data.metadata.total_samples;
             state.flamegraphZoom = null;
+            state.flamegraphZoomPath = [];
             state.lastUpdateTime = Date.now();
 
             showReplayBanner(sessionId, data.metadata.timestamp);
@@ -2024,12 +2170,186 @@ function updateNetworkPanel(current, previous) {
                 rateStr = ' (' + formatRate(rxRate) + ' in, ' + formatRate(txRate) + ' out)';
             }
         }
+        var rxExtra = [];
+        if (c.rx_drops > 0) rxExtra.push(c.rx_drops + ' drops');
+        if (c.rx_errors > 0) rxExtra.push(c.rx_errors + ' errs');
+        var txExtra = [];
+        if (c.tx_drops > 0) txExtra.push(c.tx_drops + ' drops');
+        if (c.tx_errors > 0) txExtra.push(c.tx_errors + ' errs');
         html += '<div class="net-iface"><span class="net-label">' + name + '</span>: ' +
             'RX ' + formatBytes(c.rx_bytes) + ' (' + c.rx_packets + ' pkts' +
-            (c.rx_drops > 0 ? ', ' + c.rx_drops + ' drops' : '') + ') ' +
-            'TX ' + formatBytes(c.tx_bytes) + ' (' + c.tx_packets + ' pkts)' +
+            (rxExtra.length ? ', ' + rxExtra.join(', ') : '') + ') ' +
+            'TX ' + formatBytes(c.tx_bytes) + ' (' + c.tx_packets + ' pkts' +
+            (txExtra.length ? ', ' + txExtra.join(', ') : '') + ')' +
             rateStr + '</div>';
     });
+    panel.innerHTML = html;
+}
+
+// --- Platform info ---
+
+function updatePlatformInfo(platform) {
+    var el = document.getElementById('metrics-platform');
+    if (!el || !platform) return;
+    var parts = [];
+    if (platform.arch) parts.push(platform.arch);
+    if (platform.kernel) parts.push(platform.kernel);
+    if (platform.perf_version) parts.push(platform.perf_version);
+    el.textContent = parts.length ? parts.join(' \u2502 ') : '';
+}
+
+// --- System details: per-core CPU, memory breakdown, scheduling ---
+
+function formatUptime(sec) {
+    if (sec == null) return '--';
+    var d = Math.floor(sec / 86400);
+    var h = Math.floor((sec % 86400) / 3600);
+    var m = Math.floor((sec % 3600) / 60);
+    if (d > 0) return d + 'd ' + h + 'h';
+    if (h > 0) return h + 'h ' + m + 'm';
+    return m + 'm';
+}
+
+function formatCount(n) {
+    if (n == null) return '--';
+    if (n >= 1e9) return (n / 1e9).toFixed(1) + 'G';
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+    return String(n);
+}
+
+function updateSystemDetails(sys) {
+    var panel = document.getElementById('metrics-sys-detail');
+    if (!panel || state.metricsCollapseLevel >= 1) return;
+
+    var html = '';
+    var cpu = sys.cpu || {};
+    var mem = sys.mem || {};
+    var load = sys.load || {};
+
+    // Per-core CPU bars
+    if (cpu.per_core && cpu.per_core.length > 0) {
+        html += '<div class="detail-section"><span class="detail-label">Per-Core CPU</span>';
+        html += '<div class="core-bars">';
+        cpu.per_core.forEach(function(pct, i) {
+            var sev = pct >= 95 ? 'crit' : pct >= 80 ? 'warn' : 'ok';
+            html += '<div class="core-bar" title="Core ' + i + ': ' + pct.toFixed(0) + '%">' +
+                '<div class="core-fill core-' + sev + '" style="height:' + Math.max(pct, 2) + '%"></div>' +
+                '</div>';
+        });
+        html += '</div>';
+        if (cpu.freq_mhz) {
+            var freq = cpu.freq_mhz;
+            if (Array.isArray(freq)) freq = freq.reduce(function(a, b) { return a + b; }, 0) / freq.length;
+            html += '<span class="detail-note">' + (freq / 1000).toFixed(2) + ' GHz</span>';
+        }
+        if (cpu.num_cores) html += '<span class="detail-note">' + cpu.num_cores + ' cores</span>';
+        html += '</div>';
+    }
+
+    // Memory breakdown
+    if (mem.total_kb) {
+        html += '<div class="detail-section"><span class="detail-label">Memory</span>';
+        var used = (mem.used_kb || 0);
+        var cached = (mem.cached_kb || 0);
+        var buffers = (mem.buffers_kb || 0);
+        var total = mem.total_kb;
+        var usedPct = (used / total * 100).toFixed(0);
+        var cachePct = (cached / total * 100).toFixed(0);
+        var bufPct = (buffers / total * 100).toFixed(0);
+        html += '<div class="mem-bar-wrap">' +
+            '<div class="mem-bar">' +
+            '<div class="mem-seg mem-used" style="width:' + usedPct + '%" title="Used: ' + formatKB(used) + '"></div>' +
+            '<div class="mem-seg mem-cached" style="width:' + cachePct + '%" title="Cache: ' + formatKB(cached) + '"></div>' +
+            '<div class="mem-seg mem-buffers" style="width:' + bufPct + '%" title="Buffers: ' + formatKB(buffers) + '"></div>' +
+            '</div></div>';
+        html += '<span class="detail-note">' + formatKB(used) + ' used</span>';
+        html += '<span class="detail-note">' + formatKB(cached) + ' cache</span>';
+        html += '<span class="detail-note">' + formatKB(buffers) + ' buf</span>';
+        html += '<span class="detail-note">' + formatKB(total) + ' total</span>';
+        if (mem.swap_total_kb > 0) {
+            var swapPct = mem.swap_used_kb > 0 ? (mem.swap_used_kb / mem.swap_total_kb * 100).toFixed(0) : '0';
+            html += '<span class="detail-note">Swap: ' + formatKB(mem.swap_used_kb || 0) + ' / ' + formatKB(mem.swap_total_kb) + ' (' + swapPct + '%)</span>';
+        }
+        html += '</div>';
+    }
+
+    // Load averages + uptime
+    if (load.avg_1m != null) {
+        html += '<div class="detail-section"><span class="detail-label">Load</span>';
+        html += '<span class="detail-val">' + load.avg_1m.toFixed(2) + '</span>';
+        html += '<span class="detail-val">' + (load.avg_5m != null ? load.avg_5m.toFixed(2) : '--') + '</span>';
+        html += '<span class="detail-val">' + (load.avg_15m != null ? load.avg_15m.toFixed(2) : '--') + '</span>';
+        html += '<span class="detail-note">1m / 5m / 15m</span>';
+        if (sys.uptime_sec != null) html += '<span class="detail-note">Up: ' + formatUptime(sys.uptime_sec) + '</span>';
+        html += '</div>';
+    }
+
+    // Scheduling pressure
+    if (sys.context_switches != null || sys.interrupts != null) {
+        html += '<div class="detail-section"><span class="detail-label">Scheduling</span>';
+        if (sys.context_switches != null) html += '<span class="detail-note">Ctx: ' + formatCount(sys.context_switches) + '</span>';
+        if (sys.interrupts != null) html += '<span class="detail-note">IRQ: ' + formatCount(sys.interrupts) + '</span>';
+        if (sys.procs_running != null) html += '<span class="detail-note">Run: ' + sys.procs_running + '</span>';
+        if (sys.procs_blocked != null && sys.procs_blocked > 0) html += '<span class="detail-note sev-warn">Blocked: ' + sys.procs_blocked + '</span>';
+        html += '</div>';
+    }
+
+    panel.innerHTML = html;
+}
+
+// --- Process details: state, threads, FDs, faults, CSW, OOM ---
+
+function updateProcessDetails(proc) {
+    var panel = document.getElementById('metrics-proc-detail');
+    if (!panel || state.metricsCollapseLevel >= 1) return;
+
+    var html = '';
+
+    // Process identity + state
+    html += '<div class="detail-section"><span class="detail-label">Process</span>';
+    if (proc.comm) html += '<span class="detail-val">' + escapeHtml(proc.comm) + ' (' + proc.pid + ')</span>';
+    if (proc.state) html += '<span class="detail-note">State: ' + escapeHtml(proc.state) + '</span>';
+    html += '</div>';
+
+    // Resources: threads, FDs, vsize
+    if (proc.threads != null || proc.fds != null || proc.vsize_kb != null) {
+        html += '<div class="detail-section"><span class="detail-label">Resources</span>';
+        if (proc.threads != null) html += '<span class="detail-note">Threads: ' + proc.threads + '</span>';
+        if (proc.fds != null) html += '<span class="detail-note">FDs: ' + proc.fds + '</span>';
+        if (proc.vsize_kb != null) html += '<span class="detail-note">VSize: ' + formatKB(proc.vsize_kb) + '</span>';
+        if (proc.rss_kb != null) html += '<span class="detail-note">RSS: ' + formatKB(proc.rss_kb) + '</span>';
+        html += '</div>';
+    }
+
+    // Page faults
+    if (proc.minor_faults != null || proc.major_faults != null) {
+        html += '<div class="detail-section"><span class="detail-label">Page Faults</span>';
+        if (proc.minor_faults != null) html += '<span class="detail-note">Minor: ' + formatCount(proc.minor_faults) + '</span>';
+        if (proc.major_faults != null) {
+            var majClass = proc.major_faults > 0 ? ' sev-warn' : '';
+            html += '<span class="detail-note' + majClass + '">Major: ' + formatCount(proc.major_faults) + '</span>';
+        }
+        html += '</div>';
+    }
+
+    // Context switches
+    if (proc.voluntary_csw != null || proc.involuntary_csw != null) {
+        html += '<div class="detail-section"><span class="detail-label">Ctx Switches</span>';
+        if (proc.voluntary_csw != null) html += '<span class="detail-note">Vol: ' + formatCount(proc.voluntary_csw) + '</span>';
+        if (proc.involuntary_csw != null) html += '<span class="detail-note">Invol: ' + formatCount(proc.involuntary_csw) + '</span>';
+        html += '</div>';
+    }
+
+    // OOM score
+    if (proc.oom_score != null) {
+        var oomSev = getMetricSeverity('oom_score', proc.oom_score);
+        var oomClass = oomSev === 'critical' ? ' sev-crit' : oomSev === 'warning' ? ' sev-warn' : '';
+        html += '<div class="detail-section"><span class="detail-label">OOM</span>';
+        html += '<span class="detail-note' + oomClass + '">Score: ' + proc.oom_score + '</span>';
+        html += '</div>';
+    }
+
     panel.innerHTML = html;
 }
 

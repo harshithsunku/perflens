@@ -228,6 +228,7 @@
             <div id="metrics-strip" class="metrics-strip hidden">
                 <div class="metrics-header">
                     <span class="metrics-title">Device Health</span>
+                    <span class="metrics-platform" id="metrics-platform"></span>
                     <button id="metrics-collapse-btn" class="metrics-collapse">&#9660;</button>
                 </div>
                 <div class="metrics-cards" id="metrics-cards">
@@ -259,6 +260,10 @@
                 </div>
                 <div class="metrics-detail" id="metrics-detail">
                     <div class="metrics-sparklines" id="metrics-sparklines"></div>
+                    <div class="metrics-extras" id="metrics-extras">
+                        <div class="metrics-sys-detail" id="metrics-sys-detail"></div>
+                        <div class="metrics-proc-detail" id="metrics-proc-detail"></div>
+                    </div>
                     <div class="metrics-network" id="metrics-network"></div>
                 </div>
             </div>
@@ -283,6 +288,10 @@
             </div>
 
             <div id="tab-functions" class="tab-content active">
+                <div class="fn-toolbar">
+                    <input type="text" id="fn-search" placeholder="Filter functions..." />
+                    <span id="fn-status" class="fn-status"></span>
+                </div>
                 <table id="function-table">
                     <thead>
                         <tr>
