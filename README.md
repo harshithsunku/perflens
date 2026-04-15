@@ -24,7 +24,9 @@ No frontend frameworks. No pip dependencies. No Docker. Pure Python stdlib on th
 - **Real-time streaming** — `perf record` runs in ~8s rounds; each round is compressed with zstd and streamed over a 5-byte framed TCP protocol
 - **Live web UI** — Server-Sent Events push parsed function tables, flame graphs, and `perf stat` panels to the browser as new data arrives
 - **Source-level annotation** — `addr2line` maps samples back to source lines; the UI heat-colors hot lines red/amber/green
+- **Per-thread profiling** — filter flame graphs, function tables, and source annotations by thread; dedicated thread analysis view with per-thread CPU breakdown
 - **Interactive SVG flame graphs** — vanilla JS, no d3, no bundling; zoomable, hoverable
+- **Cross-compilation toolchain support** — `--toolchain-prefix` derives addr2line and readelf from a single prefix; `--sysroot` resolves shared libraries and source files under a sysroot tree
 - **ARM + x86** — same agent code runs on aarch64, aarch64_be, armv7l, x86_64
 - **Session save / replay** — raw chunks saved to disk, replayed lazily on demand via the UI's session list
 - **C agent option** — single static binary with vendored zstd, no runtime dependencies; cross-compiles to aarch64, aarch64_be, armv7l, armeb, x86_64
@@ -166,7 +168,7 @@ Then browse to `http://<server-ip>:8080`.
 | Component | Needs |
 |-----------|-------|
 | **Target device** | Linux, `perf`; Python 3.5+ for Python agent **or** nothing extra for C agent; ideally `zstd` for Python agent (C agent has it built in) |
-| **Local machine** | Python 3.8+ (or frozen tarball), `addr2line` and `readelf` from binutils (bundled in `bin/` or on PATH), ideally `zstd` for decompression |
+| **Local machine** | Python 3.8+ (or frozen tarball), `addr2line` and `readelf` from binutils (bundled in `bin/` or on PATH), ideally `zstd` for decompression. For cross-compiled targets: a matching toolchain with `<prefix>addr2line` and `<prefix>readelf` |
 | **Binary** | Compiled with `-g` (debug symbols), not stripped |
 | **Source** | A checkout of the source tree readable from the server machine |
 
@@ -185,6 +187,9 @@ Then browse to `http://<server-ip>:8080`.
 | `--map PATH` | — | GNU ld linker map file (optional symbol fallback) |
 | `--path-map FROM=TO` | — | Rewrite compile-time paths to local paths (e.g. `/build/src=/home/user/src`) |
 | `--addr2line PATH` | — | Custom `addr2line` binary (overrides `bin/` and PATH) |
+| `--readelf PATH` | — | Custom `readelf` binary |
+| `--toolchain-prefix PREFIX` | — | Cross-compilation prefix (e.g. `arm-linux-gnueabihf-`); derives addr2line and readelf |
+| `--sysroot DIR` | — | Sysroot for resolving shared library modules and source files |
 | `--max-samples N` | `500000` | Ring buffer cap before oldest samples drop |
 | `--inline` / `--no-inline` | on | Enable/disable inline function resolution via `addr2line -i` |
 | `--import FILE` | — | Import a `perf.data` file at startup and make it available as a session |
@@ -219,7 +224,10 @@ Options:
 | `/api/stream` | GET | Server-Sent Events: `status`, `event_types`, `per_event`, `perf_stat` |
 | `/api/sessions` | GET | List saved sessions (metadata only) |
 | `/api/sessions/<id>` | GET | Lazy-replay a session (parses raw chunks on demand) |
-| `/api/source?file=<path>&event=<evt>` | GET | Annotated source for a single file |
+| `/api/source?file=<path>&event=<evt>&tid=<tid>` | GET | Annotated source for a single file (optionally filtered by thread) |
+| `/api/thread-view?event=<evt>&tid=<tid>` | GET | Per-thread flamegraph and function summary |
+| `/api/thread-summary?event=<evt>` | GET | Thread overview: all threads with sample counts and top functions |
+| `/api/config/toolchain` | POST | Set toolchain prefix and sysroot at runtime |
 | `/api/stop` | GET | Disconnect the active agent (triggers normal session save) |
 | `/*` | GET | Static files from `ui/` |
 

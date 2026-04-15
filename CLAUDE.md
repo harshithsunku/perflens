@@ -68,6 +68,12 @@ history.
   `--listen` (agent binds port, server/UI connects in via wizard).
 - Agent collects device health metrics (CPU, memory, temperature, load,
   process stats, network) every 2s and streams them as JSON frames.
+- Cross-compilation support: `--toolchain-prefix` derives both addr2line
+  and readelf from a single prefix; `--sysroot` resolves module paths and
+  source files under a sysroot tree (like `perf --symfs`).
+- Per-thread profiling: the parser extracts `pid/tid` and `comm` from
+  `perf script` output; the UI can filter flamegraphs, function tables,
+  and source annotations by thread ID.
 
 ---
 
@@ -115,7 +121,10 @@ perflens/
 | `/api/stream`             | GET    | SSE: `status`, `event_types`, `per_event`, `perf_stat` |
 | `/api/sessions`           | GET    | List saved sessions                             |
 | `/api/sessions/<id>`      | GET    | Lazy-replay a session from saved chunks         |
-| `/api/source?file=&event=`| GET    | Annotated source for a single file              |
+| `/api/source?file=&event=&tid=` | GET | Annotated source (optionally per-thread)        |
+| `/api/thread-view?event=&tid=`  | GET | Per-thread flamegraph + function summary         |
+| `/api/thread-summary?event=`    | GET | Thread overview with sample counts and top funcs |
+| `/api/config/toolchain`         | POST| Set toolchain prefix and sysroot at runtime      |
 | `/api/stop`               | GET    | Disconnect the active agent                     |
 | `/*`                      | GET    | Static files from `ui/`                         |
 
@@ -131,6 +140,9 @@ perflens/
 --map PATH            GNU ld linker map file (optional symbol fallback)
 --path-map FROM=TO    Rewrite compile-time paths to local paths
 --addr2line PATH      Custom addr2line binary
+--readelf PATH        Custom readelf binary
+--toolchain-prefix P  Cross-compilation prefix (e.g. arm-linux-gnueabihf-)
+--sysroot DIR         Sysroot for shared library and source resolution
 --max-samples N       Ring buffer cap             (default 500000)
 --inline / --no-inline  Enable/disable inline function resolution (default: on)
 --import FILE         Import a perf.data file at startup as a session

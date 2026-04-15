@@ -110,6 +110,20 @@ function initDocsDrawer() {
     document.addEventListener('keydown', function (e) {
         if (e.key === 'Escape' && drawer.classList.contains('visible')) closeDocs();
     });
+
+    // Docs tab switching
+    var docsTabs = drawer.querySelectorAll('.docs-tab[data-docs-tab]');
+    var docsPanels = drawer.querySelectorAll('.docs-panel[data-docs-panel]');
+    docsTabs.forEach(function(tab) {
+        tab.addEventListener('click', function() {
+            var target = tab.getAttribute('data-docs-tab');
+            docsTabs.forEach(function(t) { t.classList.remove('active'); });
+            docsPanels.forEach(function(p) { p.classList.remove('active'); });
+            tab.classList.add('active');
+            var panel = drawer.querySelector('.docs-panel[data-docs-panel="' + target + '"]');
+            if (panel) panel.classList.add('active');
+        });
+    });
 }
 initDocsDrawer();
 
@@ -508,7 +522,6 @@ function renderCurrentEvent() {
                 renderFunctionTable(data.function_summary);
                 state.flamegraphZoom = null;
                 state.flamegraphZoomPath = [];
-                state.selectedTid = null;
                 renderFlamegraph(data.flamegraph, data.function_summary.total_samples);
             })
             .catch(function() { _threadViewPending = false; });

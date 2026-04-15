@@ -1778,6 +1778,34 @@ main {
 }
 .docs-close:hover { color: var(--text-primary); }
 
+.docs-tabs {
+    display: flex;
+    gap: 0;
+    border-bottom: 1px solid var(--border-default);
+    padding: 0 24px;
+    flex-shrink: 0;
+    overflow-x: auto;
+}
+.docs-tab {
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--text-tertiary);
+    font-size: 12px;
+    font-weight: 600;
+    padding: 10px 16px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: color var(--transition), border-color var(--transition);
+}
+.docs-tab:hover { color: var(--text-primary); }
+.docs-tab.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+}
+.docs-panel { display: none; }
+.docs-panel.active { display: block; }
+
 .docs-body {
     flex: 1;
     overflow-y: auto;
