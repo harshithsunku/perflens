@@ -32,6 +32,7 @@ FLAG_DATA_RAW = 0       # agent -> server: raw perf data
 FLAG_DATA_ZSTD = 1      # agent -> server: zstd-compressed perf data
 FLAG_CMD_REQUEST = 2    # server -> agent: JSON command
 FLAG_CMD_RESPONSE = 3   # agent -> server: JSON response
+FLAG_METRICS = 4        # agent -> server: JSON health metrics
 
 # Agent states
 AGENT_IDLE = 'idle'
@@ -393,6 +394,395 @@ class ShutdownFlag(object):
 
 
 # ---------------------------------------------------------------------------
+# Metrics collector (reads /proc and /sys, no external tools)
+# ---------------------------------------------------------------------------
+
+class MetricsCollector(object):
+    """Collects system and per-process health metrics from /proc and /sys.
+
+    CPU percentage requires two consecutive reads to compute a delta.
+    The first call returns overall_pct as None (no baseline yet).
+    """
+
+    def __init__(self):
+        self._pid = None
+        self._prev_cpu = None
+        self._prev_per_core = None
+        self._prev_proc_cpu = None
+        self._prev_proc_time = None
+        self._prev_net = None
+        self._include_network = True
+        self._warned = set()
+        try:
+            self._page_size = os.sysconf("SC_PAGESIZE")
+        except (AttributeError, ValueError):
+            self._page_size = 4096
+        self._clk_tck = 100
+        try:
+            self._clk_tck = os.sysconf("SC_CLK_TCK")
+        except (AttributeError, ValueError):
+            pass
+
+    def set_pid(self, pid):
+        if pid != self._pid:
+            self._pid = pid
+            self._prev_proc_cpu = None
+            self._prev_proc_time = None
+
+    def set_network(self, enabled):
+        self._include_network = enabled
+
+    def _warn_once(self, source, msg):
+        if source not in self._warned:
+            log_warn("Metrics: %s -- %s (will not warn again)" % (source, msg))
+            self._warned.add(source)
+
+    def _read_int(self, path, default=None):
+        try:
+            with open(path) as f:
+                return int(f.read().strip())
+        except (IOError, OSError, ValueError):
+            return default
+
+    def _read_str(self, path, default=""):
+        try:
+            with open(path) as f:
+                return f.read().strip()
+        except (IOError, OSError):
+            return default
+
+    def collect(self):
+        results = []
+        ts = time.time()
+        sys_m = self._collect_system(ts)
+        if sys_m:
+            results.append(sys_m)
+        if self._pid:
+            proc_m = self._collect_process(ts)
+            if proc_m:
+                results.append(proc_m)
+        if self._include_network:
+            net_m = self._collect_network(ts)
+            if net_m:
+                results.append(net_m)
+        return results
+
+    def _parse_cpu_line(self, parts):
+        """Parse cpu line fields into list of ints."""
+        vals = []
+        for p in parts:
+            try:
+                vals.append(int(p))
+            except ValueError:
+                break
+        # Pad to 8 fields (user,nice,sys,idle,iowait,irq,softirq,steal)
+        while len(vals) < 8:
+            vals.append(0)
+        return vals[:8]
+
+    def _calc_cpu_pct(self, prev, curr):
+        """Calculate CPU % from two /proc/stat snapshots."""
+        p_idle = prev[3] + prev[4]  # idle + iowait
+        c_idle = curr[3] + curr[4]
+        p_total = sum(prev)
+        c_total = sum(curr)
+        d_total = c_total - p_total
+        d_idle = c_idle - p_idle
+        if d_total <= 0:
+            return 0.0
+        return round(100.0 * (d_total - d_idle) / d_total, 1)
+
+    def _collect_system(self, ts):
+        # --- CPU from /proc/stat ---
+        cpu_overall = None
+        per_core_pct = []
+        num_cores = 0
+        ctxt = 0
+        interrupts = 0
+        procs_running = 0
+        procs_blocked = 0
+
+        try:
+            with open("/proc/stat") as f:
+                lines = f.readlines()
+        except (IOError, OSError):
+            self._warn_once("cpu", "/proc/stat not readable")
+            return None
+
+        curr_cpu = None
+        curr_per_core = {}
+        for line in lines:
+            parts = line.split()
+            if not parts:
+                continue
+            if parts[0] == "cpu":
+                curr_cpu = self._parse_cpu_line(parts[1:])
+            elif parts[0].startswith("cpu") and parts[0][3:].isdigit():
+                core_id = int(parts[0][3:])
+                curr_per_core[core_id] = self._parse_cpu_line(parts[1:])
+                num_cores = max(num_cores, core_id + 1)
+            elif parts[0] == "ctxt" and len(parts) > 1:
+                try:
+                    ctxt = int(parts[1])
+                except ValueError:
+                    pass
+            elif parts[0] == "intr" and len(parts) > 1:
+                try:
+                    interrupts = int(parts[1])
+                except ValueError:
+                    pass
+            elif parts[0] == "procs_running" and len(parts) > 1:
+                try:
+                    procs_running = int(parts[1])
+                except ValueError:
+                    pass
+            elif parts[0] == "procs_blocked" and len(parts) > 1:
+                try:
+                    procs_blocked = int(parts[1])
+                except ValueError:
+                    pass
+
+        if curr_cpu and self._prev_cpu:
+            cpu_overall = self._calc_cpu_pct(self._prev_cpu, curr_cpu)
+        self._prev_cpu = curr_cpu
+
+        if curr_per_core and self._prev_per_core:
+            for cid in sorted(curr_per_core.keys()):
+                if cid in self._prev_per_core:
+                    per_core_pct.append(
+                        self._calc_cpu_pct(self._prev_per_core[cid],
+                                           curr_per_core[cid]))
+        self._prev_per_core = curr_per_core
+
+        # --- CPU frequency ---
+        freq_mhz = []
+        for i in range(num_cores):
+            path = "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq" % i
+            val = self._read_int(path)
+            if val is not None:
+                freq_mhz.append(int(val / 1000))
+            else:
+                break
+        if not freq_mhz:
+            self._warn_once("freq", "cpufreq not available")
+
+        # --- Memory from /proc/meminfo ---
+        mem = {}
+        try:
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        key = parts[0].rstrip(":")
+                        try:
+                            val = int(parts[1])
+                        except ValueError:
+                            continue
+                        mem[key] = val
+        except (IOError, OSError):
+            self._warn_once("mem", "/proc/meminfo not readable")
+
+        mem_total = mem.get("MemTotal", 0)
+        mem_avail = mem.get("MemAvailable", mem.get("MemFree", 0))
+        mem_used = mem_total - mem_avail
+        buffers = mem.get("Buffers", 0)
+        cached = mem.get("Cached", 0)
+        swap_total = mem.get("SwapTotal", 0)
+        swap_free = mem.get("SwapFree", 0)
+        mem_pct = round(100.0 * mem_used / mem_total, 1) if mem_total > 0 else 0.0
+
+        # --- Load average ---
+        load_1m = 0.0
+        load_5m = 0.0
+        load_15m = 0.0
+        try:
+            with open("/proc/loadavg") as f:
+                parts = f.read().split()
+                if len(parts) >= 3:
+                    load_1m = float(parts[0])
+                    load_5m = float(parts[1])
+                    load_15m = float(parts[2])
+        except (IOError, OSError, ValueError):
+            pass
+
+        # --- Temperature (optional) ---
+        temp_raw = self._read_int("/sys/class/thermal/thermal_zone0/temp")
+        temp_c = None
+        if temp_raw is not None:
+            temp_c = int(temp_raw / 1000)
+        else:
+            self._warn_once("temp", "thermal_zone0 not found")
+
+        # --- Uptime ---
+        uptime = 0.0
+        try:
+            with open("/proc/uptime") as f:
+                uptime = float(f.read().split()[0])
+        except (IOError, OSError, ValueError):
+            pass
+
+        # Build result
+        result = {
+            "ts": round(ts, 3),
+            "type": "system",
+            "cpu": {
+                "overall_pct": cpu_overall,
+                "per_core": per_core_pct if per_core_pct else [],
+                "num_cores": num_cores,
+            },
+            "mem": {
+                "total_kb": mem_total,
+                "used_kb": mem_used,
+                "available_kb": mem_avail,
+                "buffers_kb": buffers,
+                "cached_kb": cached,
+                "swap_total_kb": swap_total,
+                "swap_used_kb": swap_total - swap_free,
+                "used_pct": mem_pct,
+            },
+            "load": {
+                "avg_1m": round(load_1m, 2),
+                "avg_5m": round(load_5m, 2),
+                "avg_15m": round(load_15m, 2),
+            },
+            "uptime_sec": int(uptime),
+            "context_switches": ctxt,
+            "interrupts": interrupts,
+            "procs_running": procs_running,
+            "procs_blocked": procs_blocked,
+        }
+        if temp_c is not None:
+            result["temp_c"] = temp_c
+        if freq_mhz:
+            result["cpu"]["freq_mhz"] = freq_mhz
+        return result
+
+    def _collect_process(self, ts):
+        pid = self._pid
+        if not pid:
+            return None
+        stat_path = "/proc/%d/stat" % pid
+        try:
+            with open(stat_path) as f:
+                raw = f.read()
+        except (IOError, OSError):
+            return None
+
+        # Parse /proc/<pid>/stat — comm (field 2) may contain parens and spaces.
+        # Find last ')' to locate field 3 onwards.
+        paren_end = raw.rfind(")")
+        if paren_end < 0:
+            return None
+        # Fields before comm
+        paren_start = raw.find("(")
+        comm = raw[paren_start + 1:paren_end] if paren_start >= 0 else ""
+        # Fields after comm (starting at field 3)
+        fields = raw[paren_end + 2:].split()
+        if len(fields) < 22:
+            return None
+
+        proc_state = fields[0]            # field 3
+        minflt = int(fields[7])           # field 10
+        majflt = int(fields[9])           # field 12
+        utime = int(fields[11])           # field 14
+        stime = int(fields[12])           # field 15
+        num_threads = int(fields[17])     # field 20
+        vsize = int(fields[20])           # field 23
+        rss_pages = int(fields[21])       # field 24
+
+        rss_kb = rss_pages * self._page_size // 1024
+        vsize_kb = vsize // 1024
+
+        # CPU % delta
+        cpu_pct = None
+        now = time.time()
+        total_ticks = utime + stime
+        if self._prev_proc_cpu is not None and self._prev_proc_time is not None:
+            dt = now - self._prev_proc_time
+            if dt > 0:
+                dticks = total_ticks - self._prev_proc_cpu
+                cpu_pct = round(100.0 * dticks / (dt * self._clk_tck), 1)
+        self._prev_proc_cpu = total_ticks
+        self._prev_proc_time = now
+
+        # Voluntary/involuntary context switches from /proc/<pid>/status
+        vol_csw = 0
+        invol_csw = 0
+        try:
+            with open("/proc/%d/status" % pid) as f:
+                for line in f:
+                    if line.startswith("voluntary_ctxt_switches:"):
+                        vol_csw = int(line.split()[1])
+                    elif line.startswith("nonvoluntary_ctxt_switches:"):
+                        invol_csw = int(line.split()[1])
+        except (IOError, OSError):
+            pass
+
+        # FD count
+        fds = 0
+        try:
+            fds = len(os.listdir("/proc/%d/fd" % pid))
+        except (IOError, OSError):
+            self._warn_once("proc_fd", "cannot read /proc/%d/fd" % pid)
+
+        # OOM score
+        oom = self._read_int("/proc/%d/oom_score" % pid, 0)
+
+        return {
+            "ts": round(ts, 3),
+            "type": "process",
+            "pid": pid,
+            "comm": comm,
+            "state": proc_state,
+            "cpu_pct": cpu_pct,
+            "rss_kb": rss_kb,
+            "vsize_kb": vsize_kb,
+            "threads": num_threads,
+            "fds": fds,
+            "voluntary_csw": vol_csw,
+            "involuntary_csw": invol_csw,
+            "minor_faults": minflt,
+            "major_faults": majflt,
+            "oom_score": oom,
+        }
+
+    def _collect_network(self, ts):
+        try:
+            with open("/proc/net/dev") as f:
+                lines = f.readlines()
+        except (IOError, OSError):
+            self._warn_once("net", "/proc/net/dev not readable")
+            return None
+
+        interfaces = {}
+        for line in lines[2:]:  # skip header lines
+            parts = line.split()
+            if len(parts) < 17:
+                continue
+            iface = parts[0].rstrip(":")
+            if iface == "lo":
+                continue
+            interfaces[iface] = {
+                "rx_bytes": int(parts[1]),
+                "rx_packets": int(parts[2]),
+                "rx_errors": int(parts[3]),
+                "rx_drops": int(parts[4]),
+                "tx_bytes": int(parts[9]),
+                "tx_packets": int(parts[10]),
+                "tx_errors": int(parts[11]),
+            }
+
+        if not interfaces:
+            return None
+
+        return {
+            "ts": round(ts, 3),
+            "type": "network",
+            "interfaces": interfaces,
+        }
+
+
+# ---------------------------------------------------------------------------
 # Perf collector
 # ---------------------------------------------------------------------------
 
@@ -707,6 +1097,12 @@ class InteractiveAgent(object):
         # Per-session disconnect signal (set by recv loop on disconnect)
         self._session_done = threading.Event()
 
+        # Metrics config
+        self._metrics_enabled = True
+        self._metrics_interval = 2
+        self._metrics_network = True
+        self._metrics_thread = None
+
     # --- Wire protocol ---
 
     def _send_msg(self, payload_bytes, flag):
@@ -724,6 +1120,11 @@ class InteractiveAgent(object):
     def _send_data(self, payload, comp_flag):
         """Send profiling data (flag 0 or 1)."""
         self._send_msg(payload, comp_flag)
+
+    def _send_metrics(self, metrics_dict):
+        """Send one metrics snapshot (flag 4)."""
+        payload = json.dumps(metrics_dict, separators=(",", ":")).encode("utf-8")
+        self._send_msg(payload, FLAG_METRICS)
 
     def _recv_loop(self):
         """Receiver thread: reads commands from server, puts on queue.
@@ -779,6 +1180,7 @@ class InteractiveAgent(object):
             "pause": self._cmd_pause,
             "resume": self._cmd_resume,
             "configure": self._cmd_configure,
+            "configure_metrics": self._cmd_configure_metrics,
         }
 
         handler = handlers.get(cmd_name)
@@ -1025,6 +1427,43 @@ class InteractiveAgent(object):
             "duration": self._duration,
         })
 
+    def _cmd_configure_metrics(self, cmd_id, args):
+        self._metrics_enabled = args.get("enabled", True)
+        self._metrics_interval = int(args.get("interval", 2))
+        self._metrics_network = args.get("network", True)
+        self._send_response(cmd_id, {
+            "ok": True,
+            "metrics_enabled": self._metrics_enabled,
+            "interval": self._metrics_interval,
+            "network": self._metrics_network,
+        })
+
+    # --- Metrics loop (runs in separate thread) ---
+
+    def _metrics_loop(self):
+        """Background thread: collect and send metrics at configured interval."""
+        collector = MetricsCollector()
+        while not self._shutdown.is_set and not self._session_done.is_set():
+            if not self._metrics_enabled:
+                self._session_done.wait(self._metrics_interval)
+                continue
+
+            with self._lock:
+                pid = self._pid if self._state in (AGENT_PROFILING, AGENT_PAUSED) else None
+            collector.set_pid(pid)
+            collector.set_network(self._metrics_network)
+
+            try:
+                snapshots = collector.collect()
+                for snap in snapshots:
+                    self._send_metrics(snap)
+            except (IOError, OSError):
+                break
+            except Exception as e:
+                log_warn("Metrics error: %s" % e)
+
+            self._session_done.wait(self._metrics_interval)
+
     # --- Collection loop (runs in separate thread) ---
 
     def _collection_loop(self, collector):
@@ -1112,6 +1551,11 @@ class InteractiveAgent(object):
         recv_thread.daemon = True
         recv_thread.start()
 
+        # Start metrics thread
+        self._metrics_thread = threading.Thread(target=self._metrics_loop)
+        self._metrics_thread.daemon = True
+        self._metrics_thread.start()
+
         # Command processing loop
         while not self._shutdown.is_set and not self._session_done.is_set():
             try:
@@ -1142,9 +1586,12 @@ class InteractiveAgent(object):
         except (IOError, OSError):
             pass
 
-        # Wait for recv thread to exit
+        # Wait for recv and metrics threads to exit
         if recv_thread is not None:
             recv_thread.join(timeout=5)
+        if self._metrics_thread is not None:
+            self._metrics_thread.join(timeout=5)
+            self._metrics_thread = None
 
         # Reset state for next session
         with self._lock:

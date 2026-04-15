@@ -20,9 +20,12 @@ history.
       |                                      |
    perf record + perf stat                   |
       |                                      |
-   Agent (perflens_agent.py)                 |
+   Agent (Python or C)                       |
       |                                      |
       +---- TCP (5-byte header + zstd) ----> recv + decompress
+      |   (--server: agent connects out)     |
+      |   (--listen: server connects in)     |
+      |<--- commands (JSON) ----------------+
                                              |
                                         parser.py  (perf script / perf stat)
                                         source_mapper.py  (addr2line + source)
@@ -31,12 +34,17 @@ history.
 ```
 
 ### Wire protocol
-- 5-byte header: 4-byte uint32 big-endian payload length + 1-byte compression
-  flag (`0` = raw, `1` = zstd).
-- Payload: UTF-8 perf script output, optionally followed by a
+- 5-byte header: 4-byte uint32 big-endian payload length + 1-byte flag.
+- Flag values:
+  - `0` = raw perf data (agent → server)
+  - `1` = zstd-compressed perf data (agent → server)
+  - `2` = command request JSON (server → agent)
+  - `3` = command response JSON (agent → server)
+  - `4` = health metrics JSON (agent → server)
+- Perf data payload: UTF-8 perf script output, optionally followed by a
   `### PERF_STAT ###` section.
-- Agent compresses with `zstd -1 -c`, server decompresses with `zstd -d -c`.
-  Typical ratio on real perf script output is 20–40×.
+- Agent compresses with in-process zstd (C agent) or `zstd -1 -c` (Python
+  agent). Server decompresses with `zstd -d -c`. Typical ratio 20–40×.
 
 ### Key design decisions
 - Python stdlib only. No Flask, no npm, no Docker, no virtualenv, no pip
@@ -44,15 +52,22 @@ history.
 - Plain HTML + vanilla JS + CSS for the UI. No bundler, no framework.
 - `ThreadingHTTPServer` for concurrent HTTP + SSE; a separate thread owns
   the TCP listener.
-- `addr2line -f` (no `-i`, no `-p`) pipelined in batches of 500 addresses.
+- `addr2line -f` (or `-fi` with `--inline`) pipelined in batches of 500
+  addresses.
 - Session replay is lazy: raw chunks are saved to disk and parsed on demand.
 - A single `SourceMapper` is created at server startup and shared across all
   requests — no per-request forking.
 - The agent probes supported perf events and call-graph modes (`fp`, `dwarf`,
   `lbr`) on the target before collecting, and uses whichever works.
-- The agent is **Python 3.5 compatible** — no f-strings, no dataclasses, no
-  `subprocess.run(capture_output=True)`. This lets it run on older ARM or
-  x86 Linux targets where only Python 3.5 is available.
+- Two agent implementations: Python 3.5 compatible (no f-strings, no
+  dataclasses) and C static binary (~1.8 MB, vendored zstd, zero deps).
+  Both are wire-protocol-identical.
+- Bidirectional interactive protocol: agent sends hello + data + metrics,
+  server sends commands (start, stop, pause, resume, configure, etc.).
+- Two connection patterns: `--server` (agent connects out to server) and
+  `--listen` (agent binds port, server/UI connects in via wizard).
+- Agent collects device health metrics (CPU, memory, temperature, load,
+  process stats, network) every 2s and streams them as JSON frames.
 
 ---
 
@@ -63,7 +78,7 @@ perflens/
 ├── agent/
 │   └── perflens_agent.py         # Python 3.5+ device agent
 ├── agent-c/
-│   ├── perflens_agent.c          # C agent (~1000 lines, static binary)
+│   ├── perflens_agent.c          # C agent (~3200 lines, static binary)
 │   ├── Makefile                  # native + cross-compile targets
 │   └── vendor/zstd/              # zstd single-file amalgamation
 ├── server/
@@ -74,7 +89,7 @@ perflens/
 ├── ui/
 │   ├── index.html                # single-page app
 │   ├── app.js                    # all UI logic (vanilla JS)
-│   └── style.css                 # dark theme
+│   └── style.css                 # dark + light themes
 ├── docs/
 │   ├── hero.svg
 │   ├── architecture.svg
@@ -117,16 +132,28 @@ perflens/
 --path-map FROM=TO    Rewrite compile-time paths to local paths
 --addr2line PATH      Custom addr2line binary
 --max-samples N       Ring buffer cap             (default 500000)
+--inline / --no-inline  Enable/disable inline function resolution (default: on)
+--import FILE         Import a perf.data file at startup as a session
 ```
 
 ## Agent CLI
 
+Three run modes (must pick one):
+
 ```
---pid PID             Process to profile          (required)
---server HOST         Server host. Omit for stdout mode.
---port PORT           Server TCP port             (default 9999)
+--listen              Daemon: bind port, wait for server to connect in
+--server HOST         Daemon: connect out to server (reconnects with backoff)
+--output FILE         Headless: collect once, write to FILE ('-' for stdout)
+```
+
+Options:
+
+```
+--pid PID             Process to profile (required for --output)
+--port PORT           TCP port                    (default 9999)
 --frequency HZ        perf record -F              (default 99)
---duration SECS       Length of each round        (default 8)
+--duration SECS       Length of each round         (default 8)
+--rounds N            Number of rounds (--output mode only, Python agent)
 ```
 
 ---

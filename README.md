@@ -97,11 +97,13 @@ tar xf perflens-server-0.1.0-linux-x86_64.tar.gz
 ```
 
 ```bash
-# On the target Linux device you want to profile
+# On the target Linux device — Option 1: agent connects to server
 tar xf perflens-agent-0.1.0.tar.gz
-./perflens-agent-0.1.0/perflens-agent \
-    --pid    $(pgrep myprogram) \
-    --server <server-ip>
+./perflens-agent-0.1.0/perflens-agent --server <server-ip>
+
+# Option 2: agent listens, server connects to agent
+./perflens-agent-0.1.0/perflens-agent --listen
+# Then use the Live Debug wizard in the UI to connect to <device-ip>:9999
 ```
 
 Pre-built server tarballs are published on every tagged release for:
@@ -134,7 +136,8 @@ make CROSS=armeb-linux-musleabihf-      # ARMv7 big-endian
 # Deploy (single file, no dependencies)
 scp perflens-agent user@device:/tmp/
 ssh user@device
-/tmp/perflens-agent --pid <PID> --server <server-ip>
+/tmp/perflens-agent --server <server-ip>        # connects to server
+/tmp/perflens-agent --listen                     # or: wait for server to connect in
 ```
 
 The C agent is a single static binary (~1.8 MB) with zstd built in. It is wire-protocol-identical to the Python agent — the server cannot tell which agent connected.
@@ -152,7 +155,8 @@ python3 server/perflens_server.py \
 # Agent (on the target device — Python or C)
 scp agent/perflens_agent.py user@device:/tmp/
 ssh user@device
-python3 /tmp/perflens_agent.py --pid <PID> --server <server-ip>
+python3 /tmp/perflens_agent.py --server <server-ip>   # connects to server
+python3 /tmp/perflens_agent.py --listen                # or: wait for server
 ```
 
 Then browse to `http://<server-ip>:8080`.
@@ -182,16 +186,28 @@ Then browse to `http://<server-ip>:8080`.
 | `--path-map FROM=TO` | — | Rewrite compile-time paths to local paths (e.g. `/build/src=/home/user/src`) |
 | `--addr2line PATH` | — | Custom `addr2line` binary (overrides `bin/` and PATH) |
 | `--max-samples N` | `500000` | Ring buffer cap before oldest samples drop |
+| `--inline` / `--no-inline` | on | Enable/disable inline function resolution via `addr2line -i` |
+| `--import FILE` | — | Import a `perf.data` file at startup and make it available as a session |
 
 ### Agent CLI
 
+Three run modes (must pick one):
+
+| Mode | Description |
+|---|---|
+| `--listen` | Daemon: bind `--port`, wait for server to connect in |
+| `--server HOST` | Daemon: connect out to server (reconnects with exponential backoff) |
+| `--output FILE` | Headless: collect once, write to file (`-` for stdout). Requires `--pid`. |
+
+Options:
+
 | Option | Default | Description |
 |---|---|---|
-| `--pid PID` | **required** | PID of process to profile |
-| `--server HOST` | — | Server IP. Omit for stdout mode (single collection + print). |
-| `--port PORT` | `9999` | Server TCP port |
+| `--pid PID` | — | PID of process to profile (required for `--output`; set via UI wizard in daemon modes) |
+| `--port PORT` | `9999` | TCP port (listen or connect) |
 | `--frequency HZ` | `99` | `perf record -F` sampling frequency |
 | `--duration SECS` | `8` | Length of each collection round |
+| `--rounds N` | `1` | Number of collection rounds (`--output` mode only, Python agent) |
 
 ---
 
@@ -268,7 +284,7 @@ perflens/
 ├── agent/
 │   └── perflens_agent.py         # Python 3.5+ device agent
 ├── agent-c/
-│   ├── perflens_agent.c          # C agent (static binary, zero deps)
+│   ├── perflens_agent.c          # C agent (~3200 lines, static binary, zero deps)
 │   ├── Makefile                  # native + cross-compile targets
 │   └── vendor/zstd/              # vendored zstd amalgamation
 ├── server/
@@ -278,8 +294,8 @@ perflens/
 │   └── bin/                      # bundled zstd / addr2line / readelf
 ├── ui/
 │   ├── index.html                # single-page app
-│   ├── app.js                    # all UI logic (vanilla JS, ~900 lines)
-│   └── style.css                 # dark theme
+│   ├── app.js                    # all UI logic (vanilla JS, ~2000 lines)
+│   └── style.css                 # dark + light themes (CSS custom properties)
 ├── docs/
 │   ├── hero.svg
 │   ├── architecture.svg

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """PerfLens Server — receives perf data from agents and serves web UI."""
 
+import collections
 import dataclasses
 import json
 import os
@@ -52,7 +53,7 @@ class ProfilingState:
 
     def __init__(self, max_samples=500000):
         self.lock = threading.Lock()
-        self.all_samples = []
+        self.all_samples = collections.deque(maxlen=max_samples)
         self.chunk_count = 0
         self.last_update = 0
         self.agent_connected = False
@@ -62,20 +63,27 @@ class ProfilingState:
         self.event_types = []
         self.perf_stat = {}
         self.source_mapper = None  # SourceMapper, set at startup
-        self._max_samples = max_samples
+        # Running set — event types only accumulate, never removed
+        # (event types don't change mid-session in practice)
+        self._event_types_set = set()
+        # Background rebuild state
+        self._rebuild_needed = threading.Condition(self.lock)
+        self._dirty = False
+        self._cached_per_event = {}
 
     def add_samples(self, new_samples, perf_stat=None):
         """Add samples and return (all_samples_copy, event_types_copy)."""
         with self.lock:
             self.all_samples.extend(new_samples)
-            if len(self.all_samples) > self._max_samples:
-                excess = len(self.all_samples) - self._max_samples
-                self.all_samples = self.all_samples[excess:]
             self.chunk_count += 1
             self.last_update = time.time()
-            self.event_types = get_event_types(self.all_samples)
+            self._event_types_set.update(
+                s['event_type'] for s in new_samples)
+            self.event_types = sorted(self._event_types_set)
             if perf_stat:
                 self.perf_stat = perf_stat
+            self._dirty = True
+            self._rebuild_needed.notify()
             return list(self.all_samples), list(self.event_types)
 
     def get_snapshot(self):
@@ -88,10 +96,110 @@ class ProfilingState:
 
     def reset(self):
         with self.lock:
-            self.all_samples = []
+            self.all_samples.clear()
             self.chunk_count = 0
             self.event_types = []
+            self._event_types_set.clear()
             self.perf_stat = {}
+            self._cached_per_event = {}
+            self._dirty = False
+
+
+class MetricsState:
+    """Stores device health metrics history in memory. Thread-safe."""
+
+    def __init__(self, max_entries=1800):
+        # 1800 entries = 1 hour at 2-second intervals
+        self.lock = threading.Lock()
+        self.system_history = []
+        self.process_history = []
+        self.network_history = []
+        self._max = max_entries
+
+    def add(self, metrics_type, metrics):
+        with self.lock:
+            if metrics_type == 'system':
+                self._append(self.system_history, metrics)
+            elif metrics_type == 'process':
+                self._append(self.process_history, metrics)
+            elif metrics_type == 'network':
+                self._append(self.network_history, metrics)
+
+    def _append(self, history, entry):
+        history.append(entry)
+        if len(history) > self._max:
+            trim = self._max // 10
+            del history[:trim]
+
+    def get_history(self, metrics_type, start_ts=None, end_ts=None):
+        with self.lock:
+            if metrics_type == 'system':
+                source = self.system_history
+            elif metrics_type == 'process':
+                source = self.process_history
+            elif metrics_type == 'network':
+                source = self.network_history
+            else:
+                return []
+            if start_ts is None and end_ts is None:
+                return list(source)
+            return [m for m in source
+                    if (start_ts is None or m.get('ts', 0) >= start_ts) and
+                       (end_ts is None or m.get('ts', 0) <= end_ts)]
+
+    def get_latest(self):
+        with self.lock:
+            result = {}
+            if self.system_history:
+                result['system'] = self.system_history[-1]
+            if self.process_history:
+                result['process'] = self.process_history[-1]
+            if self.network_history:
+                result['network'] = self.network_history[-1]
+            return result
+
+    def get_summary(self):
+        """Compute summary stats for session metadata."""
+        with self.lock:
+            if not self.system_history:
+                return None
+            cpu_vals = [m['cpu']['overall_pct'] for m in self.system_history
+                        if m.get('cpu', {}).get('overall_pct') is not None]
+            mem_vals = [m['mem']['used_pct'] for m in self.system_history
+                        if m.get('mem', {}).get('used_pct') is not None]
+            temp_vals = [m['temp_c'] for m in self.system_history
+                         if m.get('temp_c') is not None]
+            n = len(self.system_history)
+            summary = {'snapshots': n}
+            if n >= 2:
+                summary['duration_sec'] = round(
+                    self.system_history[-1].get('ts', 0) -
+                    self.system_history[0].get('ts', 0), 1)
+            if cpu_vals:
+                summary['avg_cpu_pct'] = round(sum(cpu_vals) / len(cpu_vals), 1)
+                summary['max_cpu_pct'] = round(max(cpu_vals), 1)
+            if mem_vals:
+                summary['avg_mem_pct'] = round(sum(mem_vals) / len(mem_vals), 1)
+                summary['max_mem_pct'] = round(max(mem_vals), 1)
+            if temp_vals:
+                summary['avg_temp_c'] = round(sum(temp_vals) / len(temp_vals))
+                summary['max_temp_c'] = max(temp_vals)
+            return summary
+
+    def snapshot_for_save(self):
+        """Return all metrics for session save."""
+        with self.lock:
+            return {
+                'system': list(self.system_history),
+                'process': list(self.process_history),
+                'network': list(self.network_history),
+            }
+
+    def reset(self):
+        with self.lock:
+            self.system_history.clear()
+            self.process_history.clear()
+            self.network_history.clear()
 
 
 # Wire protocol flags (must match agent)
@@ -99,10 +207,12 @@ FLAG_DATA_RAW = 0
 FLAG_DATA_ZSTD = 1
 FLAG_CMD_REQUEST = 2
 FLAG_CMD_RESPONSE = 3
+FLAG_METRICS = 4
 
 # Module-level instances, set in main()
 config: ServerConfig = None
 state: ProfilingState = None
+metrics_state: MetricsState = None
 agent_session: 'AgentSession' = None  # managed agent connection
 wizard_state: dict = None              # wizard UI state
 
@@ -214,13 +324,15 @@ def probe_tools(cfg):
 
 def recv_exactly(conn, n):
     """Receive exactly n bytes from a socket."""
-    data = b''
-    while len(data) < n:
-        chunk = conn.recv(min(65536, n - len(data)))
-        if not chunk:
+    buf = bytearray(n)
+    view = memoryview(buf)
+    pos = 0
+    while pos < n:
+        nbytes = conn.recv_into(view[pos:], n - pos)
+        if nbytes == 0:
             return None
-        data += chunk
-    return data
+        pos += nbytes
+    return bytes(buf)
 
 
 def decompress_payload(payload, comp_flag):
@@ -370,18 +482,29 @@ class AgentSession:
                     if not samples:
                         continue
 
+                    # add_samples sets dirty flag and signals rebuild worker
                     all_samples, event_types = state.add_samples(samples, perf_stat)
 
                     print(f"[server] Managed agent chunk: "
                           f"{len(samples)} new, {len(all_samples)} total",
                           file=sys.stderr)
 
-                    per_event = build_per_event_data(
-                        all_samples, event_types, state.source_mapper)
+                    # Lightweight SSE: event types + stat pushed immediately.
+                    # Heavy per_event rebuild handled by background worker.
                     broadcast_sse('event_types', event_types)
-                    broadcast_sse('per_event', per_event)
                     if perf_stat:
                         broadcast_sse('perf_stat', perf_stat)
+
+                elif flag == FLAG_METRICS:
+                    # Health metrics snapshot
+                    try:
+                        metrics = json.loads(payload.decode('utf-8',
+                                                            errors='replace'))
+                        mtype = metrics.get('type', '')
+                        metrics_state.add(mtype, metrics)
+                        broadcast_sse('metrics_%s' % mtype, metrics)
+                    except (ValueError, KeyError):
+                        pass
 
                 else:
                     print(f"[server] Unknown flag {flag} from managed agent",
@@ -405,13 +528,16 @@ class AgentSession:
             perf_stat_final = dict(state.perf_stat)
         broadcast_sse('status', {'connected': False, 'agent': None})
 
-        # Save session
-        if self._raw_chunks:
+        # Save session (include metrics)
+        m_snap = metrics_state.snapshot_for_save()
+        m_summary = metrics_state.get_summary()
+        if self._raw_chunks or any(m_snap.values()):
             t = threading.Thread(
                 target=_save_session,
                 args=(self._session_dir, self._session_id,
                       self.addr, self._raw_chunks,
-                      all_samples, perf_stat_final, self.hello),
+                      all_samples, perf_stat_final, self.hello,
+                      m_snap, m_summary),
                 daemon=True,
             )
             t.start()
@@ -483,8 +609,12 @@ def connect_to_agent(host, port, timeout=10):
         state.agent_connected = True
         state.agent_addr = addr_str
         state.agent_conn = sock
-        state.all_samples = []
+        state.all_samples.clear()
         state.chunk_count = 0
+        state._event_types_set.clear()
+        state.event_types = []
+        state._cached_per_event = {}
+    metrics_state.reset()
 
     broadcast_sse('status', {'connected': True, 'agent': addr_str})
     broadcast_sse('agent_connected', {
@@ -560,6 +690,33 @@ def broadcast_sse(event_type, data):
             state.sse_clients -= dead
 
 
+def _rebuild_worker():
+    """Background thread: wait for dirty flag, rebuild per_event, broadcast.
+
+    Coalesces rapid updates — if data arrives while rebuilding, we loop
+    and rebuild again with the latest snapshot.
+    """
+    while True:
+        with state.lock:
+            while not state._dirty:
+                state._rebuild_needed.wait()
+            state._dirty = False
+            all_samples = list(state.all_samples)
+            event_types = list(state.event_types)
+            perf_stat = dict(state.perf_stat)
+
+        if not all_samples:
+            continue
+
+        mapper = state.source_mapper
+        per_event = build_per_event_data(all_samples, event_types, mapper)
+
+        with state.lock:
+            state._cached_per_event = per_event
+
+        broadcast_sse('per_event', per_event)
+
+
 # ---------------------------------------------------------------------------
 # Agent connection handler
 # ---------------------------------------------------------------------------
@@ -632,8 +789,12 @@ def handle_inbound_agent(conn, addr):
         state.agent_connected = True
         state.agent_addr = addr_str
         state.agent_conn = conn
-        state.all_samples = []
+        state.all_samples.clear()
         state.chunk_count = 0
+        state._event_types_set.clear()
+        state.event_types = []
+        state._cached_per_event = {}
+    metrics_state.reset()
 
     broadcast_sse('status', {'connected': True, 'agent': addr_str})
     broadcast_sse('agent_connected', {
@@ -650,11 +811,9 @@ def handle_inbound_agent(conn, addr):
 
 
 def _save_session(session_dir, session_id, agent_addr, raw_chunks,
-                  all_samples, perf_stat, hello=None):
-    """Save profiling session to disk (raw chunks + metadata).
-
-    Metadata schema version 0.4.0: includes platform info from agent hello.
-    """
+                  all_samples, perf_stat, hello=None,
+                  metrics_snapshot=None, metrics_summary=None):
+    """Save profiling session to disk (raw chunks + metadata + metrics)."""
     try:
         for i, chunk in enumerate(raw_chunks):
             with open(os.path.join(session_dir, f'chunk_{i:03d}.txt'), 'w') as f:
@@ -662,7 +821,7 @@ def _save_session(session_dir, session_id, agent_addr, raw_chunks,
 
         event_types = get_event_types(all_samples)
         metadata = {
-            'version': '0.4.0',
+            'version': '0.5.0',
             'session_id': session_id,
             'agent': agent_addr,
             'timestamp': datetime.now().isoformat(),
@@ -673,9 +832,16 @@ def _save_session(session_dir, session_id, agent_addr, raw_chunks,
         }
         if hello and hello.get('platform'):
             metadata['platform'] = hello['platform']
+        if metrics_summary:
+            metadata['metrics_summary'] = metrics_summary
 
         with open(os.path.join(session_dir, 'metadata.json'), 'w') as f:
             json.dump(metadata, f, indent=2)
+
+        # Save metrics history
+        if metrics_snapshot:
+            with open(os.path.join(session_dir, 'metrics.json'), 'w') as f:
+                json.dump(metrics_snapshot, f)
 
         print(f"[server] Session saved: {session_id} ({len(all_samples)} samples)",
               file=sys.stderr)
@@ -1028,6 +1194,16 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
             else:
                 self._send_json({'indexing': False, 'symbols_loaded': 0,
                                  'source_files_found': 0})
+        elif path == '/api/metrics/current':
+            self._send_json(metrics_state.get_latest())
+        elif path == '/api/metrics/history':
+            params = parse_qs(parsed.query)
+            mtype = params.get('type', ['system'])[0]
+            start = params.get('start', [None])[0]
+            end = params.get('end', [None])[0]
+            start_ts = float(start) if start else None
+            end_ts = float(end) if end else None
+            self._send_json(metrics_state.get_history(mtype, start_ts, end_ts))
         elif path == '/api/browse':
             params = parse_qs(parsed.query)
             browse_path = params.get('path', ['/'])[0]
@@ -1313,16 +1489,13 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
         with state.lock:
             state.sse_clients.add(client)
 
-        # Send current state immediately
-        snapshot = state.get_snapshot()
-        all_samples = snapshot['all_samples']
-        event_types = snapshot['event_types']
-        perf_stat = snapshot['perf_stat']
+        # Send current state from cache (no expensive rebuild)
+        with state.lock:
+            event_types = list(state.event_types)
+            perf_stat = dict(state.perf_stat)
+            per_event = state._cached_per_event
 
-        if all_samples:
-            mapper = state.source_mapper
-            per_event = build_per_event_data(all_samples, event_types, mapper)
-
+        if per_event:
             for sse_event, data in [
                 ('event_types', event_types),
                 ('per_event', per_event),
@@ -1572,7 +1745,18 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
         per_event = build_per_event_data(all_samples, event_types, mapper,
                                          source=True)
 
-        self._send_json({'metadata': metadata, 'per_event': per_event})
+        result = {'metadata': metadata, 'per_event': per_event}
+
+        # Include saved metrics if available
+        metrics_path = os.path.join(session_dir, 'metrics.json')
+        if os.path.isfile(metrics_path):
+            try:
+                with open(metrics_path) as f:
+                    result['metrics'] = json.load(f)
+            except (json.JSONDecodeError, IOError):
+                pass
+
+        self._send_json(result)
 
     def log_message(self, format, *args):
         if '/api/stream' not in str(args):
@@ -1601,7 +1785,7 @@ def run_http_server(port):
 # ---------------------------------------------------------------------------
 
 def main():
-    global config, state, agent_session, wizard_state
+    global config, state, metrics_state, agent_session, wizard_state
 
     import argparse
     parser = argparse.ArgumentParser(description='PerfLens Server')
@@ -1718,6 +1902,7 @@ def main():
     # Create shared state
     state = ProfilingState(max_samples=config.max_samples)
     state.source_mapper = mapper
+    metrics_state = MetricsState()
 
     # CLI import: parse perf.data at startup
     if args.import_file:
@@ -1735,6 +1920,10 @@ def main():
         except RuntimeError as e:
             print(f"[server] Import failed: {e}", file=sys.stderr)
             sys.exit(1)
+
+    # Start background rebuild worker (builds per_event data off recv thread)
+    rebuild_thread = threading.Thread(target=_rebuild_worker, daemon=True)
+    rebuild_thread.start()
 
     # Start TCP server in a thread
     tcp_thread = threading.Thread(target=run_tcp_server,

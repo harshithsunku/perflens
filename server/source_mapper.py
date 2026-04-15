@@ -248,6 +248,8 @@ class SourceMapper:
         self._inline_pipes = {}
         # Inline resolution cache: (binary, addr) -> [(func, file, line), ...] or None
         self._inline_cache = {}
+        # vaddr cache: (binary, func, offset_str) -> vaddr or None
+        self._vaddr_cache = {}
         # Source file index: basename -> [full_paths]
         self._source_index = None
         # Full path cache: reported_path -> actual_path
@@ -359,8 +361,17 @@ class SourceMapper:
         func = frame['func']
         offset_str = frame.get('offset', '')
 
+        cache_key = (binary, func, offset_str)
+        cached = self._vaddr_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        # Distinguish "not cached" from "cached as None"
+        if cache_key in self._vaddr_cache:
+            return None
+
         symbols = self._load_symbols(binary)
         if func not in symbols:
+            self._vaddr_cache[cache_key] = None
             return None
 
         func_addr = symbols[func]
@@ -370,11 +381,14 @@ class SourceMapper:
             try:
                 offset = int(offset_str)
             except ValueError:
+                self._vaddr_cache[cache_key] = None
                 return None
         else:
             offset = 0
 
-        return func_addr + offset
+        result = func_addr + offset
+        self._vaddr_cache[cache_key] = result
+        return result
 
     def _resolve_addrs_batch(self, binary, addrs):
         """Resolve multiple addresses at once using the pipe."""

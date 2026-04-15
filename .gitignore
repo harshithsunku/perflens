@@ -10,3 +10,4 @@ test/sample_workload
 .DS_Store
 *.o
 agent-c/perflens-agent
+.devices.conf

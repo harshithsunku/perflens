@@ -1,14 +1,21 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>PerfLens</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
     <header>
-        <h1>PerfLens</h1>
+        <div class="header-left">
+            <h1>Perf<span class="logo-accent">Lens</span></h1>
+            <span class="header-divider"></span>
+            <span class="tagline">Real-time Linux Performance Profiler</span>
+        </div>
         <div id="status">
             <span id="status-dot" class="dot disconnected"></span>
             <span id="status-text">Connecting...</span>
@@ -21,6 +28,9 @@
                     <div class="export-item" data-action="json">Download Session JSON</div>
                 </div>
             </div>
+            <button id="docs-btn" class="docs-btn" title="Documentation">Docs</button>
+            <span class="theme-label" id="theme-label">Dark</span>
+            <button id="theme-toggle" class="theme-toggle" title="Toggle light/dark mode" aria-label="Toggle theme"></button>
         </div>
     </header>
 
@@ -214,6 +224,45 @@
 
             <div id="last-update"></div>
 
+            <!-- Device Health Metrics Strip -->
+            <div id="metrics-strip" class="metrics-strip hidden">
+                <div class="metrics-header">
+                    <span class="metrics-title">Device Health</span>
+                    <button id="metrics-collapse-btn" class="metrics-collapse">&#9660;</button>
+                </div>
+                <div class="metrics-cards" id="metrics-cards">
+                    <div class="metric-card" id="mc-cpu">
+                        <div class="metric-value" id="mv-cpu">--</div>
+                        <div class="metric-label">CPU</div>
+                        <div class="metric-spark" id="ms-cpu"></div>
+                    </div>
+                    <div class="metric-card" id="mc-mem">
+                        <div class="metric-value" id="mv-mem">--</div>
+                        <div class="metric-label">MEM</div>
+                        <div class="metric-spark" id="ms-mem"></div>
+                    </div>
+                    <div class="metric-card" id="mc-temp">
+                        <div class="metric-value" id="mv-temp">--</div>
+                        <div class="metric-label">Temp</div>
+                        <div class="metric-spark" id="ms-temp"></div>
+                    </div>
+                    <div class="metric-card" id="mc-load">
+                        <div class="metric-value" id="mv-load">--</div>
+                        <div class="metric-label">Load</div>
+                        <div class="metric-spark" id="ms-load"></div>
+                    </div>
+                    <div class="metric-card" id="mc-proc">
+                        <div class="metric-value" id="mv-proc">--</div>
+                        <div class="metric-label" id="ml-proc">Process</div>
+                        <div class="metric-spark" id="ms-proc-cpu"></div>
+                    </div>
+                </div>
+                <div class="metrics-detail" id="metrics-detail">
+                    <div class="metrics-sparklines" id="metrics-sparklines"></div>
+                    <div class="metrics-network" id="metrics-network"></div>
+                </div>
+            </div>
+
             <!-- Event Type Selector -->
             <div id="event-selector">
                 <label>Event: </label>
@@ -294,6 +343,223 @@
                 <button id="browse-select" class="wiz-btn wiz-btn-primary">Select</button>
                 <button id="browse-cancel" class="wiz-btn">Cancel</button>
             </div>
+        </div>
+    </div>
+
+    <!-- Docs drawer -->
+    <div id="docs-overlay" class="docs-overlay docs-closed"></div>
+    <div id="docs-drawer" class="docs-drawer docs-closed">
+        <div class="docs-header">
+            <h2>Documentation</h2>
+            <span class="docs-version" id="docs-version">v0.4.0</span>
+            <div class="docs-header-spacer"></div>
+            <button id="docs-close" class="docs-close">&times;</button>
+        </div>
+        <div class="docs-body">
+
+            <section class="docs-section">
+                <h3>Overview</h3>
+                <p>PerfLens is a remote Linux performance profiler with a real-time web UI. Drop the agent on any Linux device (ARM or x86), point it at a PID, and watch flame graphs, function tables, <code>perf stat</code> metrics, and line-level annotated source update live in your browser.</p>
+                <p>No frontend frameworks. No pip dependencies. No Docker. Pure Python stdlib on the server, plain HTML/CSS/JS for the UI.</p>
+            </section>
+
+            <section class="docs-section">
+                <h3>Quick Start</h3>
+                <h4>1. Start the Server</h4>
+                <p>On the machine where you want to view profiles:</p>
+                <pre><code>python3 server/perflens_server.py \
+    --source-dir /path/to/source \
+    --binary     /path/to/myprogram \
+    --port       9999 \
+    --http-port  8080</code></pre>
+                <p>Or use a pre-built release tarball:</p>
+                <pre><code>tar xf perflens-server-*-linux-x86_64.tar.gz
+./perflens-server --source-dir /path/to/src --binary /path/to/binary</code></pre>
+                <p>Then open <code>http://localhost:8080</code> in your browser.</p>
+
+                <h4>2. Start the Agent</h4>
+                <p>On the target Linux device you want to profile. Two connection patterns:</p>
+                <pre><code># Option A: Agent connects to server (--server mode)
+python3 perflens_agent.py --server &lt;server-ip&gt;
+./perflens-agent --server &lt;server-ip&gt;          # C agent
+
+# Option B: Agent listens, server connects via UI wizard (--listen mode)
+python3 perflens_agent.py --listen
+./perflens-agent --listen                       # C agent</code></pre>
+                <p>With <code>--server</code>, the agent connects automatically and the UI switches when data arrives. With <code>--listen</code>, use the <strong>Live Debug</strong> wizard to connect to the agent's IP:port.</p>
+                <p>For headless/scripted use (no UI, no server):</p>
+                <pre><code>./perflens-agent --output result.txt --pid &lt;PID&gt;
+./perflens-agent --output - --pid &lt;PID&gt;        # stdout</code></pre>
+            </section>
+
+            <section class="docs-section">
+                <h3>Server Options</h3>
+                <table class="docs-table">
+                    <thead>
+                        <tr><th>Option</th><th>Default</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>--port PORT</code></td><td>9999</td><td>TCP port the agent connects to</td></tr>
+                        <tr><td><code>--http-port PORT</code></td><td>8080</td><td>HTTP port for the web UI</td></tr>
+                        <tr><td><code>--source-dir DIR</code></td><td><code>.</code></td><td>Root of the source tree for line annotation</td></tr>
+                        <tr><td><code>--binary PATH</code></td><td>&mdash;</td><td>Unstripped binary (enables addr2line source mapping)</td></tr>
+                        <tr><td><code>--map PATH</code></td><td>&mdash;</td><td>GNU ld linker map file (optional symbol fallback)</td></tr>
+                        <tr><td><code>--path-map FROM=TO</code></td><td>&mdash;</td><td>Rewrite compile-time paths to local paths</td></tr>
+                        <tr><td><code>--addr2line PATH</code></td><td>&mdash;</td><td>Custom addr2line binary</td></tr>
+                        <tr><td><code>--max-samples N</code></td><td>500000</td><td>Ring buffer cap before oldest samples drop</td></tr>
+                        <tr><td><code>--inline</code> / <code>--no-inline</code></td><td>on</td><td>Enable/disable inline function resolution</td></tr>
+                        <tr><td><code>--import FILE</code></td><td>&mdash;</td><td>Import a perf.data file at startup as a session</td></tr>
+                    </tbody>
+                </table>
+            </section>
+
+            <section class="docs-section">
+                <h3>Agent Modes</h3>
+                <p>The agent has three run modes (pick one):</p>
+                <table class="docs-table">
+                    <thead>
+                        <tr><th>Mode</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>--listen</code></td><td>Daemon: bind port, wait for the server to connect in. Use the UI wizard to connect.</td></tr>
+                        <tr><td><code>--server HOST</code></td><td>Daemon: connect out to server. Reconnects automatically with exponential backoff.</td></tr>
+                        <tr><td><code>--output FILE</code></td><td>Headless: collect once, write to file. Use <code>-</code> for stdout. Requires <code>--pid</code>.</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>Agent Options</h3>
+                <table class="docs-table">
+                    <thead>
+                        <tr><th>Option</th><th>Default</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>--pid PID</code></td><td>&mdash;</td><td>PID of the process to profile (required for <code>--output</code>; set via UI wizard in daemon modes)</td></tr>
+                        <tr><td><code>--port PORT</code></td><td>9999</td><td>TCP port (listen or connect)</td></tr>
+                        <tr><td><code>--frequency HZ</code></td><td>99</td><td>perf record sampling frequency</td></tr>
+                        <tr><td><code>--duration SECS</code></td><td>8</td><td>Length of each collection round</td></tr>
+                        <tr><td><code>--rounds N</code></td><td>1</td><td>Number of rounds (<code>--output</code> mode only, Python agent)</td></tr>
+                    </tbody>
+                </table>
+            </section>
+
+            <section class="docs-section">
+                <h3>UI Walkthrough</h3>
+                <h4>Landing Page</h4>
+                <p>Choose <strong>Live Debug</strong> to connect to an agent via the setup wizard, or <strong>Saved Sessions</strong> to browse previous profiling sessions. If an agent is already running with <code>--server</code>, the UI switches automatically when it connects.</p>
+
+                <h4>Setup Wizard</h4>
+                <ol class="docs-list">
+                    <li><strong>Connect</strong> &mdash; Enter the agent's IP and port (default 9999)</li>
+                    <li><strong>Perf</strong> &mdash; Auto-probes supported perf events and call-graph modes</li>
+                    <li><strong>Process</strong> &mdash; Pick a PID from the running process list or enter manually</li>
+                    <li><strong>Binary</strong> &mdash; (Optional) Path to unstripped binary and source directory for line-level annotation</li>
+                    <li><strong>Options</strong> &mdash; Sampling frequency (Hz) and collection duration (seconds)</li>
+                    <li><strong>Start</strong> &mdash; Review settings and begin profiling</li>
+                </ol>
+
+                <h4>Profiling View</h4>
+                <ul class="docs-list">
+                    <li><strong>Functions tab</strong> &mdash; Ranked table of hottest functions by self% and total%. Click a row to view source.</li>
+                    <li><strong>Source tab</strong> &mdash; Line-level annotated source with heat-colored sample counts.</li>
+                    <li><strong>Flame Graph tab</strong> &mdash; Interactive SVG flame graph. Click to zoom, double-click to reset. Use the search bar to highlight functions.</li>
+                    <li><strong>Sessions tab</strong> &mdash; List of saved sessions. Replay any session or import a <code>perf.data</code> file.</li>
+                </ul>
+
+                <h4>Device Health Strip</h4>
+                <p>When the agent sends system metrics, a collapsible strip shows live CPU, memory, temperature, load, and per-process stats with sparkline charts.</p>
+            </section>
+
+            <section class="docs-section">
+                <h3>Supported Perf Events</h3>
+                <table class="docs-table">
+                    <thead>
+                        <tr><th>Event</th><th>Use</th><th>Mode</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>cycles</code></td><td>CPU time / hot paths</td><td>record + stat</td></tr>
+                        <tr><td><code>instructions</code></td><td>IPC, retired instructions</td><td>record + stat</td></tr>
+                        <tr><td><code>cache-misses</code></td><td>Last-level cache misses</td><td>record + stat</td></tr>
+                        <tr><td><code>cache-references</code></td><td>LLC accesses</td><td>record + stat</td></tr>
+                        <tr><td><code>branch-misses</code></td><td>Branch prediction misses</td><td>record + stat</td></tr>
+                        <tr><td><code>branch-instructions</code></td><td>Total branches</td><td>record + stat</td></tr>
+                        <tr><td><code>page-faults</code></td><td>Minor/major page faults</td><td>stat only</td></tr>
+                        <tr><td><code>context-switches</code></td><td>Scheduling pressure</td><td>stat only</td></tr>
+                        <tr><td><code>cpu-migrations</code></td><td>Inter-CPU movement</td><td>stat only</td></tr>
+                    </tbody>
+                </table>
+                <p>The agent probes each event on the target kernel and only collects the ones that are actually supported.</p>
+            </section>
+
+            <section class="docs-section">
+                <h3>Prerequisites</h3>
+                <table class="docs-table">
+                    <thead>
+                        <tr><th>Component</th><th>Needs</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><strong>Target device</strong></td><td>Linux, <code>perf</code>; Python 3.5+ for Python agent <em>or</em> nothing extra for C agent</td></tr>
+                        <tr><td><strong>Local machine</strong></td><td>Python 3.8+ (or frozen tarball); <code>addr2line</code> and <code>readelf</code> from binutils</td></tr>
+                        <tr><td><strong>Binary</strong></td><td>Compiled with <code>-g</code> (debug symbols), not stripped</td></tr>
+                        <tr><td><strong>Source</strong></td><td>A checkout of the source tree readable from the server machine</td></tr>
+                    </tbody>
+                </table>
+            </section>
+
+            <section class="docs-section">
+                <h3>Troubleshooting</h3>
+                <div class="docs-trouble">
+                    <h4>perf_event_paranoid too high</h4>
+                    <p>The agent warns at startup if <code>/proc/sys/kernel/perf_event_paranoid &gt; 1</code>. Fix with:</p>
+                    <pre><code>sudo sysctl -w kernel.perf_event_paranoid=1</code></pre>
+                </div>
+                <div class="docs-trouble">
+                    <h4>No function names</h4>
+                    <p>Compile with <code>-g</code> and do not strip. <code>file ./myprogram</code> should say <code>not stripped</code> and <code>with debug_info</code>.</p>
+                </div>
+                <div class="docs-trouble">
+                    <h4>No source line mapping</h4>
+                    <p>Check that <code>--binary</code> points at the exact unstripped binary and <code>--source-dir</code> contains the source files. Use <code>--path-map /build/src=/home/me/src</code> when build paths differ.</p>
+                </div>
+                <div class="docs-trouble">
+                    <h4>Agent can't connect</h4>
+                    <p>The server must be reachable on <code>--port</code>. Test with: <code>nc -zv &lt;server-ip&gt; 9999</code></p>
+                </div>
+                <div class="docs-trouble">
+                    <h4>Container: perf record is empty</h4>
+                    <p>Some container environments strip perf capabilities. A system-wide <code>perf record -a</code> usually works as a fallback.</p>
+                </div>
+                <div class="docs-trouble">
+                    <h4>Slow startup (6&ndash;12 seconds)</h4>
+                    <p>Call-graph probing tests <code>fp</code>, <code>dwarf</code>, then <code>lbr</code> in sequence. This is normal on first connection.</p>
+                </div>
+            </section>
+
+            <section class="docs-section">
+                <h3>Architecture</h3>
+                <pre class="docs-arch"><code>[Target device]                    [Local machine]
+  Process (PID)                      Server (perflens_server.py)
+     |                                   |
+  perf record + perf stat                |
+     |                                   |
+  Agent (Python or C)                    |
+     |                                   |
+     +-- TCP (5-byte hdr + zstd) --&gt;  recv + decompress
+                                         |
+                                    parser.py + source_mapper.py
+                                         |
+                                    SSE --&gt; Browser (app.js)</code></pre>
+            </section>
+
+            <section class="docs-section">
+                <h3>Export Options</h3>
+                <p>Use the <strong>Export</strong> button in the header to download:</p>
+                <ul class="docs-list">
+                    <li><strong>Flamegraph SVG</strong> &mdash; The current flame graph as a standalone SVG file</li>
+                    <li><strong>Collapsed Stacks</strong> &mdash; Brendan Gregg format, compatible with FlameGraph tools</li>
+                    <li><strong>Session JSON</strong> &mdash; Full session data including all samples and metadata</li>
+                </ul>
+            </section>
+
         </div>
     </div>
 

@@ -13,6 +13,11 @@ let state = {
     replaySessionId: null,
     flamegraphZoom: null,   // null or {name, node}
     sourceFiles: [],        // [{path, found, total_samples, functions}] for current event
+    metricsSystem: [],      // system metric snapshots (last ~150)
+    metricsProcess: [],     // process metric snapshots
+    metricsNetwork: null,   // latest network snapshot
+    metricsPrevNetwork: null, // previous for rate calc
+    metricsCollapseLevel: 0, // 0=full, 1=compact, 2=minimal
 };
 
 let evtSource = null;
@@ -20,6 +25,91 @@ let flamegraphRects = [];   // parallel to SVG <g> elements for click handling
 let errorTimer = null;
 let fgClickTimer = null;    // single-click vs double-click disambiguation
 let fgContextMenu = null;   // persistent context menu element
+
+// --- Theme ---
+function getTheme() {
+    return document.documentElement.getAttribute('data-theme') || 'dark';
+}
+
+function setTheme(theme) {
+    document.documentElement.setAttribute('data-theme', theme);
+    try { localStorage.setItem('perflens-theme', theme); } catch (e) { /* ignore */ }
+    var label = document.getElementById('theme-label');
+    if (label) label.textContent = theme === 'dark' ? 'Dark' : 'Light';
+}
+
+function initTheme() {
+    var saved = null;
+    try { saved = localStorage.getItem('perflens-theme'); } catch (e) { /* ignore */ }
+    if (saved === 'light' || saved === 'dark') {
+        setTheme(saved);
+    }
+    var btn = document.getElementById('theme-toggle');
+    if (btn) {
+        btn.addEventListener('click', function () {
+            setTheme(getTheme() === 'dark' ? 'light' : 'dark');
+            // Re-render flame graph to pick up new colors
+            var evtData = state.perEvent[state.selectedEvent];
+            if (evtData && evtData.flamegraph) {
+                if (state.flamegraphZoom && state.flamegraphZoom.node) {
+                    renderFlamegraph(state.flamegraphZoom.node, state.flamegraphZoom.node.value);
+                } else {
+                    renderFlamegraph(evtData.flamegraph, evtData.function_summary.total_samples);
+                }
+            }
+            // Re-render sparklines
+            updateMetricsSparklines();
+            if (state.metricsSystem.length > 0) updateMetricsCards(state.metricsSystem[state.metricsSystem.length - 1]);
+            if (state.metricsProcess.length > 0) updateProcessCard(state.metricsProcess[state.metricsProcess.length - 1]);
+            // Re-render function table for bar colors
+            renderCurrentEvent();
+        });
+    }
+}
+
+function themeColor(varName) {
+    return getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
+}
+
+function isDark() { return getTheme() === 'dark'; }
+
+// Init theme immediately
+initTheme();
+
+// --- Docs drawer ---
+function initDocsDrawer() {
+    var btn = document.getElementById('docs-btn');
+    var drawer = document.getElementById('docs-drawer');
+    var overlay = document.getElementById('docs-overlay');
+    var closeBtn = document.getElementById('docs-close');
+    if (!btn || !drawer || !overlay) return;
+
+    function openDocs() {
+        drawer.classList.remove('docs-closed');
+        overlay.classList.remove('docs-closed');
+        // Force reflow before adding visible class for transition
+        void drawer.offsetHeight;
+        drawer.classList.add('visible');
+        overlay.classList.add('visible');
+    }
+
+    function closeDocs() {
+        drawer.classList.remove('visible');
+        overlay.classList.remove('visible');
+        setTimeout(function () {
+            drawer.classList.add('docs-closed');
+            overlay.classList.add('docs-closed');
+        }, 300);
+    }
+
+    btn.addEventListener('click', openDocs);
+    overlay.addEventListener('click', closeDocs);
+    if (closeBtn) closeBtn.addEventListener('click', closeDocs);
+    document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape' && drawer.classList.contains('visible')) closeDocs();
+    });
+}
+initDocsDrawer();
 
 // --- Stat card config ---
 const STAT_ORDER = [
@@ -206,6 +296,30 @@ function connectSSE() {
         updateStatBar();
     });
 
+    evtSource.addEventListener('metrics_system', function(e) {
+        var m = JSON.parse(e.data);
+        state.metricsSystem.push(m);
+        if (state.metricsSystem.length > 150) state.metricsSystem = state.metricsSystem.slice(-150);
+        updateMetricsCards(m);
+        updateMetricsSparklines();
+        showMetricsStrip();
+    });
+
+    evtSource.addEventListener('metrics_process', function(e) {
+        var m = JSON.parse(e.data);
+        state.metricsProcess.push(m);
+        if (state.metricsProcess.length > 150) state.metricsProcess = state.metricsProcess.slice(-150);
+        updateProcessCard(m);
+        updateMetricsSparklines();
+    });
+
+    evtSource.addEventListener('metrics_network', function(e) {
+        var m = JSON.parse(e.data);
+        state.metricsPrevNetwork = state.metricsNetwork;
+        state.metricsNetwork = m;
+        updateNetworkPanel(m, state.metricsPrevNetwork);
+    });
+
     evtSource.addEventListener('agent_connected', (e) => {
         const data = JSON.parse(e.data);
         // Agent connected in (--server mode) — switch to profiling view
@@ -227,6 +341,23 @@ function connectSSE() {
     evtSource.onopen = () => {
         document.getElementById('status-dot').className = 'dot waiting';
         document.getElementById('status-text').textContent = 'Connected to server, waiting for agent...';
+        // Fetch existing metrics history on reconnect
+        fetch('/api/metrics/history?type=system').then(function(r) { return r.json(); })
+            .then(function(h) {
+                if (h && h.length > 0) {
+                    state.metricsSystem = h.slice(-METRICS_MAX);
+                    showMetricsStrip();
+                    updateMetricsCards(state.metricsSystem[state.metricsSystem.length - 1]);
+                    updateMetricsSparklines();
+                }
+            }).catch(function() {});
+        fetch('/api/metrics/history?type=process').then(function(r) { return r.json(); })
+            .then(function(h) {
+                if (h && h.length > 0) {
+                    state.metricsProcess = h.slice(-METRICS_MAX);
+                    updateProcessCard(state.metricsProcess[state.metricsProcess.length - 1]);
+                }
+            }).catch(function() {});
     };
 }
 
@@ -387,11 +518,13 @@ function renderFunctionTable(data) {
         // Self bar
         const selfBarW = Math.max(2, (selfPct / Math.max(maxSelfPct, 1)) * 100);
         const selfHue = Math.max(0, 120 - (selfPct / Math.max(maxSelfPct, 1)) * 120);
-        const selfColor = 'hsl(' + selfHue + ', 70%, 45%)';
+        const selfLight = isDark() ? 45 : 50;
+        const selfColor = 'hsl(' + selfHue + ', 70%, ' + selfLight + '%)';
 
         // Total bar
         const totalBarW = Math.max(2, (totalPct / Math.max(maxTotalPct, 1)) * 100);
-        const totalColor = 'hsl(210, 50%, 40%)';
+        const totalLight = isDark() ? 40 : 50;
+        const totalColor = 'hsl(210, 50%, ' + totalLight + '%)';
 
         const moduleName = f.module ? f.module.split('/').pop() : '';
         return '<tr data-func="' + escapeAttr(f.name) + '">' +
@@ -651,28 +784,32 @@ function renderFlamegraph(data, totalSamples) {
             '</div>';
     }
 
+    const fgLightBase = isDark() ? 45 : 52;
+    const fgSatBoost = isDark() ? 0 : 15;
+    const fgTextColor = themeColor('--fg-text');
+
     let svg = '<svg width="' + width + '" height="' + height + '" xmlns="http://www.w3.org/2000/svg">';
     for (let idx = 0; idx < flamegraphRects.length; idx++) {
         const r = flamegraphRects[idx];
         const inlined = r.inlined;
         const hue = 30 + (hashCode(r.name) % 30);
-        const sat = inlined ? 50 + (hashCode(r.name + 'x') % 15) : 80 + (hashCode(r.name + 'x') % 20);
-        const light = 45 + (hashCode(r.name + 'y') % 15);
-        const color = 'hsl(' + hue + ', ' + sat + '%, ' + light + '%)';
+        const lightAdj = fgLightBase + (hashCode(r.name + 'y') % 15);
+        const satAdj = inlined ? 50 + fgSatBoost + (hashCode(r.name + 'x') % 15) : 80 + fgSatBoost + (hashCode(r.name + 'x') % 20);
+        const color = 'hsl(' + hue + ', ' + Math.min(satAdj, 100) + '%, ' + lightAdj + '%)';
         const y = height - (r.depth + 1) * rowHeight;
         const inlinedAttr = inlined ? ' data-inlined="1"' : '';
         const inlinedTag = inlined ? ' (inlined)' : '';
 
         svg += '<g data-idx="' + idx + '"' + inlinedAttr + ' style="cursor:pointer">';
         svg += '<rect x="' + r.x + '" y="' + y + '" width="' + Math.max(r.w - 1, 1) +
-               '" height="' + (rowHeight - 1) + '" fill="' + color + '" rx="1">' +
+               '" height="' + (rowHeight - 1) + '" fill="' + color + '" rx="2">' +
                '<title>' + escapeHtml(r.name) + inlinedTag + ' (' + r.value + ' samples, ' +
                r.percent.toFixed(1) + '%)</title></rect>';
         if (r.w > 40) {
             const maxChars = Math.floor(r.w / 7);
             const label = r.name.length > maxChars ? r.name.substring(0, maxChars) + '..' : r.name;
             svg += '<text x="' + (r.x + 3) + '" y="' + (y + 13) + '" font-size="' + fontSize +
-                   '" fill="#fff" pointer-events="none">' + escapeHtml(label) + '</text>';
+                   '" fill="' + fgTextColor + '" pointer-events="none">' + escapeHtml(label) + '</text>';
         }
         svg += '</g>';
     }
@@ -878,6 +1015,7 @@ function replaySession(sessionId) {
             state.lastUpdateTime = Date.now();
 
             showReplayBanner(sessionId, data.metadata.timestamp);
+            if (data.metrics) loadReplayMetrics(data.metrics);
             updateEventSelector();
             updateStatBar();
             renderCurrentEvent();
@@ -1637,6 +1775,309 @@ document.addEventListener('keydown', function(e) {
 
 // =====================================================================
 // Init
+// =====================================================================
+// Device Health Metrics
+// =====================================================================
+
+var METRICS_MAX = 150; // ~5 min at 2s interval
+
+function showMetricsStrip() {
+    var strip = document.getElementById('metrics-strip');
+    if (strip && strip.classList.contains('hidden')) {
+        strip.classList.remove('hidden');
+    }
+}
+
+function getMetricSeverity(key, value) {
+    var t = {
+        cpu_pct: {w: 80, c: 95}, mem_pct: {w: 85, c: 95},
+        temp_c: {w: 80, c: 95}, proc_cpu: {w: 80, c: 95},
+        oom_score: {w: 500, c: 800}
+    }[key];
+    if (!t || value == null) return 'normal';
+    if (value >= t.c) return 'critical';
+    if (value >= t.w) return 'warning';
+    return 'normal';
+}
+
+function setSeverity(cardId, key, value) {
+    var card = document.getElementById(cardId);
+    if (!card) return;
+    card.className = 'metric-card';
+    var sev = getMetricSeverity(key, value);
+    if (sev !== 'normal') card.classList.add('severity-' + sev);
+}
+
+function updateMetricsCards(sys) {
+    var cpu = sys.cpu || {};
+    var mem = sys.mem || {};
+    var cpuPct = cpu.overall_pct;
+    var memPct = mem.used_pct;
+
+    var cpuEl = document.getElementById('mv-cpu');
+    if (cpuEl) cpuEl.textContent = cpuPct != null ? cpuPct.toFixed(1) + '%' : '--';
+    setSeverity('mc-cpu', 'cpu_pct', cpuPct);
+
+    var memEl = document.getElementById('mv-mem');
+    if (memEl) memEl.textContent = memPct != null ? memPct.toFixed(1) + '%' : '--';
+    setSeverity('mc-mem', 'mem_pct', memPct);
+
+    var tempEl = document.getElementById('mv-temp');
+    if (tempEl) {
+        if (sys.temp_c != null) {
+            tempEl.textContent = sys.temp_c + '\u00B0C';
+            setSeverity('mc-temp', 'temp_c', sys.temp_c);
+        } else {
+            tempEl.textContent = '--';
+        }
+    }
+
+    var loadEl = document.getElementById('mv-load');
+    if (loadEl && sys.load) loadEl.textContent = sys.load.avg_1m.toFixed(2);
+
+    // Mini sparklines in cards
+    renderCardSparkline('ms-cpu', state.metricsSystem.map(function(s) {
+        return s.cpu ? s.cpu.overall_pct : null;
+    }), themeColor('--spark-cpu'), 0, 100);
+    renderCardSparkline('ms-mem', state.metricsSystem.map(function(s) {
+        return s.mem ? s.mem.used_pct : null;
+    }), themeColor('--spark-mem'), 0, 100);
+    renderCardSparkline('ms-temp', state.metricsSystem.map(function(s) {
+        return s.temp_c != null ? s.temp_c : null;
+    }), themeColor('--spark-temp'), 20, 110);
+    renderCardSparkline('ms-load', state.metricsSystem.map(function(s) {
+        return s.load ? s.load.avg_1m : null;
+    }), themeColor('--spark-load'), 0, null);
+}
+
+function updateProcessCard(proc) {
+    var card = document.getElementById('mc-proc');
+    if (!card) return;
+    var valEl = document.getElementById('mv-proc');
+    var lblEl = document.getElementById('ml-proc');
+    if (valEl) {
+        var parts = [];
+        if (proc.cpu_pct != null) parts.push('CPU:' + proc.cpu_pct.toFixed(1) + '%');
+        if (proc.rss_kb) parts.push('RSS:' + formatKB(proc.rss_kb));
+        valEl.textContent = parts.join(' ') || '--';
+    }
+    if (lblEl) lblEl.textContent = proc.comm ? proc.comm + ' (' + proc.pid + ')' : 'Process';
+    setSeverity('mc-proc', 'proc_cpu', proc.cpu_pct);
+
+    renderCardSparkline('ms-proc-cpu', state.metricsProcess.map(function(p) {
+        return p.cpu_pct;
+    }), themeColor('--spark-proc-cpu'), 0, 100);
+}
+
+function formatKB(kb) {
+    if (kb >= 1048576) return (kb / 1048576).toFixed(1) + 'GB';
+    if (kb >= 1024) return (kb / 1024).toFixed(0) + 'MB';
+    return kb + 'KB';
+}
+
+function formatBytes(b) {
+    if (b >= 1073741824) return (b / 1073741824).toFixed(1) + 'GB';
+    if (b >= 1048576) return (b / 1048576).toFixed(1) + 'MB';
+    if (b >= 1024) return (b / 1024).toFixed(1) + 'KB';
+    return b + 'B';
+}
+
+function formatRate(bps) {
+    if (bps >= 1048576) return (bps / 1048576).toFixed(1) + ' MB/s';
+    if (bps >= 1024) return (bps / 1024).toFixed(1) + ' KB/s';
+    return bps + ' B/s';
+}
+
+// --- Sparkline rendering (single polyline SVG) ---
+
+function renderCardSparkline(containerId, data, color, minVal, maxVal) {
+    var el = document.getElementById(containerId);
+    if (!el) return;
+    var vals = data.filter(function(v) { return v != null; });
+    if (vals.length < 2) { el.innerHTML = ''; return; }
+
+    var w = 120, h = 24;
+    var mn = minVal != null ? minVal : Math.min.apply(null, vals);
+    var mx = maxVal != null ? maxVal : Math.max.apply(null, vals);
+    var range = mx - mn || 1;
+
+    var pts = vals.map(function(v, i) {
+        var x = (i / (vals.length - 1)) * w;
+        var y = h - ((v - mn) / range) * (h - 2) - 1;
+        return x.toFixed(1) + ',' + y.toFixed(1);
+    }).join(' ');
+
+    el.innerHTML = '<svg viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none">' +
+        '<polyline points="' + pts + '" fill="none" stroke="' + color + '" stroke-width="1.5" />' +
+        '</svg>';
+}
+
+function renderSparkline(container, data, opts) {
+    if (!container || !data || data.length < 2) {
+        if (container) container.innerHTML = '';
+        return;
+    }
+    var w = opts.width || 250, h = opts.height || 50;
+    var color = opts.color || themeColor('--spark-cpu') || '#4ade80';
+    var fill = opts.fillColor || (color + '15');
+    var vals = data;
+    var mn = opts.min != null ? opts.min : Math.min.apply(null, vals);
+    var mx = opts.max != null ? opts.max : Math.max.apply(null, vals);
+    var range = mx - mn || 1;
+
+    var pts = vals.map(function(v, i) {
+        var x = (i / (vals.length - 1)) * w;
+        var y = h - 2 - ((v - mn) / range) * (h - 4);
+        return x.toFixed(1) + ',' + y.toFixed(1);
+    });
+    var polyPts = pts.join(' ');
+    var fillPts = '0,' + h + ' ' + polyPts + ' ' + w + ',' + h;
+
+    // Threshold rects
+    var tRects = '';
+    if (opts.thresholds) {
+        opts.thresholds.forEach(function(t) {
+            var ty = h - 2 - ((t.value - mn) / range) * (h - 4);
+            if (ty > 0 && ty < h) {
+                tRects += '<rect x="0" y="0" width="' + w + '" height="' + ty.toFixed(1) +
+                    '" fill="' + t.color + '" />';
+            }
+        });
+    }
+
+    var svg = '<svg viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none">' +
+        tRects +
+        '<polygon points="' + fillPts + '" fill="' + fill + '" />' +
+        '<polyline points="' + polyPts + '" fill="none" stroke="' + color +
+        '" stroke-width="1.5" />' +
+        '</svg>';
+    container.innerHTML = svg;
+}
+
+function updateMetricsSparklines() {
+    var panel = document.getElementById('metrics-sparklines');
+    if (!panel || state.metricsCollapseLevel >= 1) return;
+
+    var warnBg = themeColor('--spark-warn-bg');
+    var critBg = themeColor('--spark-crit-bg');
+    var charts = [
+        { id: 'sp-cpu', label: 'CPU %', data: state.metricsSystem.map(function(s) { return s.cpu ? s.cpu.overall_pct : 0; }),
+          color: themeColor('--spark-cpu'), min: 0, max: 100, thresholds: [{value:80,color:warnBg},{value:95,color:critBg}] },
+        { id: 'sp-mem', label: 'Memory %', data: state.metricsSystem.map(function(s) { return s.mem ? s.mem.used_pct : 0; }),
+          color: themeColor('--spark-mem'), min: 0, max: 100, thresholds: [{value:85,color:warnBg},{value:95,color:critBg}] },
+        { id: 'sp-temp', label: 'Temperature', data: state.metricsSystem.map(function(s) { return s.temp_c != null ? s.temp_c : 0; }),
+          color: themeColor('--spark-temp'), min: 20, max: 110, thresholds: [{value:80,color:warnBg},{value:95,color:critBg}] },
+    ];
+
+    // Add process charts if we have process data
+    if (state.metricsProcess.length > 1) {
+        charts.push({
+            id: 'sp-proc-cpu', label: 'Process CPU %',
+            data: state.metricsProcess.map(function(p) { return p.cpu_pct || 0; }),
+            color: themeColor('--spark-proc-cpu'), min: 0, max: 100, thresholds: [{value:80,color:warnBg}]
+        });
+        charts.push({
+            id: 'sp-proc-rss', label: 'Process RSS (MB)',
+            data: state.metricsProcess.map(function(p) { return (p.rss_kb || 0) / 1024; }),
+            color: themeColor('--spark-proc-rss'), min: 0, max: null
+        });
+    }
+
+    // Build panels (only add new ones, don't rebuild every time)
+    charts.forEach(function(c) {
+        var el = document.getElementById(c.id);
+        if (!el) {
+            var div = document.createElement('div');
+            div.className = 'spark-panel';
+            div.id = c.id;
+            div.innerHTML = '<div class="sp-label">' + c.label + '</div>' +
+                '<div class="sp-chart"></div><div class="sp-hover"></div>';
+            panel.appendChild(div);
+            el = div;
+        }
+        var chartEl = el.querySelector('.sp-chart');
+        renderSparkline(chartEl, c.data.filter(function(v) { return v != null; }), {
+            width: 300, height: 50, color: c.color,
+            min: c.min, max: c.max, thresholds: c.thresholds || []
+        });
+    });
+}
+
+function updateNetworkPanel(current, previous) {
+    var panel = document.getElementById('metrics-network');
+    if (!panel) return;
+
+    var ifaces = current.interfaces || {};
+    var names = Object.keys(ifaces);
+    if (names.length === 0) { panel.innerHTML = ''; return; }
+
+    var html = '';
+    names.forEach(function(name) {
+        var c = ifaces[name];
+        var rateStr = '';
+        if (previous && previous.interfaces && previous.interfaces[name]) {
+            var p = previous.interfaces[name];
+            var dt = current.ts - previous.ts;
+            if (dt > 0) {
+                var rxRate = Math.round((c.rx_bytes - p.rx_bytes) / dt);
+                var txRate = Math.round((c.tx_bytes - p.tx_bytes) / dt);
+                rateStr = ' (' + formatRate(rxRate) + ' in, ' + formatRate(txRate) + ' out)';
+            }
+        }
+        html += '<div class="net-iface"><span class="net-label">' + name + '</span>: ' +
+            'RX ' + formatBytes(c.rx_bytes) + ' (' + c.rx_packets + ' pkts' +
+            (c.rx_drops > 0 ? ', ' + c.rx_drops + ' drops' : '') + ') ' +
+            'TX ' + formatBytes(c.tx_bytes) + ' (' + c.tx_packets + ' pkts)' +
+            rateStr + '</div>';
+    });
+    panel.innerHTML = html;
+}
+
+// Metrics collapse toggle
+(function() {
+    var btn = document.getElementById('metrics-collapse-btn');
+    if (!btn) return;
+    btn.addEventListener('click', function() {
+        var strip = document.getElementById('metrics-strip');
+        if (!strip) return;
+        state.metricsCollapseLevel = (state.metricsCollapseLevel + 1) % 3;
+        strip.classList.remove('compact', 'minimal');
+        if (state.metricsCollapseLevel === 1) {
+            strip.classList.add('compact');
+            btn.innerHTML = '&#9654;'; // right arrow
+        } else if (state.metricsCollapseLevel === 2) {
+            strip.classList.add('minimal');
+            btn.innerHTML = '&#9650;'; // up arrow
+        } else {
+            btn.innerHTML = '&#9660;'; // down arrow
+            updateMetricsSparklines();
+        }
+    });
+})();
+
+// Load metrics on session replay
+function loadReplayMetrics(metrics) {
+    if (!metrics) return;
+    state.metricsSystem = (metrics.system || []).slice(-METRICS_MAX);
+    state.metricsProcess = (metrics.process || []).slice(-METRICS_MAX);
+    if (metrics.network && metrics.network.length > 0) {
+        state.metricsNetwork = metrics.network[metrics.network.length - 1];
+    }
+    if (state.metricsSystem.length > 0) {
+        showMetricsStrip();
+        updateMetricsCards(state.metricsSystem[state.metricsSystem.length - 1]);
+        updateMetricsSparklines();
+    }
+    if (state.metricsProcess.length > 0) {
+        updateProcessCard(state.metricsProcess[state.metricsProcess.length - 1]);
+    }
+    if (state.metricsNetwork) {
+        var prev = metrics.network && metrics.network.length > 1 ?
+            metrics.network[metrics.network.length - 2] : null;
+        updateNetworkPanel(state.metricsNetwork, prev);
+    }
+}
+
 // =====================================================================
 
 fetch('/api/status')
