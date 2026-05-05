@@ -10,4 +10,7 @@ test/sample_workload
 .DS_Store
 *.o
 agent-c/perflens-agent
+agent-c/perflens-agent-*
+test/matrixlab/build/
+test/matrixlab/bin/
 .devices.conf
