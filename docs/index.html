@@ -8,7 +8,15 @@
 <meta property="og:title" content="PerfLens — Real-time Linux Performance Profiler">
 <meta property="og:description" content="Drop the agent on any Linux device, point it at a PID, watch flame graphs and annotated source update live in your browser. Stdlib Python. No framework. No npm.">
 <meta property="og:type" content="website">
-<meta property="og:image" content="hero.svg">
+<meta property="og:url" content="https://harshithsunku.github.io/perflens/">
+<meta property="og:image" content="https://harshithsunku.github.io/perflens/screenshots/07-overview.png">
+<meta property="og:image:width" content="2880">
+<meta property="og:image:height" content="1800">
+<meta property="og:image:alt" content="PerfLens UI showing live perf counters, device health sparklines, and per-core CPU bars">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="PerfLens — Real-time Linux Performance Profiler">
+<meta name="twitter:description" content="Remote Linux performance profiler with a real-time web UI. Flame graphs, function tables, perf stat, and line-level source annotation — streamed live from any ARM/x86 target.">
+<meta name="twitter:image" content="https://harshithsunku.github.io/perflens/screenshots/07-overview.png">
 <meta name="theme-color" content="#0f1117">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -68,6 +76,17 @@
         </div>
     </div>
 </header>
+
+<section class="section" id="live-demo" style="padding-top: 20px;">
+    <div class="container" style="text-align: center;">
+        <div style="border-radius: 14px; overflow: hidden; border: 1px solid var(--border-default); box-shadow: var(--shadow-lg), var(--shadow-glow); max-width: 1000px; margin: 0 auto;">
+            <img src="demo.gif" alt="Live demo: function table updating in real time, flame graph, then source view" loading="lazy" style="display: block; width: 100%;">
+        </div>
+        <p style="color: var(--text-tertiary); font-size: 13.5px; margin-top: 14px;">
+            Sample counts climb live as <code>perf record</code> rounds stream in. Flip to flame graph, click a function, land in source with line-level heat. Zero polling &mdash; Server-Sent Events.
+        </p>
+    </div>
+</section>
 
 <section class="section" id="features">
     <div class="container">

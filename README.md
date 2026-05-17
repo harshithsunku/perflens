@@ -3,7 +3,10 @@
 </p>
 
 <p align="center">
-  <a href="https://harshithsunku.github.io/perflens/"><img alt="docs site" src="https://img.shields.io/badge/docs-perflens.dev-38bdf8?style=flat-square&logo=readthedocs&logoColor=white"/></a>
+  <a href="https://harshithsunku.github.io/perflens/"><img alt="docs site" src="https://img.shields.io/badge/docs-online-38bdf8?style=flat-square&logo=readthedocs&logoColor=white"/></a>
+  <a href="https://github.com/harshithsunku/perflens/actions/workflows/build.yml"><img alt="build" src="https://github.com/harshithsunku/perflens/actions/workflows/build.yml/badge.svg?branch=master"/></a>
+  <a href="https://github.com/harshithsunku/perflens/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/harshithsunku/perflens?style=flat-square&color=blue"/></a>
+  <a href="https://github.com/harshithsunku/perflens/stargazers"><img alt="stars" src="https://img.shields.io/github/stars/harshithsunku/perflens?style=flat-square&color=fbbf24"/></a>
   <a href="#quick-start"><img alt="quick start" src="https://img.shields.io/badge/quick_start-60s-3fb950?style=flat-square"/></a>
   <img alt="license" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square"/>
   <img alt="python" src="https://img.shields.io/badge/python-3.5%2B_agent_%E2%80%A2_3.8%2B_server-58a6ff?style=flat-square"/>
@@ -15,6 +18,11 @@
 <p align="center">
   <strong>📖 <a href="https://harshithsunku.github.io/perflens/">Read the documentation site →</a></strong><br>
   <sub>Hosted on GitHub Pages — features, architecture deep-dive, CLI &amp; HTTP API reference, live UI tour.</sub>
+</p>
+
+<p align="center">
+  <img src="docs/demo.gif" alt="Live demo: function table updating in real time as perf samples stream in, then flame graph, then source view" width="100%"/>
+  <br><sub><em>Sample counts climb live as <code>perf record</code> rounds stream in. Flip to flame graph, click a function, drop into source with line-level heat. Zero polling — Server-Sent Events.</em></sub>
 </p>
 
 # PerfLens
@@ -97,8 +105,8 @@ The server reads the 5 header bytes first, then exactly `LEN` more. Compressed f
 
 ```bash
 # On the machine where you want to view profiles
-tar xf perflens-server-0.1.0-linux-x86_64.tar.gz
-./perflens-server-0.1.0/perflens-server \
+tar xf perflens-server-<ver>-linux-x86_64.tar.gz
+./perflens-server-<ver>/perflens-server \
     --source-dir /path/to/sources \
     --binary     /path/to/unstripped-binary
 # → http://localhost:8080
@@ -106,11 +114,11 @@ tar xf perflens-server-0.1.0-linux-x86_64.tar.gz
 
 ```bash
 # On the target Linux device — Option 1: agent connects to server
-tar xf perflens-agent-0.1.0.tar.gz
-./perflens-agent-0.1.0/perflens-agent --server <server-ip>
+tar xf perflens-agent-<ver>.tar.gz
+./perflens-agent-<ver>/perflens-agent --server <server-ip>
 
 # Option 2: agent listens, server connects to agent
-./perflens-agent-0.1.0/perflens-agent --listen
+./perflens-agent-<ver>/perflens-agent --listen
 # Then use the Live Debug wizard in the UI to connect to <device-ip>:9999
 ```
 
@@ -270,8 +278,8 @@ Output lands in `dist/`:
 
 ```
 dist/
-├── perflens-server-0.1.0.tar.gz
-└── perflens-agent-0.1.0.tar.gz
+├── perflens-server-<ver>.tar.gz
+└── perflens-agent-<ver>.tar.gz
 ```
 
 Drop cross-compiled binaries into the right slots before building to ship a fully self-contained package:
