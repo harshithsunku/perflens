@@ -52,6 +52,17 @@ For UI bugs, a screenshot and the browser console log help.
 4. Keep commit messages tight. Subject ≤ 70 chars, body wraps at 72, focus on the *why*.
 5. Don't add `--no-verify`, `--no-gpg-sign`, or skip CI. If a hook fails, fix the underlying issue.
 
+## Regenerating docs assets
+
+Screenshots and the demo GIF on the docs site (`docs/screenshots/`, `docs/demo.gif`) are author-generated via puppeteer + ffmpeg. The scripts live in [`tools/`](tools/). See [`tools/README.md`](tools/README.md) for the full flow; the short version:
+
+```bash
+npm install
+# (start server + agent + workload — see tools/README.md)
+node tools/capture-screenshots.js
+node tools/capture-demo-gif.js && tools/encode-demo-gif.sh
+```
+
 ## Releasing
 
 Releases are tag-driven: pushing `v<x.y.z>` triggers `.github/workflows/build.yml`, which builds tarballs for Linux x86_64, macOS arm64, Windows x86_64, the Python agent, and the C agent for five architectures, then attaches them to a GitHub Release.
