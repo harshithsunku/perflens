@@ -350,10 +350,23 @@ jobs:
         shell: bash
         run: |
           VERSION="${{ steps.ver.outputs.version }}"
+          # Curated highlights from CHANGELOG.md (section matching the
+          # current version). Empty string if no entry found.
+          CHANGELOG_BODY="$(awk -v v="${VERSION}" '
+            $0 ~ "^## \\[" v "\\]" { capture=1; next }
+            capture && /^## \[/ { exit }
+            capture { print }
+          ' CHANGELOG.md || true)"
           {
             echo "## PerfLens ${VERSION}"
             echo
             echo "Self-contained, portable packages for the PerfLens profiling tool."
+            if [ -n "${CHANGELOG_BODY}" ]; then
+              echo
+              echo "### Highlights"
+              echo
+              echo "${CHANGELOG_BODY}"
+            fi
             echo
             echo "### Downloads"
             echo
