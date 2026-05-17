@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PerfLens — Real-time Linux Performance Profiler</title>
+<meta name="description" content="Remote Linux performance profiler with a real-time web UI. Flame graphs, function tables, perf stat metrics, and line-level annotated source — streamed live from any ARM or x86 Linux target.">
+<meta property="og:title" content="PerfLens — Real-time Linux Performance Profiler">
+<meta property="og:description" content="Drop the agent on any Linux device, point it at a PID, watch flame graphs and annotated source update live in your browser. Stdlib Python. No framework. No npm.">
+<meta property="og:type" content="website">
+<meta property="og:image" content="hero.svg">
+<meta name="theme-color" content="#0f1117">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2338bdf8'/%3E%3Cpath fill='%230f1117' d='M9 8h6.5c3 0 5 1.7 5 4.5 0 2.6-2 4.5-5 4.5H12v6.5H9V8zm3 6.5h3c1.5 0 2.4-.7 2.4-2s-.9-2-2.4-2h-3v4z'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+
+<nav class="topnav">
+    <div class="topnav-inner">
+        <a class="brand" href="./">Perf<span class="a">Lens</span></a>
+        <div class="topnav-links">
+            <a href="index.html#features">Features</a>
+            <a href="index.html#quickstart">Quick start</a>
+            <a href="architecture.html">Architecture</a>
+            <a href="reference.html">Reference</a>
+            <a href="https://github.com/harshithsunku/perflens" target="_blank" rel="noopener">GitHub</a>
+        </div>
+        <div class="topnav-right">
+            <a class="btn btn-ghost" href="https://github.com/harshithsunku/perflens/releases/latest" target="_blank" rel="noopener">Download</a>
+            <button class="theme-btn" id="theme-toggle" aria-label="Toggle theme" title="Toggle light/dark">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="4"></circle>
+                    <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path>
+                </svg>
+            </button>
+        </div>
+    </div>
+</nav>
+
+<header class="hero">
+    <div class="hero-inner">
+        <div>
+            <span class="eyebrow">Open source &middot; MIT</span>
+            <h1>Real-time Linux profiling,<br><span class="grad">straight in your browser.</span></h1>
+            <p class="hero-lede">
+                Drop a tiny agent on any Linux box, point it at a PID, and watch flame
+                graphs, function tables, <code>perf stat</code> metrics, and line-level
+                annotated source update live &mdash; <strong>no frameworks, no Docker,
+                no pip dependencies.</strong>
+            </p>
+            <div class="hero-actions">
+                <a class="btn btn-primary" href="#quickstart">Get started &rarr;</a>
+                <a class="btn btn-ghost" href="https://github.com/harshithsunku/perflens" target="_blank" rel="noopener">View on GitHub</a>
+            </div>
+            <div class="hero-badges">
+                <img alt="license" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square">
+                <img alt="python" src="https://img.shields.io/badge/python-3.5%2B_agent_%E2%80%A2_3.8%2B_server-58a6ff?style=flat-square">
+                <img alt="arch" src="https://img.shields.io/badge/arch-x86__64_%7C_aarch64_%7C_armv7-c084fc?style=flat-square">
+                <img alt="wire" src="https://img.shields.io/badge/wire-zstd_%7C_5--byte_header-d29922?style=flat-square">
+                <img alt="deps" src="https://img.shields.io/badge/deps-stdlib_only-f85149?style=flat-square">
+            </div>
+        </div>
+        <div class="hero-shot">
+            <img src="screenshots/07-overview.png" alt="PerfLens overview: perf counters, device health, sparklines, and per-core CPU all updating live in the browser" loading="eager">
+        </div>
+    </div>
+</header>
+
+<section class="section" id="features">
+    <div class="container">
+        <span class="eyebrow">What it does</span>
+        <h2>One tool, the full <code>perf</code> pipeline.</h2>
+        <p class="section-sub">
+            Remote <code>perf record</code>, real-time SSE streaming, flame graphs,
+            per-thread analysis, and source-level heat &mdash; without leaving the browser.
+        </p>
+        <div class="features">
+            <div class="feature">
+                <div class="feature-icon">&#9889;</div>
+                <h3>Real-time streaming</h3>
+                <p>The agent runs <code>perf record</code> in 8-second rounds. Each round is zstd-compressed and pushed over TCP. Browser sees flame graphs update as new data arrives.</p>
+            </div>
+            <div class="feature">
+                <div class="feature-icon">&#128293;</div>
+                <h3>Interactive flame graphs</h3>
+                <p>Vanilla-JS SVG flame graphs. Zoom into a frame, hover for sample counts, search by function name, breadcrumb back to root.</p>
+            </div>
+            <div class="feature">
+                <div class="feature-icon">&#128270;</div>
+                <h3>Line-level source heat</h3>
+                <p><code>addr2line</code> pipelined in batches of 500. Hot lines are heat-colored red/amber/green so you spot the cost without leaving the file.</p>
+            </div>
+            <div class="feature">
+                <div class="feature-icon">&#129489;&#8205;&#128187;</div>
+                <h3>Per-thread analysis</h3>
+                <p>Filter flame graphs, function tables, and source annotations by thread. A dedicated Threads tab shows per-tid CPU breakdowns and top functions.</p>
+            </div>
+            <div class="feature">
+                <div class="feature-icon">&#128737;</div>
+                <h3>Two agent flavors</h3>
+                <p>Python 3.5+ agent (~600 lines, stdlib only) for hosts with Python. Static C binary (~1.8 MB, vendored zstd) for bare-metal targets &mdash; both wire-protocol-identical.</p>
+            </div>
+            <div class="feature">
+                <div class="feature-icon">&#129518;</div>
+                <h3>Capability probing</h3>
+                <p>Agent enumerates which perf events the kernel actually supports, tries call-graph modes (<code>fp</code> &rarr; <code>dwarf</code> &rarr; <code>lbr</code>), and picks the first that produces non-empty stacks.</p>
+            </div>
+            <div class="feature">
+                <div class="feature-icon">&#9881;</div>
+                <h3>Cross-compile aware</h3>
+                <p>One <code>--toolchain-prefix</code> derives <code>addr2line</code> and <code>readelf</code>. <code>--sysroot</code> resolves shared libraries and source files under a target tree, like <code>perf --symfs</code>.</p>
+            </div>
+            <div class="feature">
+                <div class="feature-icon">&#128190;</div>
+                <h3>Save &amp; replay</h3>
+                <p>Every session is saved as raw chunks on disk. Replay any past session lazily through the UI &mdash; or import a <code>perf.data</code> file directly with <code>--import</code>.</p>
+            </div>
+            <div class="feature">
+                <div class="feature-icon">&#128261;</div>
+                <h3>Two connect modes</h3>
+                <p><code>--server</code>: agent dials out to the server (reconnects with backoff). <code>--listen</code>: agent waits, server connects in through the UI's Live Debug wizard.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="section" style="background: var(--bg-surface); border-top: 1px solid var(--border-subtle); border-bottom: 1px solid var(--border-subtle);">
+    <div class="container">
+        <span class="eyebrow">Tour</span>
+        <h2>What you actually see.</h2>
+        <p class="section-sub">
+            Every screenshot below is captured from the real UI &mdash; a live profile of a
+            multi-threaded test workload, sampled at 199 Hz, replayed straight from the
+            server.
+        </p>
+        <div class="shots">
+            <div class="shot">
+                <img src="screenshots/01-functions.png" alt="Function table sorted by self-percent" loading="lazy">
+                <div class="shot-caption">
+                    <strong>Function table</strong>
+                    Self %, total %, sample counts, module column, live filter.
+                </div>
+            </div>
+            <div class="shot">
+                <img src="screenshots/02-flamegraph.png" alt="Interactive SVG flame graph" loading="lazy">
+                <div class="shot-caption">
+                    <strong>Flame graph</strong>
+                    Zoom, hover, search. Vanilla SVG &mdash; no d3, no bundling.
+                </div>
+            </div>
+            <div class="shot">
+                <img src="screenshots/03-source.png" alt="Annotated source with line-level heat map" loading="lazy">
+                <div class="shot-caption">
+                    <strong>Source heat map</strong>
+                    Lines colored by sample share. Hot line jumps out red.
+                </div>
+            </div>
+            <div class="shot">
+                <img src="screenshots/04-threads.png" alt="Per-thread CPU breakdown and top functions" loading="lazy">
+                <div class="shot-caption">
+                    <strong>Per-thread breakdown</strong>
+                    Each tid with sample count, CPU share, and its top functions.
+                </div>
+            </div>
+            <div class="shot">
+                <img src="screenshots/05-sessions.png" alt="Saved sessions list" loading="lazy">
+                <div class="shot-caption">
+                    <strong>Saved sessions</strong>
+                    Replay anything you've captured before, or import <code>perf.data</code>.
+                </div>
+            </div>
+            <div class="shot">
+                <img src="screenshots/06-functions-light.png" alt="Function table in light theme" loading="lazy">
+                <div class="shot-caption">
+                    <strong>Light theme</strong>
+                    Dark or light &mdash; one click. CSS custom properties, no rebuild.
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="section" id="quickstart">
+    <div class="container">
+        <span class="eyebrow">Quick start</span>
+        <h2>Profiling in under a minute.</h2>
+        <p class="section-sub">
+            Pre-built tarballs are published on every tagged release. Pick the
+            install flavor and follow three steps.
+        </p>
+
+        <div data-tabs>
+            <div class="tabs">
+                <button class="tab-btn active" data-tab="release">Release tarball</button>
+                <button class="tab-btn" data-tab="cagent">C agent (no Python)</button>
+                <button class="tab-btn" data-tab="source">From source</button>
+            </div>
+
+            <div class="tab-panel active" data-tab="release">
+                <div class="steps">
+                    <div class="step">
+                        <div class="step-num">1</div>
+                        <div class="step-body">
+                            <h3>Install the server on the machine where you view profiles</h3>
+                            <p>Pre-built tarballs are available for Linux x86_64, macOS arm64, and Windows x86_64.</p>
+<pre><code>tar xf perflens-server-&lt;ver&gt;-linux-x86_64.tar.gz
+./perflens-server-&lt;ver&gt;/perflens-server \
+    --source-dir /path/to/sources \
+    --binary     /path/to/unstripped-binary
+# UI: http://localhost:8080</code></pre>
+                        </div>
+                    </div>
+                    <div class="step">
+                        <div class="step-num">2</div>
+                        <div class="step-body">
+                            <h3>Drop the agent on the Linux target</h3>
+                            <p>The Python agent is one file; runs on Python 3.5+. Two connect modes are supported.</p>
+<pre><code># Agent dials out to the server (with reconnect/backoff)
+./perflens-agent --server &lt;server-ip&gt;
+
+# Or — agent listens, you connect from the UI's Live Debug wizard
+./perflens-agent --listen</code></pre>
+                        </div>
+                    </div>
+                    <div class="step">
+                        <div class="step-num">3</div>
+                        <div class="step-body">
+                            <h3>Open the UI and start the wizard</h3>
+                            <p>Browse to <code>http://&lt;server-ip&gt;:8080</code>. With <code>--server</code> the UI switches as soon as the agent connects; with <code>--listen</code>, click <strong>Live Debug</strong> and point at the agent.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tab-panel" data-tab="cagent">
+                <div class="steps">
+                    <div class="step">
+                        <div class="step-num">1</div>
+                        <div class="step-body">
+                            <h3>Build the static binary</h3>
+                            <p>Zero runtime dependencies; vendored zstd; cross-compiles from a single Makefile.</p>
+<pre><code>cd agent-c
+make                                    # native x86_64
+make CROSS=aarch64-linux-gnu-           # ARM64 little-endian
+make CROSS=aarch64_be-linux-musl-       # ARM64 big-endian
+make CROSS=arm-linux-gnueabihf-         # ARMv7 little-endian
+make CROSS=armeb-linux-musleabihf-      # ARMv7 big-endian</code></pre>
+                        </div>
+                    </div>
+                    <div class="step">
+                        <div class="step-num">2</div>
+                        <div class="step-body">
+                            <h3>Ship the single file</h3>
+                            <p>The output is one ~1.8 MB binary. No libc surprises, no Python needed.</p>
+<pre><code>scp perflens-agent user@device:/tmp/
+ssh user@device /tmp/perflens-agent --server &lt;server-ip&gt;</code></pre>
+                        </div>
+                    </div>
+                    <div class="step">
+                        <div class="step-num">3</div>
+                        <div class="step-body">
+                            <h3>Open the UI</h3>
+                            <p>The C agent and Python agent speak the same wire protocol &mdash; the server can't tell them apart.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tab-panel" data-tab="source">
+                <div class="steps">
+                    <div class="step">
+                        <div class="step-num">1</div>
+                        <div class="step-body">
+                            <h3>Clone &amp; run the server</h3>
+<pre><code>git clone https://github.com/harshithsunku/perflens.git
+cd perflens
+python3 server/perflens_server.py \
+    --source-dir /path/to/source \
+    --binary     /path/to/myprogram \
+    --port       9999 \
+    --http-port  8080</code></pre>
+                        </div>
+                    </div>
+                    <div class="step">
+                        <div class="step-num">2</div>
+                        <div class="step-body">
+                            <h3>Copy the agent to the target and run</h3>
+<pre><code>scp agent/perflens_agent.py user@device:/tmp/
+ssh user@device python3 /tmp/perflens_agent.py --server &lt;server-ip&gt;</code></pre>
+                        </div>
+                    </div>
+                    <div class="step">
+                        <div class="step-num">3</div>
+                        <div class="step-body">
+                            <h3>Open <code>http://&lt;server-ip&gt;:8080</code></h3>
+                            <p>That's it. The UI auto-switches into the profiling view when samples start flowing.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="note" style="margin-top: 28px;">
+            <strong>Prerequisites.</strong> Target needs Linux + <code>perf</code>;
+            local needs Python 3.8+ (or the frozen tarball), <code>addr2line</code>,
+            and <code>readelf</code> (bundled or on PATH). For source-level
+            annotation, your binary must be compiled with <code>-g</code> and not
+            stripped.
+        </div>
+    </div>
+</section>
+
+<section class="section" style="background: var(--bg-surface); border-top: 1px solid var(--border-subtle); border-bottom: 1px solid var(--border-subtle);">
+    <div class="container">
+        <div class="split-2">
+            <div>
+                <span class="eyebrow">Pipeline</span>
+                <h2>How a sample travels.</h2>
+                <p style="color: var(--text-secondary); margin-bottom: 18px;">
+                    <code>perf record</code> on the target. The agent flattens the trace
+                    with <code>perf script</code>, compresses with zstd, frames with a
+                    5-byte header, and pushes over TCP. The server decompresses, parses
+                    per-event sample lists, builds flame graph trees, pipes addresses
+                    through <code>addr2line</code> in batches, and broadcasts the result
+                    to every connected browser via Server-Sent Events.
+                </p>
+                <p style="color: var(--text-secondary); margin-bottom: 22px;">
+                    Typical zstd ratio on real perf script output: <strong>20&ndash;40&times;</strong>.
+                </p>
+                <a class="btn btn-ghost" href="architecture.html">Read the architecture &rarr;</a>
+            </div>
+            <div class="diagram" style="margin: 0;">
+                <img src="architecture.svg" alt="PerfLens architecture diagram">
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="section">
+    <div class="container">
+        <span class="eyebrow">Design rules</span>
+        <h2>Built to a short list.</h2>
+        <div class="features" style="margin-top: 28px;">
+            <div class="feature">
+                <h3>Stdlib only</h3>
+                <p>No Flask, no npm, no Docker. <code>ThreadingHTTPServer</code> on the server. Plain HTML + vanilla JS + CSS on the UI.</p>
+            </div>
+            <div class="feature">
+                <h3>Defensive parsing</h3>
+                <p><code>perf script</code> format drifts across kernel versions. The parser handles 2.6 through 6.x output with optional <code>[cpu]</code>, <code>pid/tid</code>, and flags fields.</p>
+            </div>
+            <div class="feature">
+                <h3>No over-engineering</h3>
+                <p>If a piece of code doesn't earn its complexity, it gets cut. No frameworks for the sake of frameworks.</p>
+            </div>
+            <div class="feature">
+                <h3>Generic &amp; open</h3>
+                <p>MIT-licensed. No proprietary names, IPs, credentials, or company-specific anything in code, docs, or history.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<footer>
+    <div class="foot-row">
+        <a href="https://github.com/harshithsunku/perflens" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://github.com/harshithsunku/perflens/releases/latest" target="_blank" rel="noopener">Releases</a>
+        <a href="architecture.html">Architecture</a>
+        <a href="reference.html">Reference</a>
+        <a href="https://github.com/harshithsunku/perflens/issues" target="_blank" rel="noopener">Issues</a>
+    </div>
+    <div>Open source under the MIT License.</div>
+</footer>
+
+<script src="assets/docs.js"></script>
+</body>
+</html>

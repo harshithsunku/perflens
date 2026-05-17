@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Reference &middot; PerfLens</title>
+<meta name="description" content="PerfLens reference: server and agent CLI options, HTTP API endpoints, supported perf events, and troubleshooting.">
+<meta name="theme-color" content="#0f1117">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2338bdf8'/%3E%3Cpath fill='%230f1117' d='M9 8h6.5c3 0 5 1.7 5 4.5 0 2.6-2 4.5-5 4.5H12v6.5H9V8zm3 6.5h3c1.5 0 2.4-.7 2.4-2s-.9-2-2.4-2h-3v4z'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+
+<nav class="topnav">
+    <div class="topnav-inner">
+        <a class="brand" href="./">Perf<span class="a">Lens</span></a>
+        <div class="topnav-links">
+            <a href="index.html#features">Features</a>
+            <a href="index.html#quickstart">Quick start</a>
+            <a href="architecture.html">Architecture</a>
+            <a href="reference.html" class="active">Reference</a>
+            <a href="https://github.com/harshithsunku/perflens" target="_blank" rel="noopener">GitHub</a>
+        </div>
+        <div class="topnav-right">
+            <a class="btn btn-ghost" href="https://github.com/harshithsunku/perflens/releases/latest" target="_blank" rel="noopener">Download</a>
+            <button class="theme-btn" id="theme-toggle" aria-label="Toggle theme" title="Toggle light/dark">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="4"></circle>
+                    <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path>
+                </svg>
+            </button>
+        </div>
+    </div>
+</nav>
+
+<div class="layout-with-toc">
+    <main class="prose">
+        <span class="eyebrow">Reference</span>
+        <h1 style="font-size: clamp(32px, 4vw, 44px); margin-bottom: 12px;">Reference</h1>
+        <p class="lead" style="margin-bottom: 36px;">
+            Server and agent flags, HTTP API endpoints, supported perf events, and the
+            usual things to check when something looks off.
+        </p>
+
+        <h2 id="server-cli">Server CLI</h2>
+        <table class="ref">
+            <thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
+            <tbody>
+                <tr><td><code>--port PORT</code></td><td><code>9999</code></td><td>TCP port the agent connects to.</td></tr>
+                <tr><td><code>--http-port PORT</code></td><td><code>8080</code></td><td>HTTP port for the web UI.</td></tr>
+                <tr><td><code>--source-dir DIR</code></td><td><code>.</code></td><td>Root of the source tree for line annotation.</td></tr>
+                <tr><td><code>--binary PATH</code></td><td>&mdash;</td><td>Unstripped binary (enables <code>addr2line</code>).</td></tr>
+                <tr><td><code>--map PATH</code></td><td>&mdash;</td><td>GNU ld linker map file (optional symbol fallback).</td></tr>
+                <tr><td><code>--path-map FROM=TO</code></td><td>&mdash;</td><td>Rewrite compile-time paths (e.g. <code>/build/src=/home/user/src</code>).</td></tr>
+                <tr><td><code>--addr2line PATH</code></td><td>&mdash;</td><td>Custom <code>addr2line</code> binary (overrides bundled and PATH).</td></tr>
+                <tr><td><code>--readelf PATH</code></td><td>&mdash;</td><td>Custom <code>readelf</code> binary.</td></tr>
+                <tr><td><code>--toolchain-prefix PREFIX</code></td><td>&mdash;</td><td>Cross-compile prefix (e.g. <code>arm-linux-gnueabihf-</code>). Derives <code>addr2line</code> + <code>readelf</code>.</td></tr>
+                <tr><td><code>--sysroot DIR</code></td><td>&mdash;</td><td>Sysroot for resolving shared-library modules and source files.</td></tr>
+                <tr><td><code>--max-samples N</code></td><td><code>500000</code></td><td>Ring buffer cap before oldest samples drop.</td></tr>
+                <tr><td><code>--inline</code> / <code>--no-inline</code></td><td>on</td><td>Enable/disable inline-function resolution via <code>addr2line -i</code>.</td></tr>
+                <tr><td><code>--import FILE</code></td><td>&mdash;</td><td>Import a <code>perf.data</code> file at startup as a session.</td></tr>
+            </tbody>
+        </table>
+
+        <h2 id="agent-cli">Agent CLI</h2>
+        <p>The agent runs in one of three modes &mdash; pick one.</p>
+        <table class="ref">
+            <thead><tr><th>Mode</th><th>Description</th></tr></thead>
+            <tbody>
+                <tr><td><code>--listen</code></td><td>Daemon: bind <code>--port</code>, wait for the server to connect in via the UI wizard.</td></tr>
+                <tr><td><code>--server HOST</code></td><td>Daemon: dial out to the server. Reconnects with exponential backoff.</td></tr>
+                <tr><td><code>--output FILE</code></td><td>Headless: collect once, write to file (<code>-</code> for stdout). Requires <code>--pid</code>.</td></tr>
+            </tbody>
+        </table>
+
+        <p>Common options:</p>
+        <table class="ref">
+            <thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
+            <tbody>
+                <tr><td><code>--pid PID</code></td><td>&mdash;</td><td>Process to profile (required for <code>--output</code>; set via UI wizard in daemon modes).</td></tr>
+                <tr><td><code>--port PORT</code></td><td><code>9999</code></td><td>TCP port (listen or connect).</td></tr>
+                <tr><td><code>--frequency HZ</code></td><td><code>99</code></td><td><code>perf record -F</code> sampling frequency.</td></tr>
+                <tr><td><code>--duration SECS</code></td><td><code>8</code></td><td>Length of each collection round.</td></tr>
+                <tr><td><code>--rounds N</code></td><td><code>1</code></td><td>Number of rounds (<code>--output</code> mode, Python agent only).</td></tr>
+            </tbody>
+        </table>
+
+        <h2 id="http-api">HTTP API</h2>
+        <table class="ref">
+            <thead><tr><th>Endpoint</th><th>Method</th><th>Description</th></tr></thead>
+            <tbody>
+                <tr><td><code>/api/status</code></td><td>GET</td><td>Server + agent connection state, sample totals.</td></tr>
+                <tr><td><code>/api/stream</code></td><td>GET</td><td>Server-Sent Events: <code>status</code>, <code>event_types</code>, <code>per_event</code>, <code>perf_stat</code>.</td></tr>
+                <tr><td><code>/api/sessions</code></td><td>GET</td><td>List saved sessions (metadata only).</td></tr>
+                <tr><td><code>/api/sessions/&lt;id&gt;</code></td><td>GET</td><td>Lazy-replay a session (parses raw chunks on demand).</td></tr>
+                <tr><td><code>/api/source?file=&amp;event=&amp;tid=</code></td><td>GET</td><td>Annotated source for a single file (optionally per-thread).</td></tr>
+                <tr><td><code>/api/thread-view?event=&amp;tid=</code></td><td>GET</td><td>Per-thread flame graph + function summary.</td></tr>
+                <tr><td><code>/api/thread-summary?event=</code></td><td>GET</td><td>Thread overview with sample counts and top functions.</td></tr>
+                <tr><td><code>/api/export/flamegraph?event=&amp;session=</code></td><td>GET</td><td>Download SVG flame graph.</td></tr>
+                <tr><td><code>/api/export/session/&lt;id&gt;?format=</code></td><td>GET</td><td>Export session as collapsed-stack text or JSON.</td></tr>
+                <tr><td><code>/api/metrics/current</code></td><td>GET</td><td>Latest device-health snapshot.</td></tr>
+                <tr><td><code>/api/metrics/history?type=&amp;start=&amp;end=</code></td><td>GET</td><td>Time-windowed health history.</td></tr>
+                <tr><td><code>/api/agent/command</code></td><td>POST</td><td>Relay a command to the managed agent (<code>start</code>, <code>stop</code>, <code>pause</code>, <code>resume</code>, <code>configure</code>, <code>list_processes</code>, <code>reprobe</code>).</td></tr>
+                <tr><td><code>/api/config/toolchain</code></td><td>POST</td><td>Set <code>--toolchain-prefix</code> / <code>--sysroot</code> at runtime.</td></tr>
+                <tr><td><code>/api/stop</code></td><td>GET</td><td>Disconnect the active agent (triggers a normal session save).</td></tr>
+                <tr><td><code>/*</code></td><td>GET</td><td>Static files from <code>ui/</code>.</td></tr>
+            </tbody>
+        </table>
+
+        <h2 id="events">Supported perf events</h2>
+        <p>
+            The agent probes each event before use and only emits the ones the kernel
+            actually supports. On hybrid CPUs, events are reported per-cluster &mdash;
+            e.g. <code>cpu_core/cycles/</code> and <code>cpu_atom/cycles/</code>.
+        </p>
+        <table class="ref">
+            <thead><tr><th>Event</th><th>Typical use</th><th>Mode</th></tr></thead>
+            <tbody>
+                <tr><td><code>cycles</code></td><td>CPU time / hot paths</td><td>record + stat</td></tr>
+                <tr><td><code>instructions</code></td><td>IPC, retired instruction count</td><td>record + stat</td></tr>
+                <tr><td><code>cache-misses</code></td><td>Last-level cache misses</td><td>record + stat</td></tr>
+                <tr><td><code>cache-references</code></td><td>LLC accesses</td><td>record + stat</td></tr>
+                <tr><td><code>branch-misses</code></td><td>Branch prediction misses</td><td>record + stat</td></tr>
+                <tr><td><code>branch-instructions</code></td><td>Total branches</td><td>record + stat</td></tr>
+                <tr><td><code>page-faults</code></td><td>Minor/major page faults</td><td>stat only</td></tr>
+                <tr><td><code>context-switches</code></td><td>Scheduling pressure</td><td>stat only</td></tr>
+                <tr><td><code>cpu-migrations</code></td><td>Inter-CPU movement</td><td>stat only</td></tr>
+            </tbody>
+        </table>
+
+        <h2 id="build">Building release packages</h2>
+<pre><code>./build_package.sh              # frozen server + agent (PyInstaller)
+./build_package.sh --server     # server only
+./build_package.sh --agent      # agent only
+./build_package.sh --no-freeze  # skip PyInstaller, ship raw Python</code></pre>
+        <p>Outputs land in <code>dist/</code>:</p>
+<pre><code>dist/
+├── perflens-server-&lt;ver&gt;.tar.gz
+└── perflens-agent-&lt;ver&gt;.tar.gz</code></pre>
+
+        <p>Drop cross-compiled binaries into <code>server/bin/</code> and <code>agent/bin/&lt;arch&gt;/</code> before building for fully self-contained tarballs. The agent launcher auto-prepends the correct arch directory to <code>$PATH</code> based on <code>uname -m</code>; if a bundled binary is missing, agent and server fall back to system tools.</p>
+
+        <h2 id="ci">CI</h2>
+        <p>
+            <code>.github/workflows/build.yml</code> builds the server on three runners
+            (Linux, macOS arm64, Windows), the Python agent once on Linux, and the C
+            agent for five architectures (x86_64, aarch64, aarch64_be, armv7l, armeb).
+            Big-endian targets use musl toolchains from <code>musl.cc</code> since
+            Ubuntu only ships little-endian sysroots. Tagged pushes (<code>v*</code>)
+            create a GitHub Release and attach every tarball.
+        </p>
+
+        <h2 id="trouble">Troubleshooting</h2>
+
+        <h3 id="paranoid"><code>perf_event_paranoid</code> too high</h3>
+        <p>The agent warns at startup if <code>/proc/sys/kernel/perf_event_paranoid &gt; 1</code> and the UI may show a limited event set.</p>
+<pre><code>sudo sysctl -w kernel.perf_event_paranoid=1</code></pre>
+
+        <h3 id="no-symbols">No function names</h3>
+        <p>Compile with <code>-g</code> and don't strip. <code>file ./myprogram</code> should say <code>not stripped</code> and <code>with debug_info</code>.</p>
+
+        <h3 id="no-source">No source line mapping</h3>
+        <p>Double-check <code>--binary</code> points at the exact unstripped binary running on the target and <code>--source-dir</code> contains the source files. If the build root differs from your checkout, rewrite paths with <code>--path-map /build/src=/home/me/src</code>.</p>
+
+        <h3 id="cant-connect">Agent can't connect</h3>
+        <p>The server must be reachable on <code>--port</code>. Sanity-check with <code>nc -zv &lt;server-ip&gt; 9999</code>.</p>
+
+        <h3 id="container">LXC / container: <code>perf record -p &lt;pid&gt;</code> returns empty</h3>
+        <p>Some container environments strip the perf capability set. A system-wide <code>perf record -a</code> usually works; the agent's per-PID mode does not in that case.</p>
+
+        <h3 id="slow-start">Call-graph probing hangs / slow startup</h3>
+        <p>Capability probing tests <code>fp</code>, <code>dwarf</code>, then <code>lbr</code> in sequence &mdash; this adds ~6&ndash;12 seconds on first connection. One-time cost; subsequent rounds skip probing.</p>
+
+        <h2 id="layout">Project layout</h2>
+<pre><code>perflens/
+├── agent/
+│   └── perflens_agent.py         # Python 3.5+ device agent
+├── agent-c/
+│   ├── perflens_agent.c          # C agent, static binary, zero deps
+│   ├── Makefile                  # native + cross-compile targets
+│   └── vendor/zstd/              # vendored zstd amalgamation
+├── server/
+│   ├── perflens_server.py        # TCP listener + ThreadingHTTPServer
+│   ├── parser.py                 # perf script / perf stat parser
+│   ├── source_mapper.py          # addr2line pipeline + path remap
+│   └── bin/                      # bundled zstd / addr2line / readelf
+├── ui/
+│   ├── index.html                # single-page app
+│   ├── app.js                    # all UI logic (vanilla JS)
+│   └── style.css                 # dark + light themes
+├── test/
+│   ├── sample_workload.c
+│   └── Makefile
+├── build_package.sh
+└── .github/workflows/build.yml</code></pre>
+    </main>
+
+    <aside class="toc">
+        <div class="toc-label">On this page</div>
+        <ul>
+            <li><a href="#server-cli">Server CLI</a></li>
+            <li><a href="#agent-cli">Agent CLI</a></li>
+            <li><a href="#http-api">HTTP API</a></li>
+            <li><a href="#events">Perf events</a></li>
+            <li><a href="#build">Build packages</a></li>
+            <li><a href="#ci">CI</a></li>
+            <li><a href="#trouble">Troubleshooting</a></li>
+            <li><a href="#layout">Project layout</a></li>
+        </ul>
+    </aside>
+</div>
+
+<footer>
+    <div class="foot-row">
+        <a href="https://github.com/harshithsunku/perflens" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://github.com/harshithsunku/perflens/releases/latest" target="_blank" rel="noopener">Releases</a>
+        <a href="architecture.html">Architecture</a>
+        <a href="reference.html">Reference</a>
+    </div>
+    <div>Open source under the MIT License.</div>
+</footer>
+
+<script src="assets/docs.js"></script>
+</body>
+</html>

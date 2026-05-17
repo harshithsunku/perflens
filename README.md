@@ -3,12 +3,18 @@
 </p>
 
 <p align="center">
+  <a href="https://harshithsunku.github.io/perflens/"><img alt="docs site" src="https://img.shields.io/badge/docs-perflens.dev-38bdf8?style=flat-square&logo=readthedocs&logoColor=white"/></a>
   <a href="#quick-start"><img alt="quick start" src="https://img.shields.io/badge/quick_start-60s-3fb950?style=flat-square"/></a>
   <img alt="license" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square"/>
   <img alt="python" src="https://img.shields.io/badge/python-3.5%2B_agent_%E2%80%A2_3.8%2B_server-58a6ff?style=flat-square"/>
   <img alt="arch" src="https://img.shields.io/badge/arch-x86__64_%7C_aarch64-c084fc?style=flat-square"/>
   <img alt="wire" src="https://img.shields.io/badge/wire-zstd_%7C_5--byte_header-d29922?style=flat-square"/>
   <img alt="deps" src="https://img.shields.io/badge/deps-stdlib_only-f85149?style=flat-square"/>
+</p>
+
+<p align="center">
+  <strong>📖 <a href="https://harshithsunku.github.io/perflens/">Read the documentation site →</a></strong><br>
+  <sub>Hosted on GitHub Pages — features, architecture deep-dive, CLI &amp; HTTP API reference, live UI tour.</sub>
 </p>
 
 # PerfLens
@@ -349,7 +355,7 @@ These are the rules the project is built to:
 - **No secrets in code** — generic and open-source-friendly
 - **No over-engineering** — if it doesn't earn its complexity, it gets cut
 
-See [`CLAUDE.md`](CLAUDE.md) for the full internal reference.
+See [`CLAUDE.md`](CLAUDE.md) for the full internal reference, or the [documentation site](https://harshithsunku.github.io/perflens/) for the polished version.
 
 ---
 

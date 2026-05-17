@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Architecture &middot; PerfLens</title>
+<meta name="description" content="How PerfLens collects perf data on the target, streams it over zstd-compressed TCP, parses it on the server, and broadcasts results to the browser via SSE.">
+<meta name="theme-color" content="#0f1117">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2338bdf8'/%3E%3Cpath fill='%230f1117' d='M9 8h6.5c3 0 5 1.7 5 4.5 0 2.6-2 4.5-5 4.5H12v6.5H9V8zm3 6.5h3c1.5 0 2.4-.7 2.4-2s-.9-2-2.4-2h-3v4z'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+
+<nav class="topnav">
+    <div class="topnav-inner">
+        <a class="brand" href="./">Perf<span class="a">Lens</span></a>
+        <div class="topnav-links">
+            <a href="index.html#features">Features</a>
+            <a href="index.html#quickstart">Quick start</a>
+            <a href="architecture.html" class="active">Architecture</a>
+            <a href="reference.html">Reference</a>
+            <a href="https://github.com/harshithsunku/perflens" target="_blank" rel="noopener">GitHub</a>
+        </div>
+        <div class="topnav-right">
+            <a class="btn btn-ghost" href="https://github.com/harshithsunku/perflens/releases/latest" target="_blank" rel="noopener">Download</a>
+            <button class="theme-btn" id="theme-toggle" aria-label="Toggle theme" title="Toggle light/dark">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="4"></circle>
+                    <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path>
+                </svg>
+            </button>
+        </div>
+    </div>
+</nav>
+
+<div class="layout-with-toc">
+    <main class="prose">
+        <span class="eyebrow">Internals</span>
+        <h1 style="font-size: clamp(32px, 4vw, 44px); margin-bottom: 12px;">Architecture</h1>
+        <p class="lead" style="margin-bottom: 36px;">
+            One sentence: <strong><code>perf record</code> &rarr; agent &rarr; TCP + zstd
+            &rarr; server &rarr; parser &rarr; source mapper &rarr; SSE &rarr; browser.</strong>
+        </p>
+
+        <div class="diagram">
+            <img src="architecture.svg" alt="PerfLens architecture: target device runs perf record + agent; local machine runs server + parser + source mapper + SSE; browser renders the UI">
+            <div class="diagram-caption">The agent collects on the target. The server parses and broadcasts. The browser does no perf work.</div>
+        </div>
+
+        <h2 id="target">On the target device</h2>
+        <p>
+            The agent is the only thing running on the target. Two flavors ship: a
+            <strong>~600-line Python 3.5+ script</strong> for hosts with Python, and a
+            <strong>single static C binary</strong> with vendored zstd for bare-metal
+            targets. Both speak the same wire protocol &mdash; the server cannot tell
+            which agent connected.
+        </p>
+        <h3 id="probing">Capability probing</h3>
+        <p>
+            Before collecting anything, the agent inspects the kernel:
+        </p>
+        <ul>
+            <li>Reads <code>/proc/sys/kernel/perf_event_paranoid</code> and warns if &gt; 1.</li>
+            <li>Enumerates candidate events (<code>cycles</code>, <code>instructions</code>, <code>cache-misses</code>, <code>cache-references</code>, <code>branch-misses</code>, <code>branch-instructions</code>, <code>page-faults</code>, <code>context-switches</code>, <code>cpu-migrations</code>) and keeps only the ones <code>perf record</code>/<code>perf stat</code> actually accepts.</li>
+            <li>Tries call-graph modes in order: <code>fp</code> &rarr; <code>dwarf</code> &rarr; <code>lbr</code>, picks the first that produces non-empty stacks.</li>
+            <li>Probes whether <code>perf script -F</code> is supported (perf &ge; ~3.12) and falls back to the default output format on older kernels.</li>
+        </ul>
+        <p>
+            This costs roughly <strong>6&ndash;12 seconds on first connection</strong>
+            and is a one-time hit.
+        </p>
+
+        <h3 id="rounds">Collection rounds</h3>
+        <p>
+            Each round runs <code>perf record</code> and <code>perf stat</code> in parallel for
+            <em>N</em> seconds (default 8), then <code>perf script</code> flattens the trace.
+            The result &mdash; perf script text optionally followed by a
+            <code>### PERF_STAT ###</code> section &mdash; is compressed with
+            <code>zstd -1</code> (system or vendored) and pushed over TCP with a 5-byte
+            header. Typical compression: <strong>20&ndash;40&times;</strong>.
+        </p>
+
+        <h3 id="health">Health metrics</h3>
+        <p>
+            Independent of the perf pipeline, the agent collects device health every
+            2&nbsp;seconds &mdash; CPU per-core, memory, load, temperature, process
+            stats, network bytes &mdash; and streams them as JSON frames with
+            flag&nbsp;<code>4</code>. The browser renders sparklines, gauges, and
+            per-core CPU bars without affecting the perf collection.
+        </p>
+
+        <h2 id="local">On the local machine</h2>
+        <p>
+            One Python process owns everything on the local side. A
+            <code>ThreadingHTTPServer</code> serves the UI and the JSON API; a
+            separate thread owns the single TCP listener that accepts agent
+            connections.
+        </p>
+
+        <h3 id="parser">Parser</h3>
+        <p>
+            <code>parser.py</code> turns <code>perf script</code> output into:
+        </p>
+        <ul>
+            <li><strong>Per-event sample lists</strong> &mdash; one bucket per event type.</li>
+            <li><strong>Function summaries</strong> with self %, total %, sample counts, module column.</li>
+            <li><strong>Flame graph trees</strong> &mdash; collapsed call stacks aggregated into a value-weighted tree.</li>
+            <li><strong>Thread index</strong> with per-tid sample counts and top functions, extracted from the <code>pid/tid</code> and <code>comm</code> fields.</li>
+        </ul>
+        <p>
+            The parser is defensive on purpose. The <code>perf script</code> format
+            drifts across kernel versions; the optional <code>[cpu]</code>,
+            <code>pid/tid</code>, and flags fields appear in different combinations on
+            2.6, 3.x, 4.x, 5.x, and 6.x. The parser handles all of them and silently
+            tolerates lines it doesn't recognize.
+        </p>
+
+        <h3 id="mapper">Source mapper</h3>
+        <p>
+            <code>source_mapper.py</code> pipelines sample addresses through
+            <code>addr2line -f</code> (or <code>-fi</code> when <code>--inline</code> is
+            on) in batches of 500. A single mapper is created at server startup and
+            shared across requests &mdash; no per-request forking.
+        </p>
+        <p>
+            Lookups feed a heat map: each source line gets a sample count, and the UI
+            colors it red &rarr; amber &rarr; green by share of the file's total. With
+            <code>--toolchain-prefix</code>, the same flag derives the right
+            <code>addr2line</code> and <code>readelf</code> for a cross-compiled target
+            in one step. <code>--sysroot</code> resolves shared-library module paths
+            and source files under a target tree, similar to <code>perf --symfs</code>.
+        </p>
+
+        <h3 id="sessions">Sessions</h3>
+        <p>
+            Every agent connection becomes a session. Raw chunks are written to
+            disk under <code>sessions/&lt;timestamp&gt;_&lt;agent&gt;/</code> as the
+            agent streams them; metadata (events, sample totals, perf stat values,
+            platform) is written when the connection closes.
+        </p>
+        <p>
+            Replay is lazy: the UI hits <code>/api/sessions/&lt;id&gt;</code> only when
+            you click a session, and the server re-parses the raw chunks on demand.
+            A standalone <code>perf.data</code> file can also be imported at startup
+            with <code>--import</code> &mdash; the server runs <code>perf script</code>
+            against it once and exposes the result as a session.
+        </p>
+
+        <h2 id="wire">Wire protocol</h2>
+        <p>
+            Every message is a 5-byte header followed by a payload of exactly
+            <code>LEN</code> bytes.
+        </p>
+
+        <div class="diagram">
+            <img src="wire-protocol.svg" alt="Wire protocol: 4-byte length + 1-byte flag + payload">
+        </div>
+
+<pre><code>header = struct.pack('!IB', len(payload), compression_flag)
+sock.sendall(header + payload)</code></pre>
+
+        <table class="ref">
+            <thead><tr><th>Field</th><th>Size</th><th>Meaning</th></tr></thead>
+            <tbody>
+                <tr><td><code>LEN</code></td><td>4 bytes (uint32, big-endian)</td><td>Payload length in bytes</td></tr>
+                <tr><td><code>FLAG</code></td><td>1 byte (uint8)</td><td>See flag table below</td></tr>
+                <tr><td><code>PAYLOAD</code></td><td><code>LEN</code> bytes</td><td>Frame body (perf data, JSON, etc.)</td></tr>
+            </tbody>
+        </table>
+
+        <h3 id="flags">Flag values</h3>
+        <table class="ref">
+            <thead><tr><th>Flag</th><th>Direction</th><th>Payload</th></tr></thead>
+            <tbody>
+                <tr><td><code>0</code></td><td>agent &rarr; server</td><td>Raw UTF-8 perf script output</td></tr>
+                <tr><td><code>1</code></td><td>agent &rarr; server</td><td>Zstd-compressed perf script output</td></tr>
+                <tr><td><code>2</code></td><td>server &rarr; agent</td><td>Command request (JSON): <code>start</code>, <code>stop</code>, <code>pause</code>, <code>resume</code>, <code>configure</code>, <code>list_processes</code>, <code>reprobe</code>, &hellip;</td></tr>
+                <tr><td><code>3</code></td><td>agent &rarr; server</td><td>Command response (JSON)</td></tr>
+                <tr><td><code>4</code></td><td>agent &rarr; server</td><td>Health metrics (JSON, every 2&nbsp;s)</td></tr>
+            </tbody>
+        </table>
+
+        <p>
+            Payloads with flag <code>1</code> are decompressed with <code>zstd -d -c</code>.
+            Perf data payloads carry plain <code>perf script</code> text, optionally
+            followed by a <code>### PERF_STAT ###</code> section the parser splits out.
+        </p>
+
+        <h3 id="connect-modes">Two connection modes</h3>
+        <p>
+            The agent can be the connector or the listener &mdash; the wire protocol
+            is the same either way.
+        </p>
+        <ul>
+            <li><code>--server &lt;host&gt;</code> &mdash; daemon mode: agent dials the server. Reconnects with exponential backoff if dropped. Useful on devices that sit behind NAT or restart often.</li>
+            <li><code>--listen</code> &mdash; daemon mode: agent binds a port and waits. The server reaches out via the UI's <strong>Live Debug</strong> wizard. Useful when you want to discover targets from the UI.</li>
+            <li><code>--output FILE</code> &mdash; headless: collect once, write to file (<code>-</code> for stdout). Requires <code>--pid</code>.</li>
+        </ul>
+
+        <h2 id="broadcast">Broadcast to the browser</h2>
+        <p>
+            The server pushes parsed state to the UI through a Server-Sent Events
+            stream at <code>/api/stream</code>. Four event types:
+            <code>status</code>, <code>event_types</code>, <code>per_event</code>,
+            <code>perf_stat</code>. The browser holds the connection open and rerenders
+            whenever a new round lands. There is no polling.
+        </p>
+        <p>
+            Per-thread analysis, source views, and exports are pull-based: the UI hits
+            <code>/api/thread-view</code>, <code>/api/source</code>, or the
+            <code>/api/export/&hellip;</code> endpoints on demand &mdash; see the
+            <a href="reference.html">Reference</a> for the full list.
+        </p>
+
+        <h2 id="limits">Known limits</h2>
+        <ul>
+            <li>One agent connection at a time. A new agent replaces the current one.</li>
+            <li><code>perf_event_paranoid &gt; 1</code> may restrict which events the kernel allows. The agent warns at startup.</li>
+            <li>Some container environments strip the perf capability set, so <code>perf record -p &lt;pid&gt;</code> returns empty. A system-wide <code>perf record -a</code> usually works as a fallback.</li>
+            <li>Source mapping requires a binary compiled with <code>-g</code> and not stripped.</li>
+            <li>The source view renders up to ~2000 lines (or hottest line &plusmn; 100, whichever is larger).</li>
+        </ul>
+    </main>
+
+    <aside class="toc">
+        <div class="toc-label">On this page</div>
+        <ul>
+            <li><a href="#target">On the target</a></li>
+            <li><a href="#probing">Capability probing</a></li>
+            <li><a href="#rounds">Collection rounds</a></li>
+            <li><a href="#health">Health metrics</a></li>
+            <li><a href="#local">On the local machine</a></li>
+            <li><a href="#parser">Parser</a></li>
+            <li><a href="#mapper">Source mapper</a></li>
+            <li><a href="#sessions">Sessions</a></li>
+            <li><a href="#wire">Wire protocol</a></li>
+            <li><a href="#flags">Flag values</a></li>
+            <li><a href="#connect-modes">Connect modes</a></li>
+            <li><a href="#broadcast">Broadcast</a></li>
+            <li><a href="#limits">Known limits</a></li>
+        </ul>
+    </aside>
+</div>
+
+<footer>
+    <div class="foot-row">
+        <a href="https://github.com/harshithsunku/perflens" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://github.com/harshithsunku/perflens/releases/latest" target="_blank" rel="noopener">Releases</a>
+        <a href="architecture.html">Architecture</a>
+        <a href="reference.html">Reference</a>
+    </div>
+    <div>Open source under the MIT License.</div>
+</footer>
+
+<script src="assets/docs.js"></script>
+</body>
+</html>
