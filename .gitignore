@@ -14,3 +14,4 @@ agent-c/perflens-agent-*
 test/matrixlab/build/
 test/matrixlab/bin/
 .devices.conf
+node_modules/
