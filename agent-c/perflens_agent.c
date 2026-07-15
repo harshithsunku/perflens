@@ -1556,6 +1556,7 @@ struct agent_state {
     int metrics_enabled;
     int metrics_interval;       /* seconds */
     int metrics_network;        /* include network stats */
+    int metrics_disk;           /* include disk I/O stats (off by default) */
 
     /* Command queue */
     struct cmd_queue cmdq;
@@ -1580,6 +1581,7 @@ static void agent_state_init(struct agent_state *a)
     a->metrics_enabled = 1;
     a->metrics_interval = 2;
     a->metrics_network = 1;
+    a->metrics_disk = 0;   /* extra cost on embedded targets — opt-in */
     cmdq_init(&a->cmdq);
 }
 
@@ -2077,6 +2079,102 @@ static int collect_network_metrics(metrics_collector_t *mc, char *buf, size_t bu
     return off;
 }
 
+/* Disk I/O (opt-in via configure_metrics {"disk": true}): cumulative
+ * counters from /proc/diskstats plus per-process /proc/<pid>/io. The
+ * server/UI computes rates from consecutive snapshots, like network. */
+static int collect_disk_metrics(metrics_collector_t *mc, char *buf, size_t bufsz)
+{
+    FILE *f = fopen("/proc/diskstats", "r");
+    if (!f) return -1;
+
+    char line[512];
+    int off = snprintf(buf, bufsz,
+                       "{\"ts\":%.3f,\"type\":\"disk\",\"devices\":{",
+                       get_timestamp());
+    int count = 0;
+    char included[8][64];  /* whole-disk names already emitted */
+
+    while (fgets(line, sizeof(line), f) && count < 8) {
+        unsigned int major, minor;
+        char name[64];
+        unsigned long rd_ios, rd_merges, rd_sectors, rd_ms;
+        unsigned long wr_ios, wr_merges, wr_sectors, wr_ms;
+        int n = sscanf(line, "%u %u %63s %lu %lu %lu %lu %lu %lu %lu %lu",
+                       &major, &minor, name,
+                       &rd_ios, &rd_merges, &rd_sectors, &rd_ms,
+                       &wr_ios, &wr_merges, &wr_sectors, &wr_ms);
+        if (n < 11) continue;
+        if (strncmp(name, "loop", 4) == 0 || strncmp(name, "ram", 3) == 0 ||
+            strncmp(name, "zram", 4) == 0)
+            continue;
+        if (rd_ios == 0 && wr_ios == 0) continue;  /* never-used device */
+        /* Skip partitions: the kernel lists the whole disk first (sda
+         * before sda1, mmcblk0 before mmcblk0p1), so anything prefixed
+         * by an already-included name is a partition of it. */
+        int is_part = 0;
+        for (int i = 0; i < count; i++) {
+            if (strncmp(name, included[i], strlen(included[i])) == 0) {
+                is_part = 1;
+                break;
+            }
+        }
+        if (is_part) continue;
+
+        char entry[256];
+        int elen = snprintf(entry, sizeof(entry),
+            "%s\"%s\":{\"reads\":%lu,\"read_bytes\":%llu,"
+            "\"writes\":%lu,\"write_bytes\":%llu,"
+            "\"read_ms\":%lu,\"write_ms\":%lu}",
+            count > 0 ? "," : "", name,
+            rd_ios, (unsigned long long)rd_sectors * 512,
+            wr_ios, (unsigned long long)wr_sectors * 512,
+            rd_ms, wr_ms);
+        if (elen < 0 || (size_t)elen >= sizeof(entry))
+            continue;
+        if ((size_t)off + (size_t)elen + 256 > bufsz)
+            break;
+        memcpy(buf + off, entry, (size_t)elen);
+        off += elen;
+        snprintf(included[count], sizeof(included[count]), "%s", name);
+        count++;
+    }
+    fclose(f);
+    if (count == 0) return -1;
+
+    off += snprintf(buf + off, bufsz - off, "}");
+
+    /* Per-process I/O — readable only for same-uid processes (or root) */
+    if (mc->pid > 0) {
+        char path[64];
+        snprintf(path, sizeof(path), "/proc/%d/io", mc->pid);
+        FILE *pf = fopen(path, "r");
+        if (pf) {
+            unsigned long long rb = 0, wb = 0, syscr = 0, syscw = 0;
+            while (fgets(line, sizeof(line), pf)) {
+                if (sscanf(line, "read_bytes: %llu", &rb) == 1) continue;
+                if (sscanf(line, "write_bytes: %llu", &wb) == 1) continue;
+                if (sscanf(line, "syscr: %llu", &syscr) == 1) continue;
+                if (sscanf(line, "syscw: %llu", &syscw) == 1) continue;
+            }
+            fclose(pf);
+            char entry[192];
+            int elen = snprintf(entry, sizeof(entry),
+                ",\"proc\":{\"read_bytes\":%llu,\"write_bytes\":%llu,"
+                "\"syscr\":%llu,\"syscw\":%llu}",
+                rb, wb, syscr, syscw);
+            if (elen > 0 && (size_t)elen < sizeof(entry) &&
+                (size_t)off + (size_t)elen + 2 <= bufsz) {
+                memcpy(buf + off, entry, (size_t)elen);
+                off += elen;
+            }
+        }
+    }
+
+    memcpy(buf + off, "}", 2);
+    off += 1;
+    return off;
+}
+
 static void *metrics_thread_fn(void *arg)
 {
     struct agent_state *a = (struct agent_state *)arg;
@@ -2088,11 +2186,12 @@ static void *metrics_thread_fn(void *arg)
 
     while (!g_shutdown && !a->session_done) {
         /* Snapshot config + pid under the lock once per tick */
-        int enabled, interval, network, pid = 0;
+        int enabled, interval, network, disk, pid = 0;
         pthread_mutex_lock(&a->state_lock);
         enabled  = a->metrics_enabled;
         interval = a->metrics_interval;
         network  = a->metrics_network;
+        disk     = a->metrics_disk;
         if (a->state == AGENT_PROFILING || a->state == AGENT_PAUSED)
             pid = a->pid;
         pthread_mutex_unlock(&a->state_lock);
@@ -2128,6 +2227,14 @@ static void *metrics_thread_fn(void *arg)
         /* Network metrics */
         if (mc.include_network) {
             len = collect_network_metrics(&mc, buf, sizeof(buf));
+            if (len > 0) {
+                if (agent_send_metrics(a, buf, len) < 0) break;
+            }
+        }
+
+        /* Disk I/O metrics (opt-in) */
+        if (disk) {
+            len = collect_disk_metrics(&mc, buf, sizeof(buf));
             if (len > 0) {
                 if (agent_send_metrics(a, buf, len) < 0) break;
             }
@@ -2752,20 +2859,24 @@ static void cmd_configure_metrics(struct agent_state *a, const char *cmd_id,
             a->metrics_interval = val;
         if (json_get_bool(args, "network", &val) == 0)
             a->metrics_network = val;
+        if (json_get_bool(args, "disk", &val) == 0)
+            a->metrics_disk = val;
     }
     int enabled  = a->metrics_enabled;
     int interval = a->metrics_interval;
     int network  = a->metrics_network;
+    int disk     = a->metrics_disk;
     pthread_mutex_unlock(&a->state_lock);
 
     char resp[256];
     snprintf(resp, sizeof(resp),
         "{\"id\":\"%s\",\"ok\":true,\"metrics_enabled\":%s,"
-        "\"interval\":%d,\"network\":%s}",
+        "\"interval\":%d,\"network\":%s,\"disk\":%s}",
         cmd_id,
         enabled ? "true" : "false",
         interval,
-        network ? "true" : "false");
+        network ? "true" : "false",
+        disk ? "true" : "false");
     agent_send_response(a, resp);
 }
 

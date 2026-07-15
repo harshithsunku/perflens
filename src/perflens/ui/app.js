@@ -22,6 +22,8 @@ let state = {
     metricsProcess: [],     // process metric snapshots
     metricsNetwork: null,   // latest network snapshot
     metricsPrevNetwork: null, // previous for rate calc
+    metricsDisk: null,      // latest disk I/O snapshot (opt-in agent feature)
+    metricsPrevDisk: null,  // previous for rate calc
     metricsCollapseLevel: 0, // 0=full, 1=compact, 2=minimal
 };
 
@@ -190,10 +192,10 @@ function escapeAttr(s) {
 
 function formatNumber(n) {
     if (n === undefined || n === null) return '--';
-    if (typeof n === 'number' && !Number.isInteger(n)) return n.toFixed(2);
     if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
     if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
     if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+    if (typeof n === 'number' && !Number.isInteger(n)) return n.toFixed(2);
     return String(n);
 }
 
@@ -406,6 +408,13 @@ function connectSSE() {
         updateNetworkPanel(m, state.metricsPrevNetwork);
     });
 
+    evtSource.addEventListener('metrics_disk', function(e) {
+        var m = JSON.parse(e.data);
+        state.metricsPrevDisk = state.metricsDisk;
+        state.metricsDisk = m;
+        updateDiskPanel(m, state.metricsPrevDisk);
+    });
+
     evtSource.addEventListener('agent_connected', (e) => {
         const data = JSON.parse(e.data);
         state.platform = data.platform || {};
@@ -414,6 +423,7 @@ function connectSSE() {
             document.getElementById('view-landing').classList.contains('active')) {
             showProfilingView();
         }
+        refreshControlBar();
     });
 
     evtSource.onerror = () => {
@@ -1149,6 +1159,7 @@ function renderFlamegraph(data, totalSamples) {
             state.flamegraphZoomPath = [];
             state.flamegraphZoomNames = [];
             state.selectedTid = null;
+            document.getElementById('thread-filter').value = '';
             const evtData = state.perEvent[state.selectedEvent];
             if (evtData) renderFlamegraph(evtData.flamegraph, evtData.function_summary.total_samples);
         });
@@ -1966,6 +1977,35 @@ function hideControlBar() {
     document.getElementById('control-bar').classList.add('hidden');
 }
 
+// Sync the control bar with the agent's actual state (page reload, or a
+// --server agent that was already profiling when the UI attached).
+function refreshControlBar() {
+    fetch('/api/agent/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cmd: 'status', timeout: 10 }),
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (!data.ok || !data.state) return;
+        if (data.state === 'profiling' || data.state === 'paused') {
+            showControlBar(data.pid, '');
+            if (data.pid) wizardData.pid = data.pid;
+            if (data.frequency) wizardData.frequency = data.frequency;
+            if (data.duration) wizardData.duration = data.duration;
+            if (data.state === 'paused') {
+                document.getElementById('ctrl-state').textContent = 'Paused';
+                document.getElementById('ctrl-state').className = 'paused';
+                document.getElementById('ctrl-pause').classList.add('hidden');
+                document.getElementById('ctrl-resume').classList.remove('hidden');
+            }
+        } else {
+            hideControlBar();
+        }
+    })
+    .catch(function() {});
+}
+
 document.getElementById('ctrl-pause').addEventListener('click', function() {
     fetch('/api/agent/command', {
         method: 'POST',
@@ -2343,12 +2383,37 @@ function updateMetricsSparklines() {
                 '<div class="sp-chart"></div><div class="sp-hover"></div>';
             panel.appendChild(div);
             el = div;
+            _wireSparklineHover(el);
         }
+        el._sparkData = c.data.filter(function(v) { return v != null; });
         var chartEl = el.querySelector('.sp-chart');
-        renderSparkline(chartEl, c.data.filter(function(v) { return v != null; }), {
+        renderSparkline(chartEl, el._sparkData, {
             width: 300, height: 50, color: c.color,
             min: c.min, max: c.max, thresholds: c.thresholds || []
         });
+    });
+}
+
+// Hover readout: show the value under the cursor in the panel's .sp-hover.
+// Samples arrive on the agent's metrics interval (default 2s), newest last.
+function _wireSparklineHover(panelEl) {
+    var chartEl = panelEl.querySelector('.sp-chart');
+    var hoverEl = panelEl.querySelector('.sp-hover');
+    if (!chartEl || !hoverEl) return;
+    chartEl.addEventListener('mousemove', function(ev) {
+        var data = panelEl._sparkData || [];
+        if (data.length < 2) return;
+        var r = chartEl.getBoundingClientRect();
+        if (r.width <= 0) return;
+        var idx = Math.round((ev.clientX - r.left) / r.width * (data.length - 1));
+        idx = Math.max(0, Math.min(data.length - 1, idx));
+        var v = data[idx];
+        var agoSec = (data.length - 1 - idx) * 2;
+        hoverEl.textContent = (typeof v === 'number' ? v.toFixed(1) : v) +
+            (agoSec > 0 ? '  (' + agoSec + 's ago)' : '  (now)');
+    });
+    chartEl.addEventListener('mouseleave', function() {
+        hoverEl.textContent = '';
     });
 }
 
@@ -2388,6 +2453,116 @@ function updateNetworkPanel(current, previous) {
     });
     panel.innerHTML = html;
 }
+
+// --- Disk I/O panel (agent sends cumulative counters; rates are deltas) ---
+
+function updateDiskPanel(current, previous) {
+    var panel = document.getElementById('metrics-disk');
+    if (!panel) return;
+
+    var devices = current.devices || {};
+    var names = Object.keys(devices);
+    if (names.length === 0 && !current.proc) { panel.innerHTML = ''; return; }
+
+    var dt = previous ? current.ts - previous.ts : 0;
+    var html = '';
+
+    names.forEach(function(name) {
+        var c = devices[name];
+        var rateStr = '';
+        if (dt > 0 && previous.devices && previous.devices[name]) {
+            var p = previous.devices[name];
+            var rdRate = Math.max(0, Math.round((c.read_bytes - p.read_bytes) / dt));
+            var wrRate = Math.max(0, Math.round((c.write_bytes - p.write_bytes) / dt));
+            var iops = Math.max(0, Math.round(
+                ((c.reads - p.reads) + (c.writes - p.writes)) / dt));
+            rateStr = ' (' + formatRate(rdRate) + ' read, ' + formatRate(wrRate) +
+                ' write, ' + iops + ' IOPS)';
+        }
+        html += '<div class="net-iface"><span class="net-label">' + escapeHtml(name) +
+            '</span>: read ' + formatBytes(c.read_bytes) + ' / write ' +
+            formatBytes(c.write_bytes) + rateStr + '</div>';
+    });
+
+    if (current.proc) {
+        var pr = current.proc;
+        var procRate = '';
+        if (dt > 0 && previous && previous.proc) {
+            var pp = previous.proc;
+            procRate = ' (' + formatRate(Math.max(0, Math.round((pr.read_bytes - pp.read_bytes) / dt))) +
+                ' read, ' + formatRate(Math.max(0, Math.round((pr.write_bytes - pp.write_bytes) / dt))) +
+                ' write)';
+        }
+        html += '<div class="net-iface"><span class="net-label">process</span>: read ' +
+            formatBytes(pr.read_bytes) + ' / write ' + formatBytes(pr.write_bytes) +
+            procRate + '</div>';
+    }
+
+    panel.innerHTML = html;
+}
+
+// --- Metrics settings popover (drives the agent's configure_metrics) ---
+
+(function initMetricsSettings() {
+    var btn = document.getElementById('metrics-settings-btn');
+    var pop = document.getElementById('metrics-settings-pop');
+    if (!btn || !pop) return;
+
+    btn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        pop.classList.toggle('hidden');
+    });
+    pop.addEventListener('click', function(e) { e.stopPropagation(); });
+    document.addEventListener('click', function() { pop.classList.add('hidden'); });
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') pop.classList.add('hidden');
+    });
+
+    document.getElementById('msp-apply').addEventListener('click', function() {
+        var status = document.getElementById('msp-status');
+        status.textContent = 'Applying...';
+        status.className = 'msp-status';
+        fetch('/api/agent/command', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                cmd: 'configure_metrics',
+                args: {
+                    network: document.getElementById('msp-network').checked,
+                    disk: document.getElementById('msp-disk').checked,
+                    interval: parseInt(document.getElementById('msp-interval').value) || 2,
+                },
+            }),
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.ok) {
+                status.textContent = 'Applied';
+                status.className = 'msp-status ok';
+                // Older agents ignore unknown args — reflect what came back
+                if (data.disk === false || data.disk === undefined) {
+                    state.metricsDisk = null;
+                    state.metricsPrevDisk = null;
+                    var panel = document.getElementById('metrics-disk');
+                    if (panel) panel.innerHTML = '';
+                }
+                if (data.network === false) {
+                    state.metricsNetwork = null;
+                    state.metricsPrevNetwork = null;
+                    var np = document.getElementById('metrics-network');
+                    if (np) np.innerHTML = '';
+                }
+            } else {
+                status.textContent = data.error || 'No agent connected';
+                status.className = 'msp-status error';
+            }
+        })
+        .catch(function() {
+            status.textContent = 'No agent connected';
+            status.className = 'msp-status error';
+        });
+    });
+})();
 
 // --- Platform info ---
 
@@ -2598,6 +2773,12 @@ function loadReplayMetrics(metrics) {
         var prev = metrics.network && metrics.network.length > 1 ?
             metrics.network[metrics.network.length - 2] : null;
         updateNetworkPanel(state.metricsNetwork, prev);
+    }
+    if (metrics.disk && metrics.disk.length > 0) {
+        state.metricsDisk = metrics.disk[metrics.disk.length - 1];
+        var prevDisk = metrics.disk.length > 1 ?
+            metrics.disk[metrics.disk.length - 2] : null;
+        updateDiskPanel(state.metricsDisk, prevDisk);
     }
 }
 
@@ -2899,33 +3080,30 @@ function renderThreadSourceView(container, filePath, lines) {
     var displayLines = lines.length > maxLine ? lines.slice(0, maxLine) : lines;
 
     var html = '<div class="source-header">' + escapeHtml(filePath) +
-        ' (' + totalSamples + ' samples, thread ' + _threadDetailState.comm + ')</div>';
+        ' (' + totalSamples + ' samples, thread ' +
+        escapeHtml(_threadDetailState.comm || '') + ')</div>';
     html += '<div class="source-scroll">';
 
+    // Same markup + heat scale as the main source view
     displayLines.forEach(function(l) {
-        var cls = 'source-line';
-        var heat = '';
-        if (l.samples > 0 && maxSamples > 0) {
-            var ratio = l.samples / maxSamples;
-            if (ratio > 0.6) { cls += ' hot-high'; heat = 'hot-high'; }
-            else if (ratio > 0.2) { cls += ' hot-mid'; heat = 'hot-mid'; }
-            else { cls += ' hot-low'; heat = 'hot-low'; }
-        }
-        var sampleText = l.samples > 0 ? l.samples.toString() : '';
-        var pctText = l.samples > 0 && totalSamples > 0 ?
-            (100 * l.samples / totalSamples).toFixed(1) + '%' : '';
-        html += '<div class="' + cls + '">' +
-            '<span class="line-num">' + l.line + '</span>' +
-            '<span class="line-samples">' + sampleText + '</span>' +
-            '<span class="line-pct">' + pctText + '</span>' +
-            '<span class="line-code">' + escapeHtml(l.code || '') + '</span></div>';
+        var heat = 0;
+        if (l.percent > 0) heat = 1;
+        if (l.percent > 2) heat = 2;
+        if (l.percent > 5) heat = 3;
+        if (l.percent > 15) heat = 4;
+        if (l.percent > 30) heat = 5;
+        var samplesText = l.samples > 0 ? l.samples + ' (' + l.percent.toFixed(1) + '%)' : '';
+        html += '<div class="source-line heat-' + heat + '" data-line="' + l.line + '">' +
+            '<span class="line-no">' + l.line + '</span>' +
+            '<span class="line-samples">' + samplesText + '</span>' +
+            '<span class="line-code">' + escapeHtml(l.source) + '</span></div>';
     });
     html += '</div>';
     container.innerHTML = html;
 
     // Scroll to hottest line
     if (hottestLine > 0) {
-        var hotEl = container.querySelector('.hot-high, .hot-mid');
+        var hotEl = container.querySelector('[data-line="' + hottestLine + '"]');
         if (hotEl) hotEl.scrollIntoView({ block: 'center', behavior: 'smooth' });
     }
 }
@@ -2967,7 +3145,7 @@ fetch('/api/status')
             // Agent already connected — skip to profiling view
             updateStatus({ connected: true, agent: data.agent_addr });
             showProfilingView();
-            showControlBar(wizardData.pid || '?', '');
+            refreshControlBar();
         }
         // Else: stay on landing page
     })

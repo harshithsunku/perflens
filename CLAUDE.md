@@ -77,6 +77,9 @@ history.
   `--listen` (agent binds port, server/UI connects in via wizard).
 - Agent collects device health metrics (CPU, memory, temperature, load,
   process stats, network) every 2s and streams them as JSON frames.
+  Disk I/O metrics (per-device + per-process) are opt-in — off by default
+  to stay light on embedded targets, enabled at runtime by the server via
+  `configure_metrics {"disk": true}` (UI: gear on the Device Health strip).
 - Cross-compilation support: `--toolchain-prefix` derives both addr2line
   and readelf from a single prefix; `--sysroot` resolves module paths and
   source files under a sysroot tree (like `perf --symfs`).

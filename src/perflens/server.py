@@ -129,6 +129,7 @@ class MetricsState:
         self.system_history = []
         self.process_history = []
         self.network_history = []
+        self.disk_history = []
         self._max = max_entries
 
     def add(self, metrics_type, metrics):
@@ -139,6 +140,8 @@ class MetricsState:
                 self._append(self.process_history, metrics)
             elif metrics_type == 'network':
                 self._append(self.network_history, metrics)
+            elif metrics_type == 'disk':
+                self._append(self.disk_history, metrics)
 
     def _append(self, history, entry):
         history.append(entry)
@@ -154,6 +157,8 @@ class MetricsState:
                 source = self.process_history
             elif metrics_type == 'network':
                 source = self.network_history
+            elif metrics_type == 'disk':
+                source = self.disk_history
             else:
                 return []
             if start_ts is None and end_ts is None:
@@ -171,6 +176,8 @@ class MetricsState:
                 result['process'] = self.process_history[-1]
             if self.network_history:
                 result['network'] = self.network_history[-1]
+            if self.disk_history:
+                result['disk'] = self.disk_history[-1]
             return result
 
     def get_summary(self):
@@ -204,17 +211,21 @@ class MetricsState:
     def snapshot_for_save(self):
         """Return all metrics for session save."""
         with self.lock:
-            return {
+            snap = {
                 'system': list(self.system_history),
                 'process': list(self.process_history),
                 'network': list(self.network_history),
             }
+            if self.disk_history:
+                snap['disk'] = list(self.disk_history)
+            return snap
 
     def reset(self):
         with self.lock:
             self.system_history.clear()
             self.process_history.clear()
             self.network_history.clear()
+            self.disk_history.clear()
 
 
 # Wire protocol flags (must match agent)

@@ -247,7 +247,25 @@
                 <div class="metrics-header">
                     <span class="metrics-title">Device Health</span>
                     <span class="metrics-platform" id="metrics-platform"></span>
+                    <button id="metrics-settings-btn" class="metrics-collapse" title="Metrics settings">&#9881;</button>
                     <button id="metrics-collapse-btn" class="metrics-collapse">&#9660;</button>
+                </div>
+                <div id="metrics-settings-pop" class="metrics-settings-pop hidden">
+                    <div class="msp-title">Agent metrics collection</div>
+                    <label class="msp-row"><input type="checkbox" id="msp-network" checked> Network stats</label>
+                    <label class="msp-row"><input type="checkbox" id="msp-disk"> Disk I/O <span class="msp-hint">(off by default)</span></label>
+                    <label class="msp-row">Interval
+                        <select id="msp-interval">
+                            <option value="1">1s</option>
+                            <option value="2" selected>2s</option>
+                            <option value="5">5s</option>
+                            <option value="10">10s</option>
+                        </select>
+                    </label>
+                    <div class="msp-actions">
+                        <button id="msp-apply" class="wiz-btn wiz-btn-primary">Apply</button>
+                        <span id="msp-status" class="msp-status"></span>
+                    </div>
                 </div>
                 <div class="metrics-cards" id="metrics-cards">
                     <div class="metric-card" id="mc-cpu">
@@ -283,6 +301,7 @@
                         <div class="metrics-proc-detail" id="metrics-proc-detail"></div>
                     </div>
                     <div class="metrics-network" id="metrics-network"></div>
+                    <div class="metrics-network metrics-disk" id="metrics-disk"></div>
                 </div>
             </div>
 
@@ -409,7 +428,7 @@
     <div id="docs-drawer" class="docs-drawer docs-closed">
         <div class="docs-header">
             <h2>Documentation</h2>
-            <span class="docs-version" id="docs-version">v0.5.0</span>
+            <span class="docs-version" id="docs-version">v0.6.0</span>
             <div class="docs-header-spacer"></div>
             <button id="docs-close" class="docs-close">&times;</button>
         </div>
@@ -427,30 +446,29 @@
                 <section class="docs-section">
                     <h3>Overview</h3>
                     <p>PerfLens is a remote Linux performance profiler with a real-time web UI. Drop the agent on any Linux device (ARM or x86), point it at a PID, and watch flame graphs, function tables, <code>perf stat</code> metrics, and line-level annotated source update live in your browser.</p>
-                    <p>No frontend frameworks. No pip dependencies. No Docker. Pure Python stdlib on the server, plain HTML/CSS/JS for the UI.</p>
+                    <p>No frontend frameworks, no bundler, no Docker, no sudo. The server is a small Python package (fastapi, uvicorn, orjson, zstandard) that installs entirely user-space; the agent is a single static C binary with zero dependencies.</p>
                 </section>
 
                 <section class="docs-section">
                     <h3>Quick Start</h3>
                     <h4>1. Start the Server</h4>
                     <p>On the machine where you want to view profiles:</p>
-                    <pre><code>python3 server/perflens_server.py \
-    --source-dir /path/to/source \
-    --binary     /path/to/myprogram</code></pre>
-                    <p>Or use a pre-built release tarball:</p>
-                    <pre><code>tar xf perflens-server-*-linux-x86_64.tar.gz
-./perflens-server --source-dir /path/to/src --binary /path/to/binary</code></pre>
+                    <pre><code>uvx perflens --source-dir /path/to/source --binary /path/to/myprogram
+
+# or: pip install --user perflens
+perflens serve --source-dir /path/to/src --binary /path/to/binary</code></pre>
                     <p>Then open <code>http://localhost:8080</code> in your browser.</p>
 
-                    <h4>2. Start the Agent</h4>
-                    <p>On the target Linux device. Two connection patterns:</p>
-                    <pre><code># Agent connects to server
-./perflens-agent --server &lt;server-ip&gt;
-./perflens-agent --server &lt;server-ip&gt;          # C agent
+                    <h4>2. Install and Start the Agent</h4>
+                    <p>On the target Linux device (no sudo needed):</p>
+                    <pre><code>curl -fsSL https://raw.githubusercontent.com/harshithsunku/perflens/master/install-agent.sh | sh
+# or from the server machine: perflens push-agent user@device
 
-# Agent listens, connect via UI wizard
-./perflens-agent --listen
-./perflens-agent --listen                       # C agent</code></pre>
+# Agent connects out to the server
+~/.perflens/bin/perflens-agent --server &lt;server-ip&gt;
+
+# Or: agent listens, connect from the UI wizard
+~/.perflens/bin/perflens-agent --listen</code></pre>
                     <p>With <code>--server</code>, the UI switches automatically when the agent connects. With <code>--listen</code>, use the <strong>Live Debug</strong> wizard.</p>
                 </section>
 
@@ -489,6 +507,10 @@
                             <tr><td><code>--max-samples N</code></td><td>500000</td><td>Ring buffer cap before oldest samples drop</td></tr>
                             <tr><td><code>--inline / --no-inline</code></td><td>on</td><td>Enable/disable inline function resolution</td></tr>
                             <tr><td><code>--import FILE</code></td><td>&mdash;</td><td>Import a perf.data file at startup as a session</td></tr>
+                            <tr><td><code>--http-bind ADDR</code></td><td>127.0.0.1</td><td>Web UI bind address (<code>0.0.0.0</code> exposes it — no auth)</td></tr>
+                            <tr><td><code>--browse-root DIR</code></td><td>home dir</td><td>Directory the file picker is confined to</td></tr>
+                            <tr><td><code>--token SECRET</code></td><td>&mdash;</td><td>Shared secret agents must present (or <code>PERFLENS_TOKEN</code>)</td></tr>
+                            <tr><td><code>--sessions-dir DIR</code></td><td><code>~/.perflens/sessions</code></td><td>Where saved sessions are stored</td></tr>
                         </tbody>
                     </table>
                 </section>
@@ -514,6 +536,8 @@
                             <tr><td><code>--frequency HZ</code></td><td>99</td><td>perf record sampling frequency</td></tr>
                             <tr><td><code>--duration SECS</code></td><td>8</td><td>Length of each collection round</td></tr>
                             <tr><td><code>--rounds N</code></td><td>1</td><td>Number of rounds (<code>--output</code> mode only)</td></tr>
+                            <tr><td><code>--token SECRET</code></td><td>&mdash;</td><td>Shared secret sent in the hello (or <code>PERFLENS_TOKEN</code>)</td></tr>
+                            <tr><td><code>--update</code></td><td>&mdash;</td><td>Self-update from the latest GitHub release and exit</td></tr>
                         </tbody>
                     </table>
                 </section>
@@ -560,8 +584,8 @@ perflens-server --addr2line /opt/toolchain/bin/arm-linux-gnueabihf-addr2line \
                     <h3>Setup Wizard</h3>
                     <ol class="docs-list">
                         <li><strong>Connect</strong> &mdash; Enter the agent's IP and port (default 9999)</li>
-                        <li><strong>Perf</strong> &mdash; Auto-probes supported perf events and call-graph modes on the target</li>
                         <li><strong>Process</strong> &mdash; Pick a PID from the process list or enter manually</li>
+                        <li><strong>Perf</strong> &mdash; Auto-probes supported perf events and call-graph modes on the target</li>
                         <li><strong>Binary</strong> &mdash; Path to unstripped binary, source directory, and optional toolchain/sysroot settings</li>
                         <li><strong>Options</strong> &mdash; Sampling frequency (Hz) and collection duration (seconds)</li>
                         <li><strong>Start</strong> &mdash; Review settings and begin profiling</li>
@@ -587,7 +611,8 @@ perflens-server --addr2line /opt/toolchain/bin/arm-linux-gnueabihf-addr2line \
 
                 <section class="docs-section">
                     <h3>Device Health Strip</h3>
-                    <p>When the agent sends system metrics, a collapsible strip shows live CPU, memory, temperature, load, and per-process stats with sparkline charts.</p>
+                    <p>When the agent sends system metrics, a collapsible strip shows live CPU, memory, temperature, load, network, and per-process stats with sparkline charts. Hover a sparkline to read the value at that point in time.</p>
+                    <p>The gear button opens <strong>metrics settings</strong>: toggle network stats, enable the opt-in <strong>disk I/O</strong> collector (off by default to keep the agent light on embedded devices), and change the collection interval — all applied to the live agent without restarting it.</p>
                 </section>
 
                 <section class="docs-section">
@@ -642,15 +667,15 @@ perflens-server --addr2line /opt/toolchain/bin/arm-linux-gnueabihf-addr2line \
                 <section class="docs-section">
                     <h3>Pipeline</h3>
                     <pre class="docs-arch"><code>[Target device]                    [Local machine]
-  Process (PID)                      Server (perflens_server.py)
+  Process (PID)                      Server (perflens serve)
      |                                   |
   perf record + perf stat                |
      |                                   |
-  Agent (Python or C)                    |
+  Agent (static C binary)                |
      |                                   |
      +-- TCP (5-byte hdr + zstd) --&gt;  recv + decompress
                                          |
-                                    parser.py + source_mapper.py
+                                    parser + source mapper
                                          |
                                     SSE --&gt; Browser (app.js)</code></pre>
                     <p><strong>In one sentence:</strong> <code>perf record</code> &rarr; agent &rarr; TCP+zstd &rarr; server &rarr; parser &rarr; source mapper &rarr; SSE &rarr; browser.</p>
@@ -693,7 +718,7 @@ perflens-server --addr2line /opt/toolchain/bin/arm-linux-gnueabihf-addr2line \
                 <section class="docs-section">
                     <h3>Key Design Decisions</h3>
                     <ul class="docs-list">
-                        <li>Python stdlib only &mdash; no Flask, no npm, no Docker</li>
+                        <li>Small user-space dependency set (fastapi, uvicorn, orjson, zstandard) &mdash; no sudo, no Docker, <code>uvx perflens</code> just works</li>
                         <li>Plain HTML + vanilla JS + CSS &mdash; no bundler, no framework</li>
                         <li><code>addr2line</code> pipelined in batches of 500 addresses</li>
                         <li>Session replay is lazy: raw chunks parsed on demand</li>

@@ -5,6 +5,42 @@ All notable changes to PerfLens are recorded here. Format follows
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html); pre-1.0
 releases may break APIs between minor versions when needed.
 
+## [Unreleased]
+
+### Added
+
+- **Opt-in disk I/O metrics** — the agent can now report per-device
+  throughput/IOPS (`/proc/diskstats`, partitions folded into their
+  disk) and per-process read/write bytes (`/proc/<pid>/io`). Off by
+  default to keep the agent light on embedded targets; toggled at
+  runtime via `configure_metrics {"disk": true}`.
+- **Metrics settings in the UI** — a gear on the Device Health strip
+  drives the agent's `configure_metrics` live: network on/off, disk
+  I/O on/off, collection interval (1/2/5/10s).
+- **Sparkline hover readouts** — hovering a Device Health sparkline
+  shows the value and age at the cursor.
+- **TCP keepalive on the agent** — a dead network path now unblocks
+  `recv()` within ~2 minutes so `--server` mode actually reconnects.
+
+### Fixed
+
+- **Agent**: snprintf buffer overflow in network metrics on hosts with
+  many interfaces; unbounded `malloc` from a corrupt frame header
+  (now capped at 64 MB); `buf_ensure` doubling past its cap; recv
+  thread shutdown ordering (`shutdown()` before join, `close()` after);
+  transient `socket()` failures no longer exit the daemon.
+- **Server**: replacing a live agent no longer lets the old session's
+  cleanup clobber the new session's state, and the rebuild worker can
+  no longer fold a replaced session's chunks into the new session or
+  die permanently on one bad chunk; inbound frame lengths capped at
+  128 MB (a garbage header could previously claim a 4 GB allocation).
+- **UI**: the per-thread source view was broken (wrong field name +
+  CSS classes that didn't exist) — it now renders with the same heat
+  annotation as the main source view; the control bar shows the
+  agent's real PID/state after a page reload; resetting flamegraph
+  zoom also resets the thread filter dropdown; large float values
+  format correctly; the in-app docs caught up with the 0.6.0 era.
+
 ## [0.6.0] — 2026-07-15
 
 **The "pip install perflens" release.** The server is now a proper Python

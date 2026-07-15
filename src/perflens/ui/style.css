@@ -1569,6 +1569,7 @@ main {
 
 /* ===== Device Health Metrics Strip ===== */
 .metrics-strip {
+    position: relative;  /* anchors the settings popover */
     margin-bottom: 14px;
     border: 1px solid var(--card-border);
     border-radius: var(--radius-md);
@@ -1698,6 +1699,57 @@ main {
 }
 .metrics-network .net-iface { margin-bottom: 4px; }
 .metrics-network .net-label { color: var(--accent-text); font-weight: 600; }
+.metrics-disk { margin-top: 8px; }
+.metrics-disk:empty { display: none; }
+
+/* Metrics settings popover */
+.metrics-settings-pop {
+    position: absolute;
+    top: 34px;
+    right: 12px;
+    z-index: 50;
+    background: var(--bg-surface-2);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+    padding: 12px 14px;
+    min-width: 220px;
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+.metrics-settings-pop.hidden { display: none; }
+.metrics-settings-pop .msp-title {
+    font-size: 10px;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-weight: 600;
+    margin-bottom: 8px;
+}
+.metrics-settings-pop .msp-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 8px;
+    cursor: pointer;
+}
+.metrics-settings-pop .msp-hint { color: var(--text-tertiary); font-size: 11px; }
+.metrics-settings-pop select {
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    padding: 2px 6px;
+}
+.metrics-settings-pop .msp-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 4px;
+}
+.metrics-settings-pop .msp-status { font-size: 11px; color: var(--text-tertiary); }
+.metrics-settings-pop .msp-status.ok { color: var(--success); }
+.metrics-settings-pop .msp-status.error { color: var(--error); }
 
 /* Platform info in header */
 .metrics-platform {
