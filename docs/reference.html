@@ -69,6 +69,9 @@
                 <tr><td><code>--toolchain-prefix PREFIX</code></td><td>&mdash;</td><td>Cross-compile prefix (e.g. <code>arm-linux-gnueabihf-</code>). Derives <code>addr2line</code> + <code>readelf</code>.</td></tr>
                 <tr><td><code>--sysroot DIR</code></td><td>&mdash;</td><td>Sysroot for resolving shared-library modules and source files.</td></tr>
                 <tr><td><code>--max-samples N</code></td><td><code>500000</code></td><td>Ring buffer cap before oldest samples drop.</td></tr>
+                <tr><td><code>--http-bind ADDR</code></td><td><code>127.0.0.1</code></td><td>Web UI bind address (<code>0.0.0.0</code> to expose &mdash; the UI has no auth).</td></tr>
+                <tr><td><code>--browse-root DIR</code></td><td><code>~</code></td><td>Directory the wizard file picker is confined to.</td></tr>
+                <tr><td><code>--token SECRET</code></td><td>&mdash;</td><td>Shared secret agents must present in their hello (or <code>PERFLENS_TOKEN</code>).</td></tr>
                 <tr><td><code>--inline</code> / <code>--no-inline</code></td><td>on</td><td>Enable/disable inline-function resolution via <code>addr2line -i</code>.</td></tr>
                 <tr><td><code>--import FILE</code></td><td>&mdash;</td><td>Import a <code>perf.data</code> file at startup as a session.</td></tr>
             </tbody>

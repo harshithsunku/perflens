@@ -53,15 +53,36 @@ FRAME_BARE_RE = re.compile(
 )
 
 
+# perf stat stderr always ends with "N.NN seconds time elapsed"; in a
+# multi-round file (agent --output --rounds N) that line is the boundary
+# between one round's stat section and the next round's script output.
+_STAT_END_RE = re.compile(r'^\s*[\d.]+\s+seconds\s+time\s+elapsed.*$',
+                          re.MULTILINE)
+
+
 def split_perf_data(text):
     """Split combined perf script + perf stat data.
 
-    Returns (perf_script_text, perf_stat_text).
+    Handles multiple `### PERF_STAT ###` markers (multi-round headless
+    captures): all script segments are concatenated, as are all stat
+    segments. Returns (perf_script_text, perf_stat_text).
     """
-    if PERF_STAT_MARKER in text:
-        parts = text.split(PERF_STAT_MARKER, 1)
-        return parts[0], parts[1]
-    return text, ''
+    if PERF_STAT_MARKER not in text:
+        return text, ''
+
+    parts = text.split(PERF_STAT_MARKER)
+    script_parts = [parts[0]]
+    stat_parts = []
+    for seg in parts[1:]:
+        m = _STAT_END_RE.search(seg)
+        if m:
+            stat_parts.append(seg[:m.end()])
+            script_parts.append(seg[m.end():])
+        else:
+            # No terminator (single-round file, or truncated stat output):
+            # the whole remainder is stat text.
+            stat_parts.append(seg)
+    return '\n'.join(script_parts), '\n'.join(stat_parts)
 
 
 def _normalize_event(event_type):
@@ -326,7 +347,7 @@ def parse_perf_stat(text):
                 value = float(m.group(1).replace(',', ''))
                 name = m.group(2).split(':')[0]
                 comment = _extract_stat_comment(line)
-                metrics[name] = {'value': value, 'comment': comment}
+                _accumulate_stat(metrics, name, value, comment)
             except ValueError:
                 pass
             continue
@@ -339,7 +360,7 @@ def parse_perf_stat(text):
                 value = int(m.group(1).replace(',', ''))
                 name = m.group(2).split(':')[0]
                 comment = _extract_stat_comment(line)
-                metrics[name] = {'value': value, 'comment': comment}
+                _accumulate_stat(metrics, name, value, comment)
             except ValueError:
                 pass
             continue
@@ -347,12 +368,28 @@ def parse_perf_stat(text):
         # Time elapsed: "3.002210655 seconds time elapsed"
         m = re.match(r'^\s*([\d.]+)\s+seconds\s+time\s+elapsed', line)
         if m:
-            metrics['time_elapsed'] = {
-                'value': float(m.group(1)),
-                'comment': 'seconds',
-            }
+            _accumulate_stat(metrics, 'time_elapsed',
+                             float(m.group(1)), 'seconds')
 
-    # Compute derived metrics
+    _compute_derived_stats(metrics)
+    return metrics
+
+
+# Derived metrics — recomputed from counters, never summed directly
+_DERIVED_STAT_KEYS = ('ipc', 'cache_miss_rate', 'branch_miss_rate')
+
+
+def _accumulate_stat(metrics, name, value, comment):
+    """Add a stat counter, summing when a round already reported it
+    (multi-round captures repeat every counter)."""
+    prev = metrics.get(name)
+    if prev is not None and isinstance(prev.get('value'), (int, float)):
+        value += prev['value']
+    metrics[name] = {'value': value, 'comment': comment}
+
+
+def _compute_derived_stats(metrics):
+    """(Re)compute IPC / cache-miss / branch-miss rates from counters."""
     cycles = metrics.get('cycles', {}).get('value', 0)
     instructions = metrics.get('instructions', {}).get('value', 0)
     if cycles > 0 and instructions > 0:
@@ -381,7 +418,30 @@ def parse_perf_stat(text):
             'comment': '% branch miss rate',
         }
 
-    return metrics
+
+def merge_perf_stat(old, new):
+    """Accumulate perf stat counters across collection rounds.
+
+    Counters sum; derived rates are recomputed from the summed counters.
+    Live streaming sends one stat section per ~8s round — without merging,
+    the dashboard silently showed only the last round's counters.
+    """
+    if not old:
+        return dict(new)
+    merged = dict(old)
+    for name, data in new.items():
+        if name in _DERIVED_STAT_KEYS:
+            continue
+        prev = merged.get(name)
+        if (prev is not None
+                and isinstance(prev.get('value'), (int, float))
+                and isinstance(data.get('value'), (int, float))):
+            merged[name] = {'value': prev['value'] + data['value'],
+                            'comment': data.get('comment', '')}
+        else:
+            merged[name] = dict(data)
+    _compute_derived_stats(merged)
+    return merged
 
 
 def _extract_stat_comment(line):

@@ -157,7 +157,8 @@ def test_header_regex():
 
         got_comm = m.group(1).strip()
         got_pid = int(m.group(2))
-        got_event = m.group(4).split(':')[0]  # strip modifiers for comparison
+        # group(3) is the optional /tid; group(4) is the count
+        got_event = m.group(5).split(':')[0]  # strip modifiers for comparison
 
         errors = []
         if got_comm != exp_comm:

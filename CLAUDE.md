@@ -143,6 +143,9 @@ perflens/
 --toolchain-prefix P  Cross-compilation prefix (e.g. arm-linux-gnueabihf-)
 --sysroot DIR         Sysroot for shared library and source resolution
 --max-samples N       Ring buffer cap             (default 500000)
+--http-bind ADDR      Web UI bind address         (default 127.0.0.1)
+--browse-root DIR     File-picker confinement root (default: home dir)
+--token SECRET        Shared secret agents must present (or PERFLENS_TOKEN)
 --inline / --no-inline  Enable/disable inline function resolution (default: on)
 --import FILE         Import a perf.data file at startup as a session
 ```

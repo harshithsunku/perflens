@@ -19,7 +19,7 @@ from urllib.parse import urlparse, parse_qs
 
 from parser import (parse_perf_script, build_function_summary, build_flamegraph_data,
                     split_perf_data, get_event_types, filter_samples_by_event,
-                    parse_perf_stat)
+                    parse_perf_stat, merge_perf_stat)
 from source_mapper import SourceMapper, build_annotated_source
 
 
@@ -42,6 +42,9 @@ class ServerConfig:
     max_samples: int = 500000
     tcp_port: int = 9999
     http_port: int = 8080
+    http_bind: str = '127.0.0.1'
+    browse_root: str = ''
+    token: str = None
     ui_dir: str = ''
     inline: bool = True
 
@@ -83,7 +86,7 @@ class ProfilingState:
                 s['event_type'] for s in new_samples)
             self.event_types = sorted(self._event_types_set)
             if perf_stat:
-                self.perf_stat = perf_stat
+                self.perf_stat = merge_perf_stat(self.perf_stat, perf_stat)
             self._dirty = True
             self._rebuild_needed.notify()
             return list(self.all_samples), list(self.event_types)
@@ -216,6 +219,7 @@ config: ServerConfig = None
 state: ProfilingState = None
 metrics_state: MetricsState = None
 agent_session: 'AgentSession' = None  # managed agent connection
+agent_session_lock = threading.Lock()  # guards agent_session swaps
 wizard_state: dict = None              # wizard UI state
 
 
@@ -438,6 +442,7 @@ class AgentSession:
         self.lock = threading.Lock()
         self.connected = True
         self.hello = None         # agent hello payload
+        self._cmd_lock = threading.Lock()  # guards _pending + _responses
         self._pending = {}        # cmd_id -> threading.Event
         self._responses = {}      # cmd_id -> response dict
         self._recv_thread = None
@@ -465,22 +470,28 @@ class AgentSession:
         }).encode('utf-8')
 
         event = threading.Event()
-        self._pending[cmd_id] = event
+        with self._cmd_lock:
+            self._pending[cmd_id] = event
 
         try:
             header = struct.pack('!IB', len(payload), FLAG_CMD_REQUEST)
             with self.lock:
                 self.sock.sendall(header + payload)
         except (IOError, OSError) as e:
-            self._pending.pop(cmd_id, None)
+            with self._cmd_lock:
+                self._pending.pop(cmd_id, None)
             return {'ok': False, 'error': f'send failed: {e}'}
 
         # Wait for response
-        if not event.wait(timeout):
+        got_response = event.wait(timeout)
+        with self._cmd_lock:
             self._pending.pop(cmd_id, None)
+            resp = self._responses.pop(cmd_id, None)
+        if resp is not None:
+            return resp
+        if not got_response:
             return {'ok': False, 'error': 'command timed out'}
-
-        return self._responses.pop(cmd_id, {'ok': False, 'error': 'no response'})
+        return {'ok': False, 'error': 'no response'}
 
     def _recv_loop(self):
         """Read messages from agent, dispatch by flag type."""
@@ -509,18 +520,19 @@ class AgentSession:
                     break
 
                 if flag == FLAG_CMD_RESPONSE:
-                    # Command response
+                    # Command response. Never let a malformed response kill
+                    # the connection — log and keep receiving.
                     try:
                         resp = json.loads(payload.decode('utf-8', errors='replace'))
-                        cmd_id = resp.get('id', '')
-                        if cmd_id in self._pending:
-                            self._responses[cmd_id] = resp
-                            self._pending[cmd_id].set()
-                        else:
-                            # Unsolicited response (e.g. hello) — ignore
-                            pass
-                    except (ValueError, KeyError) as e:
-                        print(f"[server] Bad agent response JSON: {e}",
+                        cmd_id = resp.get('id', '') if isinstance(resp, dict) else ''
+                        with self._cmd_lock:
+                            event = self._pending.get(cmd_id)
+                            if event is not None:
+                                self._responses[cmd_id] = resp
+                                event.set()
+                            # else: unsolicited (e.g. hello) — ignore
+                    except Exception as e:
+                        print(f"[server] Bad agent response: {e}",
                               file=sys.stderr)
 
                 elif flag in (FLAG_DATA_RAW, FLAG_DATA_ZSTD):
@@ -548,7 +560,10 @@ class AgentSession:
                     # Heavy per_event rebuild handled by background worker.
                     broadcast_sse('event_types', event_types)
                     if perf_stat:
-                        broadcast_sse('perf_stat', perf_stat)
+                        # Broadcast the accumulated stat, not this round's
+                        with state.lock:
+                            merged_stat = dict(state.perf_stat)
+                        broadcast_sse('perf_stat', merged_stat)
 
                 elif flag == FLAG_METRICS:
                     # Health metrics snapshot
@@ -576,6 +591,13 @@ class AgentSession:
                 break
 
         self.connected = False
+        # Fail fast any in-flight commands instead of letting them time out
+        with self._cmd_lock:
+            for cmd_id, event in self._pending.items():
+                self._responses.setdefault(
+                    cmd_id, {'ok': False, 'error': 'agent disconnected'})
+                event.set()
+            self._pending.clear()
         with state.lock:
             state.agent_connected = False
             state.agent_conn = None
@@ -610,14 +632,58 @@ class AgentSession:
             pass
 
 
-def connect_to_agent(host, port, timeout=10):
-    """Connect to a listen-mode agent. Returns AgentSession or raises."""
+def _check_agent_token(hello):
+    """Validate the hello token against config.token (if configured).
+
+    Returns None when accepted, or an error string when rejected.
+    """
+    if not config or not config.token:
+        return None
+    import hmac
+    presented = hello.get('token') or ''
+    if not hmac.compare_digest(str(presented), config.token):
+        return 'agent token mismatch'
+    return None
+
+
+def _install_agent_session(session):
+    """Register a new AgentSession as THE managed agent (replacing any
+    existing one), reset profiling state, and start its receiver.
+
+    Serialized by agent_session_lock so two near-simultaneous connections
+    can't interleave the check-close-replace sequence.
+    """
     global agent_session
 
-    # Close existing session if any
-    if agent_session and agent_session.connected:
-        agent_session.close()
+    with agent_session_lock:
+        if agent_session and agent_session.connected:
+            print("[server] Replacing existing agent session", file=sys.stderr)
+            agent_session.close()
 
+        with state.lock:
+            state.agent_connected = True
+            state.agent_addr = session.addr
+            state.agent_conn = session.sock
+            state.all_samples.clear()
+            state.chunk_count = 0
+            state._event_types_set.clear()
+            state.event_types = []
+            state.perf_stat = {}
+            state._cached_per_event = {}
+        metrics_state.reset()
+
+        agent_session = session
+        session.start()
+
+    broadcast_sse('status', {'connected': True, 'agent': session.addr})
+    broadcast_sse('agent_connected', {
+        'agent': session.addr,
+        'platform': (session.hello or {}).get('platform', {}),
+    })
+
+
+def connect_to_agent(host, port, timeout=10):
+    """Connect to a listen-mode agent. Returns AgentSession or raises."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.settimeout(timeout)
     try:
@@ -652,33 +718,18 @@ def connect_to_agent(host, port, timeout=10):
         sock.close()
         raise RuntimeError(f'Expected hello message, got: {hello.get("type")}')
 
+    token_err = _check_agent_token(hello)
+    if token_err:
+        sock.close()
+        raise RuntimeError(token_err)
+
     # Clear connection timeout — recv loop must block indefinitely
     sock.settimeout(None)
 
     addr_str = f'{host}:{port}'
     session = AgentSession(sock, addr_str)
     session.hello = hello
-
-    # Update global state
-    with state.lock:
-        state.agent_connected = True
-        state.agent_addr = addr_str
-        state.agent_conn = sock
-        state.all_samples.clear()
-        state.chunk_count = 0
-        state._event_types_set.clear()
-        state.event_types = []
-        state._cached_per_event = {}
-    metrics_state.reset()
-
-    broadcast_sse('status', {'connected': True, 'agent': addr_str})
-    broadcast_sse('agent_connected', {
-        'agent': addr_str,
-        'platform': hello.get('platform', {}),
-    })
-
-    session.start()
-    agent_session = session
+    _install_agent_session(session)
 
     print(f"[server] Connected to managed agent at {addr_str}: "
           f"platform={hello.get('platform', {}).get('arch', '?')}",
@@ -783,15 +834,8 @@ def handle_inbound_agent(conn, addr):
     bidirectional protocol. Identical to the outbound path (connect_to_agent)
     after the TCP handshake.
     """
-    global agent_session
-
     addr_str = f'{addr[0]}:{addr[1]}'
     print(f"[server] Agent connected from {addr_str}", file=sys.stderr)
-
-    # Close existing session if any
-    if agent_session and agent_session.connected:
-        print("[server] Replacing existing agent session", file=sys.stderr)
-        agent_session.close()
 
     # Read hello message (flag 3) — agent always sends hello first
     try:
@@ -833,32 +877,22 @@ def handle_inbound_agent(conn, addr):
             pass
         return
 
+    token_err = _check_agent_token(hello)
+    if token_err:
+        print(f"[server] Inbound agent {addr_str} rejected: {token_err}",
+              file=sys.stderr)
+        try:
+            conn.close()
+        except OSError:
+            pass
+        return
+
     # Clear connection timeout — recv loop must block indefinitely
     conn.settimeout(None)
 
     session = AgentSession(conn, addr_str)
     session.hello = hello
-
-    # Update global state
-    with state.lock:
-        state.agent_connected = True
-        state.agent_addr = addr_str
-        state.agent_conn = conn
-        state.all_samples.clear()
-        state.chunk_count = 0
-        state._event_types_set.clear()
-        state.event_types = []
-        state._cached_per_event = {}
-    metrics_state.reset()
-
-    broadcast_sse('status', {'connected': True, 'agent': addr_str})
-    broadcast_sse('agent_connected', {
-        'agent': addr_str,
-        'platform': hello.get('platform', {}),
-    })
-
-    session.start()
-    agent_session = session
+    _install_agent_session(session)
 
     print(f"[server] Inbound agent {addr_str} ready: "
           f"platform={hello.get('platform', {}).get('arch', '?')}",
@@ -1042,9 +1076,21 @@ def build_per_event_data(all_samples, event_types, mapper, source=False):
 # Export helpers
 # ---------------------------------------------------------------------------
 
+def _safe_session_dir(session_id):
+    """Resolve a session id (from a URL) to its directory, or None if the
+    id would escape sessions_dir."""
+    root = os.path.realpath(config.sessions_dir)
+    session_dir = os.path.realpath(os.path.join(root, session_id))
+    if session_dir == root or not session_dir.startswith(root + os.sep):
+        return None
+    return session_dir
+
+
 def _load_session_samples(session_id):
     """Load all samples from a saved session. Returns (samples, metadata) or (None, None)."""
-    session_dir = os.path.join(config.sessions_dir, session_id)
+    session_dir = _safe_session_dir(session_id)
+    if session_dir is None:
+        return None, None
     meta_path = os.path.join(session_dir, 'metadata.json')
     if not os.path.isfile(meta_path):
         return None, None
@@ -1282,11 +1328,15 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
             browse_path = params.get('path', ['/'])[0]
             self._handle_browse(browse_path)
         else:
-            # Serve static files from UI directory
+            # Serve static files from UI directory — realpath + prefix check
+            # so ../-laden paths can't escape ui_dir.
             if path == '/':
                 path = '/index.html'
-            file_path = os.path.join(config.ui_dir, path.lstrip('/'))
-            if os.path.isfile(file_path):
+            ui_root = os.path.realpath(config.ui_dir)
+            file_path = os.path.realpath(
+                os.path.join(ui_root, path.lstrip('/')))
+            if (file_path.startswith(ui_root + os.sep)
+                    and os.path.isfile(file_path)):
                 self._serve_file(file_path)
             else:
                 self.send_error(404)
@@ -1325,13 +1375,15 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
     def _handle_stop(self):
         """Close the agent connection, triggering normal disconnect flow."""
         global agent_session
-        if agent_session and agent_session.connected:
+        with agent_session_lock:
+            session = agent_session
+            agent_session = None
+        if session and session.connected:
             try:
-                agent_session.send_command('stop', timeout=5)
+                session.send_command('stop', timeout=5)
             except Exception:
                 pass
-            agent_session.close()
-            agent_session = None
+            session.close()
             self._send_json({'stopped': True})
         else:
             self._send_json({'stopped': False, 'reason': 'no agent connected'})
@@ -1376,7 +1428,9 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
 
     def _handle_agent_command(self):
         """POST /api/agent/command — relay command to managed agent."""
-        if not agent_session or not agent_session.connected:
+        with agent_session_lock:
+            session = agent_session
+        if not session or not session.connected:
             self._send_json({'error': 'no managed agent connected'}, 400)
             return
 
@@ -1398,7 +1452,7 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
         if cmd in ('list_processes', 'reprobe', 'start'):
             timeout = max(timeout, 120)
 
-        resp = agent_session.send_command(cmd, args, timeout=timeout)
+        resp = session.send_command(cmd, args, timeout=timeout)
         self._send_json(resp)
 
     def _handle_wizard_state_update(self):
@@ -1541,8 +1595,14 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
         self._send_json(result)
 
     def _handle_browse(self, browse_path):
-        """GET /api/browse?path=/ — browse server filesystem for files."""
-        browse_path = os.path.abspath(browse_path)
+        """GET /api/browse?path=/ — browse the server filesystem for the
+        wizard's binary/source pickers. Confined to config.browse_root."""
+        root = os.path.realpath(config.browse_root or os.path.expanduser('~'))
+        browse_path = os.path.realpath(browse_path or root)
+        if browse_path != root and not browse_path.startswith(root + os.sep):
+            # Outside the allowed root — start the picker at the root
+            # instead of erroring, so the UI stays usable.
+            browse_path = root
         if not os.path.isdir(browse_path):
             self._send_json({'error': f'not a directory: {browse_path}'}, 400)
             return
@@ -1928,10 +1988,11 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
 
     def _handle_session_replay(self, session_id):
         """Rebuild session data on the fly from raw chunks."""
-        session_dir = os.path.join(config.sessions_dir, session_id)
-        meta_path = os.path.join(session_dir, 'metadata.json')
+        session_dir = _safe_session_dir(session_id)
+        meta_path = (os.path.join(session_dir, 'metadata.json')
+                     if session_dir else '')
 
-        if not os.path.isfile(meta_path):
+        if not session_dir or not os.path.isfile(meta_path):
             self._send_json({'error': 'session not found'})
             return
 
@@ -1982,11 +2043,16 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
 # HTTP server
 # ---------------------------------------------------------------------------
 
-def run_http_server(port):
+def run_http_server(port, bind='127.0.0.1'):
     """Run the HTTP server for the web UI."""
     from http.server import ThreadingHTTPServer
-    httpd = ThreadingHTTPServer(('0.0.0.0', port), PerfLensHTTPHandler)
-    print(f"[server] HTTP server on http://0.0.0.0:{port}", file=sys.stderr)
+    httpd = ThreadingHTTPServer((bind, port), PerfLensHTTPHandler)
+    print(f"[server] HTTP server on http://{bind}:{port}", file=sys.stderr)
+    if bind not in ('127.0.0.1', 'localhost', '::1'):
+        print("[server] WARNING: web UI is exposed beyond localhost "
+              f"(bound to {bind}) and has no authentication — anyone who "
+              "can reach it can browse files under --browse-root and "
+              "control the agent", file=sys.stderr)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -2043,6 +2109,20 @@ def main():
                         metavar='FILE',
                         help='Import a perf.data file at startup and make it '
                              'available as a session')
+    parser.add_argument('--http-bind', type=str, default='127.0.0.1',
+                        metavar='ADDR',
+                        help='Bind address for the web UI (default: '
+                             '127.0.0.1; use 0.0.0.0 to expose it — the UI '
+                             'has no authentication)')
+    parser.add_argument('--browse-root', type=str, default=None,
+                        metavar='DIR',
+                        help='Directory the /api/browse file picker is '
+                             'confined to (default: your home directory)')
+    parser.add_argument('--token', type=str,
+                        default=os.environ.get('PERFLENS_TOKEN'),
+                        help='Shared secret agents must present in their '
+                             'hello (agents pass --token / PERFLENS_TOKEN); '
+                             'connections without it are rejected')
     args = parser.parse_args()
 
     # Parse path-map
@@ -2120,6 +2200,10 @@ def main():
         max_samples=args.max_samples,
         tcp_port=args.port,
         http_port=args.http_port,
+        http_bind=args.http_bind,
+        browse_root=os.path.abspath(args.browse_root)
+                    if args.browse_root else os.path.expanduser('~'),
+        token=args.token,
         ui_dir=ui_dir,
         inline=args.inline,
     )
@@ -2168,7 +2252,7 @@ def main():
     tcp_thread.start()
 
     # Run HTTP server in main thread
-    run_http_server(config.http_port)
+    run_http_server(config.http_port, config.http_bind)
 
 
 if __name__ == '__main__':

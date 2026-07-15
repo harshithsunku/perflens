@@ -209,6 +209,9 @@ Then browse to `http://<server-ip>:8080`.
 | `--toolchain-prefix PREFIX` | — | Cross-compilation prefix (e.g. `arm-linux-gnueabihf-`); derives addr2line and readelf |
 | `--sysroot DIR` | — | Sysroot for resolving shared library modules and source files |
 | `--max-samples N` | `500000` | Ring buffer cap before oldest samples drop |
+| `--http-bind ADDR` | `127.0.0.1` | Web UI bind address (`0.0.0.0` to expose — the UI has no auth) |
+| `--browse-root DIR` | `~` | Directory the wizard's file picker is confined to |
+| `--token SECRET` | — | Shared secret agents must present (or `PERFLENS_TOKEN`) |
 | `--inline` / `--no-inline` | on | Enable/disable inline function resolution via `addr2line -i` |
 | `--import FILE` | — | Import a `perf.data` file at startup and make it available as a session |
 

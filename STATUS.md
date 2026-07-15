@@ -6,8 +6,8 @@ plan file; this is the executable summary.
 
 ## Current phase
 
-**Phases 0, 1a, 1b complete.** Next up: **Phase 1c+1d — server correctness +
-security fixes**.
+**Phases 0, 1a, 1b, 1c+1d complete.** Next up: **Phase 2a — incremental
+aggregation (server/aggregator.py)**.
 
 ## Overhaul roadmap
 
@@ -24,11 +24,17 @@ security fixes**.
       `releases/latest/download/` for installer + `--update`) plus versioned
       tarballs. CI `build-agent` (Python) job dropped; docs/README/UI docs
       updated.
-- [ ] **Phase 1c+1d** — Server correctness + security: `_pending`/`_responses`
-      cmd lock; `agent_session` global lock; `merge_perf_stat` accumulation
-      (currently last-chunk-wins); static-file path-traversal fix; HTTP bind
-      127.0.0.1 default + `--http-bind`; `/api/browse` confined to
-      `--browse-root`; server-side `--token` validation.
+- [x] **Phase 1c+1d** — Server correctness + security, all done:
+      `_cmd_lock` around pending/response maps (+ fail-fast on disconnect);
+      `agent_session_lock` + shared `_install_agent_session()` for both
+      connect paths; `merge_perf_stat` accumulation (SSE now broadcasts the
+      merged totals; perf_stat reset on new connection); multi-marker
+      `split_perf_data` (multi-round `--output` files no longer lose rounds
+      2..N); path-traversal fixes for static files AND session ids; HTTP
+      binds 127.0.0.1 by default (`--http-bind` to expose, with warning);
+      `/api/browse` confined to `--browse-root` (default: home);
+      `--token`/`PERFLENS_TOKEN` validated at hello (hmac.compare_digest);
+      stale parser test group index fixed (30/30 pass now).
 - [ ] **Phase 2a** — Incremental aggregation (`server/aggregator.py`):
       EventAccumulator per event, inline expansion at ingest only,
       differential test vs old batch path (use `test/fixtures/`).
@@ -78,19 +84,17 @@ uvx works; HTTP defaults to localhost bind.
   Fix in parser.py during Phase 1c.
 
 ### Server (server/perflens_server.py)
-- `_raw_chunks` grows unbounded in RAM all session (line 532) — GBs over
-  hours. Fix: spool to disk at receive time (Phase 2b).
-- `_rebuild_worker` re-aggregates ALL samples every chunk (748-772) — O(total)
+- `_raw_chunks` grows unbounded in RAM all session — GBs over hours.
+  Fix: spool to disk at receive time (Phase 2b).
+- `_rebuild_worker` re-aggregates ALL samples every chunk — O(total)
   every ~8s; the main big-codebase bottleneck (Phase 2a).
-- `_pending`/`_responses` race (441-483, 511-521) → KeyError can drop agent.
-- `agent_session` global swapped without lock (613, 786-861).
-- perf_stat last-chunk-wins (85) — counters should accumulate.
-- Path traversal in static serving (1288).
-- `/api/browse` serves entire filesystem; HTTP binds 0.0.0.0; no auth.
-- Session replay re-parses everything per request, uncached (1929).
+- Session replay re-parses everything per request, uncached (Phase 2b).
 - `_build_source_index` synchronous full walk on first source request
-  (source_mapper.py:483) — minutes on 500k-file trees.
-- `/api/index/status` returns full DWARF file list (multi-MB JSON).
+  (source_mapper.py:483) — minutes on 500k-file trees (Phase 2d).
+- `/api/index/status` returns full DWARF file list (multi-MB JSON) (2d).
+- ~~cmd response race / agent_session race / perf_stat last-wins / path
+  traversal (static + session id) / 0.0.0.0 bind / unconfined browse /
+  no auth~~ — ALL FIXED in Phase 1c+1d.
 
 ### UI (ui/app.js)
 - Full re-render (table sort + flamegraph innerHTML) on every per_event SSE
@@ -178,3 +182,10 @@ old batch path vs new incremental path must produce identical snapshots.
   and run_agent.sh deleted, install-agent.sh added (endianness detection
   verified on x86_64 + aarch64 device), build_package.sh + CI reworked
   (raw stable-name binaries as release assets), all docs updated.
+- **2026-07-15 (cont.)** — Phase 1c+1d: server correctness + security.
+  Verified live: traversal blocked (plain + URL-encoded + session-id),
+  bind 127.0.0.1, browse snapped to home, token rejection AND acceptance
+  (local agent), full inbound-mode regression on the x86 device with token
+  (perf_stat accumulation confirmed: cycles 74.2B→98.8B→172.9B final in
+  saved session; replay OK). NOTE: x86 device rebooted into kernel
+  7.0.14-4-pve since baseline (was 6.17.13-2-pve).
