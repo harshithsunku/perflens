@@ -3,6 +3,7 @@
 
 import collections
 import dataclasses
+import gzip
 import json
 import os
 import socket
@@ -457,15 +458,37 @@ class AgentSession:
         self._responses = {}      # cmd_id -> response dict
         self._recv_thread = None
 
-        # Session persistence for profiling data
+        # Session persistence for profiling data. Chunks are spooled to
+        # disk as they arrive (compressed payloads are written as-received)
+        # — nothing is held in RAM for the life of the session.
         self._session_id = None
         self._session_dir = None
-        self._raw_chunks = []
+        self._chunk_index = 0
 
     def start(self):
         """Start the receiver thread. Call after reading the hello message."""
         self._recv_thread = threading.Thread(target=self._recv_loop, daemon=True)
         self._recv_thread.start()
+
+    def _spool_chunk(self, payload, flag):
+        """Write one received data payload straight to the session dir.
+
+        Compressed payloads (flag 1) are stored as-received (.zst);
+        raw payloads (flag 0) as text (.txt). Keeping chunks on disk
+        instead of in RAM bounds server memory for long sessions.
+        """
+        try:
+            if flag == FLAG_DATA_ZSTD:
+                fname = f'chunk_{self._chunk_index:05d}.zst'
+                mode = 'wb'
+            else:
+                fname = f'chunk_{self._chunk_index:05d}.txt'
+                mode = 'wb'
+            with open(os.path.join(self._session_dir, fname), mode) as f:
+                f.write(payload)
+            self._chunk_index += 1
+        except OSError as e:
+            print(f"[server] Failed to spool chunk: {e}", file=sys.stderr)
 
     def send_command(self, cmd, args=None, timeout=60):
         """Send a command and wait for the response. Thread-safe.
@@ -551,7 +574,7 @@ class AgentSession:
                     if text is None:
                         continue
 
-                    self._raw_chunks.append(text)
+                    self._spool_chunk(payload, flag)
                     script_text, stat_text = split_perf_data(text)
                     samples = parse_perf_script(script_text)
                     perf_stat = parse_perf_stat(stat_text) if stat_text else {}
@@ -615,14 +638,14 @@ class AgentSession:
             perf_stat_final = dict(state.perf_stat)
         broadcast_sse('status', {'connected': False, 'agent': None})
 
-        # Save session (include metrics)
+        # Save session metadata (chunks are already spooled to disk)
         m_snap = metrics_state.snapshot_for_save()
         m_summary = metrics_state.get_summary()
-        if self._raw_chunks or any(m_snap.values()):
+        if self._chunk_index or any(m_snap.values()):
             t = threading.Thread(
                 target=_save_session,
                 args=(self._session_dir, self._session_id,
-                      self.addr, self._raw_chunks,
+                      self.addr, self._chunk_index,
                       all_samples, perf_stat_final, self.hello,
                       m_snap, m_summary),
                 daemon=True,
@@ -834,8 +857,16 @@ def _rebuild_worker():
 
         with state.lock:
             state._cached_per_event = per_event
+            version = {
+                'chunk_count': state.chunk_count,
+                'total_samples': len(state.all_samples),
+                'event_types': list(state.event_types),
+            }
 
-        broadcast_sse('per_event', per_event)
+        # Notify-and-fetch: browsers get a tiny version stamp and pull the
+        # event they're actually viewing from /api/per-event — the full
+        # per-event blob (multi-MB on big profiles) is never broadcast.
+        broadcast_sse('data_version', version)
 
 
 # ---------------------------------------------------------------------------
@@ -914,15 +945,11 @@ def handle_inbound_agent(conn, addr):
           file=sys.stderr)
 
 
-def _save_session(session_dir, session_id, agent_addr, raw_chunks,
+def _save_session(session_dir, session_id, agent_addr, chunk_count,
                   all_samples, perf_stat, hello=None,
                   metrics_snapshot=None, metrics_summary=None):
-    """Save profiling session to disk (raw chunks + metadata + metrics)."""
+    """Save session metadata + metrics (chunks are spooled at receive time)."""
     try:
-        for i, chunk in enumerate(raw_chunks):
-            with open(os.path.join(session_dir, f'chunk_{i:03d}.txt'), 'w') as f:
-                f.write(chunk)
-
         event_types = get_event_types(all_samples)
         metadata = {
             'version': '0.5.0',
@@ -930,7 +957,7 @@ def _save_session(session_dir, session_id, agent_addr, raw_chunks,
             'agent': agent_addr,
             'timestamp': datetime.now().isoformat(),
             'total_samples': len(all_samples),
-            'chunks': len(raw_chunks),
+            'chunks': chunk_count,
             'event_types': event_types,
             'perf_stat': perf_stat,
         }
@@ -1077,6 +1104,50 @@ def _safe_session_dir(session_id):
     return session_dir
 
 
+def _session_chunk_files(session_dir):
+    """List a session's chunk files (.txt or .zst) in chunk order.
+
+    Sorted numerically by chunk index so old 3-digit and new 5-digit
+    names both order correctly.
+    """
+    def chunk_key(fname):
+        stem = fname[len('chunk_'):].split('.', 1)[0]
+        try:
+            return int(stem)
+        except ValueError:
+            return 0
+
+    return sorted(
+        (f for f in os.listdir(session_dir)
+         if f.startswith('chunk_') and (f.endswith('.txt')
+                                        or f.endswith('.zst'))),
+        key=chunk_key)
+
+
+def _read_session_chunk(fpath):
+    """Read one chunk file, decompressing .zst spools. Returns text or None."""
+    try:
+        with open(fpath, 'rb') as f:
+            payload = f.read()
+    except (IOError, OSError):
+        return None
+    if fpath.endswith('.zst'):
+        return decompress_payload(payload, FLAG_DATA_ZSTD)
+    return payload.decode('utf-8', errors='replace')
+
+
+def _load_session_chunks(session_dir):
+    """Parse every chunk of a session into one sample list."""
+    all_samples = []
+    for fname in _session_chunk_files(session_dir):
+        text = _read_session_chunk(os.path.join(session_dir, fname))
+        if text is None:
+            continue
+        script_text, _ = split_perf_data(text)
+        all_samples.extend(parse_perf_script(script_text))
+    return all_samples
+
+
 def _load_session_samples(session_id):
     """Load all samples from a saved session. Returns (samples, metadata) or (None, None)."""
     session_dir = _safe_session_dir(session_id)
@@ -1089,23 +1160,7 @@ def _load_session_samples(session_id):
     with open(meta_path) as f:
         metadata = json.load(f)
 
-    all_samples = []
-    chunk_files = sorted(
-        f for f in os.listdir(session_dir)
-        if f.startswith('chunk_') and f.endswith('.txt')
-    )
-    for fname in chunk_files:
-        fpath = os.path.join(session_dir, fname)
-        try:
-            with open(fpath) as f:
-                text = f.read()
-            script_text, _ = split_perf_data(text)
-            samples = parse_perf_script(script_text)
-            all_samples.extend(samples)
-        except (IOError, OSError):
-            pass
-
-    return all_samples, metadata
+    return _load_session_chunks(session_dir), metadata
 
 
 def _export_collapsed(samples):
@@ -1263,6 +1318,10 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
                 'total_samples': len(state.all_samples),
                 'chunk_count': state.chunk_count,
             })
+        elif path == '/api/per-event':
+            params = parse_qs(parsed.query)
+            event = params.get('event', [None])[0]
+            self._handle_per_event(event)
         elif path == '/api/stop':
             self._handle_stop()
         elif path == '/api/stream':
@@ -1354,14 +1413,42 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
         else:
             self.send_error(404)
 
-    def _send_json(self, data, status=200):
+    def _send_json(self, data, status=200, allow_gzip=False):
         body = json.dumps(data).encode('utf-8')
         self.send_response(status)
         self.send_header('Content-Type', 'application/json')
+        # Compress big payloads when the client accepts it — the per-event
+        # snapshot can be multi-MB on large profiles, gzips ~10x
+        if (allow_gzip and len(body) > 8192 and
+                'gzip' in self.headers.get('Accept-Encoding', '')):
+            body = gzip.compress(body, compresslevel=1)
+            self.send_header('Content-Encoding', 'gzip')
         self.send_header('Content-Length', len(body))
         self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
         self.wfile.write(body)
+
+    def _handle_per_event(self, event):
+        """GET /api/per-event[?event=X] — pull the cached per-event
+        snapshot (one event, or all). Pairs with the 'data_version' SSE
+        notify: browsers fetch only the event they're viewing."""
+        with state.lock:
+            per_event = state._cached_per_event
+            version = {
+                'chunk_count': state.chunk_count,
+                'total_samples': len(state.all_samples),
+            }
+        if event is not None:
+            entry = per_event.get(event)
+            if entry is None:
+                self._send_json({'error': f'no data for event: {event}',
+                                 'version': version}, 404)
+                return
+            self._send_json({'event': event, 'data': entry,
+                             'version': version}, allow_gzip=True)
+        else:
+            self._send_json({'per_event': per_event, 'version': version},
+                            allow_gzip=True)
 
     def _handle_stop(self):
         """Close the agent connection, triggering normal disconnect flow."""
@@ -1653,16 +1740,23 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
         with state.lock:
             state.sse_clients.add(client)
 
-        # Send current state from cache (no expensive rebuild)
+        # Send current state (small events only — the browser pulls the
+        # heavy per-event snapshot from /api/per-event when it sees the
+        # version stamp)
         with state.lock:
             event_types = list(state.event_types)
             perf_stat = dict(state.perf_stat)
-            per_event = state._cached_per_event
+            have_data = bool(state._cached_per_event)
+            version = {
+                'chunk_count': state.chunk_count,
+                'total_samples': len(state.all_samples),
+                'event_types': event_types,
+            }
 
-        if per_event:
+        if have_data:
             for sse_event, data in [
                 ('event_types', event_types),
-                ('per_event', per_event),
+                ('data_version', version),
                 ('perf_stat', perf_stat),
             ]:
                 msg = f"event: {sse_event}\ndata: {json.dumps(data)}\n\n"
@@ -1990,27 +2084,39 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
         with open(meta_path) as f:
             metadata = json.load(f)
 
-        # Lazy rebuild: load raw chunks, parse, build per-event data
-        all_samples = []
-        chunk_files = sorted(
-            f for f in os.listdir(session_dir)
-            if f.startswith('chunk_') and f.endswith('.txt')
-        )
-        for fname in chunk_files:
-            fpath = os.path.join(session_dir, fname)
+        # Replay cache: sessions are immutable once saved, so the built
+        # per_event data is cached on disk. The key guards against config
+        # changes that alter source annotation.
+        cache_path = os.path.join(session_dir, 'replay_cache.json.gz')
+        cache_key = {
+            'chunks': len(_session_chunk_files(session_dir)),
+            'binary': config.binary_path,
+            'source_dir': config.source_dir,
+            'sysroot': config.sysroot,
+            'inline': config.inline,
+        }
+        per_event = None
+        if os.path.isfile(cache_path):
             try:
-                with open(fpath) as f:
-                    text = f.read()
-                script_text, _ = split_perf_data(text)
-                samples = parse_perf_script(script_text)
-                all_samples.extend(samples)
-            except (IOError, OSError):
+                with gzip.open(cache_path, 'rt') as f:
+                    cached = json.load(f)
+                if cached.get('key') == cache_key:
+                    per_event = cached.get('per_event')
+            except (OSError, ValueError):
                 pass
 
-        event_types = get_event_types(all_samples)
-        mapper = state.source_mapper
-        per_event = build_per_event_data(all_samples, event_types, mapper,
-                                         source=True)
+        if per_event is None:
+            # Lazy rebuild: load raw chunks, parse, build per-event data
+            all_samples = _load_session_chunks(session_dir)
+            event_types = get_event_types(all_samples)
+            mapper = state.source_mapper
+            per_event = build_per_event_data(all_samples, event_types, mapper,
+                                             source=True)
+            try:
+                with gzip.open(cache_path, 'wt') as f:
+                    json.dump({'key': cache_key, 'per_event': per_event}, f)
+            except OSError:
+                pass
 
         result = {'metadata': metadata, 'per_event': per_event}
 

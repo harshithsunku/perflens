@@ -11,8 +11,11 @@ let state = {
     lastUpdateTime: null,
     isReplayMode: false,
     replaySessionId: null,
-    flamegraphZoom: null,   // null or {name, node}
-    flamegraphZoomPath: [], // breadcrumb trail of zoom history
+    flamegraphZoom: null,   // null or {name, node} (derived from zoom names)
+    flamegraphZoomPath: [], // ancestor chain [{name, node}] (derived)
+    flamegraphZoomNames: [], // authoritative zoom: names from root — node
+                             // refs go stale on every data refresh, names
+                             // survive re-fetches
     selectedTid: null,      // null = all threads, or integer TID
     sourceFiles: [],        // [{path, found, total_samples, functions}] for current event
     metricsSystem: [],      // system metric snapshots (last ~150)
@@ -27,6 +30,38 @@ let flamegraphRects = [];   // parallel to SVG <g> elements for click handling
 let errorTimer = null;
 let fgClickTimer = null;    // single-click vs double-click disambiguation
 let fgContextMenu = null;   // persistent context menu element
+
+// Notify-and-fetch state: the newest chunk_count announced over SSE, the
+// chunk_count of the data we actually hold, and an in-flight guard.
+let dataVersion = 0;
+let fetchedVersion = -1;
+let perEventFetching = false;
+
+function fetchPerEvent(evt, force) {
+    if (state.isReplayMode || !evt) return;
+    if (perEventFetching) return;
+    if (!force && fetchedVersion >= dataVersion) return;
+    perEventFetching = true;
+    fetch('/api/per-event?event=' + encodeURIComponent(evt))
+        .then(function (r) {
+            if (!r.ok) throw new Error('no data for ' + evt);
+            return r.json();
+        })
+        .then(function (resp) {
+            perEventFetching = false;
+            state.perEvent[resp.event] = resp.data;
+            fetchedVersion = resp.version.chunk_count || 0;
+            state.lastUpdateTime = Date.now();
+            if (resp.event === state.selectedEvent) {
+                state.totalSamples = resp.data.function_summary.total_samples;
+                updateStatBar();
+                renderCurrentEvent();
+            }
+            // Catch up if more chunks landed while we were fetching
+            if (fetchedVersion < dataVersion) fetchPerEvent(state.selectedEvent);
+        })
+        .catch(function () { perEventFetching = false; });
+}
 
 // --- Theme ---
 function getTheme() {
@@ -215,6 +250,9 @@ function showReplayBanner(sessionId, timestamp) {
 function hideReplayBanner() {
     state.isReplayMode = false;
     state.replaySessionId = null;
+    // Force a live refetch — replay clobbered state.perEvent
+    fetchedVersion = -1;
+    fetchPerEvent(state.selectedEvent, true);
     document.getElementById('replay-banner').classList.remove('visible');
 }
 
@@ -280,9 +318,12 @@ document.getElementById('event-select').addEventListener('change', (e) => {
     state.selectedEvent = e.target.value;
     state.flamegraphZoom = null;
     state.flamegraphZoomPath = [];
+    state.flamegraphZoomNames = [];
     state.selectedTid = null;
     functionShowCount = 200;
     renderCurrentEvent();
+    // Newly selected event may be missing or stale — pull it
+    if (!state.isReplayMode) fetchPerEvent(state.selectedEvent, true);
 });
 
 document.getElementById('thread-filter').addEventListener('change', function(e) {
@@ -290,6 +331,7 @@ document.getElementById('thread-filter').addEventListener('change', function(e) 
     state.selectedTid = val ? parseInt(val) : null;
     state.flamegraphZoom = null;
     state.flamegraphZoomPath = [];
+    state.flamegraphZoomNames = [];
     functionShowCount = 200;
     renderCurrentEvent();
 });
@@ -311,15 +353,19 @@ function connectSSE() {
         updateEventSelector();
     });
 
-    evtSource.addEventListener('per_event', (e) => {
-        state.perEvent = JSON.parse(e.data);
-        state.lastUpdateTime = Date.now();
-        const evtData = state.perEvent[state.selectedEvent];
-        if (evtData) {
-            state.totalSamples = evtData.function_summary.total_samples;
+    // Notify-and-fetch: the server broadcasts a tiny version stamp per
+    // chunk; we pull only the event currently being viewed. The full
+    // per-event blob (multi-MB on big profiles) is never pushed over SSE.
+    evtSource.addEventListener('data_version', (e) => {
+        if (state.isReplayMode) return;
+        const v = JSON.parse(e.data);
+        dataVersion = v.chunk_count || 0;
+        state.chunkCount = v.chunk_count || 0;
+        if (v.event_types && v.event_types.length) {
+            state.eventTypes = v.event_types;
+            updateEventSelector();
         }
-        updateStatBar();
-        renderCurrentEvent();
+        fetchPerEvent(state.selectedEvent);
     });
 
     evtSource.addEventListener('perf_stat', (e) => {
@@ -523,6 +569,7 @@ function renderCurrentEvent() {
                 renderFunctionTable(data.function_summary);
                 state.flamegraphZoom = null;
                 state.flamegraphZoomPath = [];
+                state.flamegraphZoomNames = [];
                 renderFlamegraph(data.flamegraph, data.function_summary.total_samples);
             })
             .catch(function() { _threadViewPending = false; });
@@ -531,16 +578,14 @@ function renderCurrentEvent() {
 
     renderFunctionTable(evtData.function_summary);
 
-    // Flamegraph: try to preserve zoom
-    if (state.flamegraphZoom) {
-        var node = findNodeByName(evtData.flamegraph, state.flamegraphZoom.name);
+    // Flamegraph: re-derive zoom from the name path (node references go
+    // stale on every data refresh; walking by ancestry names survives it —
+    // and unlike a global name search, cannot land on a different stack).
+    if (state.flamegraphZoomNames && state.flamegraphZoomNames.length) {
+        var node = applyZoomFromNames(evtData.flamegraph);
         if (node) {
-            state.flamegraphZoom.node = node;
             renderFlamegraph(node, node.value);
         } else {
-            state.flamegraphZoom = null;
-            state.flamegraphZoomPath = [];
-            state.selectedTid = null;
             renderFlamegraph(evtData.flamegraph, evtData.function_summary.total_samples);
         }
     } else {
@@ -552,16 +597,62 @@ function renderCurrentEvent() {
     }
 }
 
-function findNodeByName(tree, name) {
-    if (!tree) return null;
-    if (tree.name === name) return tree;
-    if (tree.children) {
-        for (const child of tree.children) {
-            const found = findNodeByName(child, name);
-            if (found) return found;
+// Walk the tree along state.flamegraphZoomNames, truncating where the path
+// no longer matches (a function can disappear between rounds). Rebuilds the
+// derived {flamegraphZoom, flamegraphZoomPath} node references and returns
+// the zoom node, or null when nothing matches.
+function applyZoomFromNames(tree) {
+    var names = state.flamegraphZoomNames || [];
+    var node = tree;
+    var walked = [];
+    for (var i = 0; i < names.length; i++) {
+        var next = null;
+        var kids = node.children || [];
+        for (var j = 0; j < kids.length; j++) {
+            if (kids[j].name === names[i]) { next = kids[j]; break; }
         }
+        if (!next) break;
+        node = next;
+        walked.push(node);
+    }
+    state.flamegraphZoomNames = walked.map(function (n) { return n.name; });
+    if (walked.length === 0) {
+        state.flamegraphZoom = null;
+        state.flamegraphZoomPath = [];
+        return null;
+    }
+    state.flamegraphZoomPath = walked.slice(0, -1).map(function (n) {
+        return { name: n.name, node: n };
+    });
+    state.flamegraphZoom = { name: node.name, node: node };
+    return node;
+}
+
+// Name path from `root` down to `target` (identity match), or null.
+function pathToNode(root, target) {
+    if (root === target) return [];
+    var kids = root.children || [];
+    for (var i = 0; i < kids.length; i++) {
+        if (kids[i] === target) return [kids[i].name];
+        var sub = pathToNode(kids[i], target);
+        if (sub) { sub.unshift(kids[i].name); return sub; }
     }
     return null;
+}
+
+// Zoom to a rendered rect's node: extend the authoritative name path by the
+// clicked node's path relative to the current render root, then re-derive.
+function zoomToRectNode(node) {
+    var evtData = state.perEvent[state.selectedEvent];
+    if (!evtData || !evtData.flamegraph) return;
+    var renderRoot = (flamegraphRects.length > 0)
+        ? flamegraphRects[0].node : evtData.flamegraph;
+    var rel = pathToNode(renderRoot, node);
+    if (rel === null) return;
+    state.flamegraphZoomNames =
+        (state.flamegraphZoomNames || []).concat(rel);
+    var zoomed = applyZoomFromNames(evtData.flamegraph);
+    if (zoomed) renderFlamegraph(zoomed, zoomed.value);
 }
 
 // --- Function Table ---
@@ -1022,13 +1113,7 @@ function renderFlamegraph(data, totalSamples) {
             fgClickTimer = setTimeout(() => {
                 const rect = flamegraphRects[parseInt(g.dataset.idx)];
                 if (rect && rect.name !== 'root' && rect.node && rect.node.children && rect.node.children.length > 0) {
-                    // Push current zoom to path
-                    if (!state.flamegraphZoomPath) state.flamegraphZoomPath = [];
-                    if (state.flamegraphZoom) {
-                        state.flamegraphZoomPath.push(state.flamegraphZoom);
-                    }
-                    state.flamegraphZoom = { name: rect.name, node: rect.node };
-                    renderFlamegraph(rect.node, rect.node.value);
+                    zoomToRectNode(rect.node);
                 }
             }, 250);
         });
@@ -1055,6 +1140,7 @@ function renderFlamegraph(data, totalSamples) {
         resetBtn.addEventListener('click', () => {
             state.flamegraphZoom = null;
             state.flamegraphZoomPath = [];
+            state.flamegraphZoomNames = [];
             state.selectedTid = null;
             const evtData = state.perEvent[state.selectedEvent];
             if (evtData) renderFlamegraph(evtData.flamegraph, evtData.function_summary.total_samples);
@@ -1065,11 +1151,15 @@ function renderFlamegraph(data, totalSamples) {
     container.querySelectorAll('.fg-crumb[data-crumb-idx]').forEach(crumb => {
         crumb.addEventListener('click', () => {
             var idx = parseInt(crumb.dataset.crumbIdx);
-            var path = state.flamegraphZoomPath || [];
-            if (idx < path.length) {
-                state.flamegraphZoom = path[idx];
-                state.flamegraphZoomPath = path.slice(0, idx);
-                renderFlamegraph(state.flamegraphZoom.node, state.flamegraphZoom.node.value);
+            var names = state.flamegraphZoomNames || [];
+            if (idx < names.length) {
+                // Breadcrumbs show the ancestry chain: crumb i = names[0..i]
+                state.flamegraphZoomNames = names.slice(0, idx + 1);
+                var evtData = state.perEvent[state.selectedEvent];
+                if (evtData && evtData.flamegraph) {
+                    var node = applyZoomFromNames(evtData.flamegraph);
+                    if (node) renderFlamegraph(node, node.value);
+                }
             }
         });
     });
@@ -1230,6 +1320,7 @@ function replaySession(sessionId) {
             state.totalSamples = data.metadata.total_samples;
             state.flamegraphZoom = null;
             state.flamegraphZoomPath = [];
+            state.flamegraphZoomNames = [];
             state.selectedTid = null;
             state.lastUpdateTime = Date.now();
 
@@ -1269,8 +1360,7 @@ function replaySession(sessionId) {
         } else if (action === 'zoom') {
             const rect = flamegraphRects[rectIdx];
             if (rect && rect.node && rect.node.children && rect.node.children.length > 0) {
-                state.flamegraphZoom = { name: rect.name, node: rect.node };
-                renderFlamegraph(rect.node, rect.node.value);
+                zoomToRectNode(rect.node);
             }
         } else if (action === 'copy' && funcName) {
             navigator.clipboard.writeText(funcName).catch(() => {});

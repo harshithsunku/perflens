@@ -6,8 +6,8 @@ plan file; this is the executable summary.
 
 ## Current phase
 
-**Phases 0, 1a, 1b, 1c+1d, 2a complete.** Next up: **Phase 2b+2c — disk
-spooling + SSE notify-and-fetch**.
+**Phases 0, 1a, 1b, 1c+1d, 2a, 2b+2c complete.** Next up: **Phase 2d —
+source mapping at 500k-file / GB-DWARF scale**.
 
 ## Overhaul roadmap
 
@@ -44,10 +44,22 @@ spooling + SSE notify-and-fetch**.
       both device fixtures (12/12 event combos identical). Aggregates cover
       the full session; the --max-samples deque remains only as the raw
       window for thread/source drill-downs.
-- [ ] **Phase 2b+2c** — Disk spooling of raw chunks (kills unbounded
-      `_raw_chunks` RAM growth); replay cache; SSE → notify (`data_version`)
-      + fetch (`GET /api/per-event`, gzip); UI version-tracked fetch with
-      path-based zoom state.
+- [x] **Phase 2b+2c** — Done. 2b (landed with the 2a commit): chunks
+      spooled to disk as received (`chunk_%05d.zst` stores the compressed
+      payload as-is), `_raw_chunks` RAM growth eliminated, `_save_session`
+      metadata-only, replay cache (`replay_cache.json.gz`, config-keyed;
+      2nd replay ~40x faster). 2c: SSE now carries only a tiny
+      `data_version` stamp per chunk (was the full multi-MB per_event
+      blob); new `GET /api/per-event?event=X` serves the cached snapshot
+      gzip-encoded (~11x); UI fetches only the viewed event, with
+      in-flight guard + catch-up; flamegraph zoom is now an ancestry
+      name-path (`flamegraphZoomNames`) that survives data refreshes and
+      cannot mis-target same-named frames in other stacks; breadcrumbs =
+      ancestry chain. Verified in a real browser (puppeteer): live
+      notify→fetch→render, zoom survives chunk refresh, 0 JS errors.
+      NOTE: test/e2e_flamegraph.mjs is stale relative to the CURRENT UI
+      (expects pre-swap single/double-click semantics; fails identically
+      on HEAD) — rewrite in Phase 4.
 - [ ] **Phase 2d** — Source mapping at scale: background index (never sync
       `os.walk` on request path), persistent caches under `~/.perflens/cache`
       (source index + sqlite symbols.db), prefer llvm-symbolizer/dwarfdump,
