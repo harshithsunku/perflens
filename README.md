@@ -12,7 +12,7 @@
   <img alt="agent" src="https://img.shields.io/badge/agent-static_C_binary-58a6ff?style=flat-square"/>
   <img alt="arch" src="https://img.shields.io/badge/arch-x86__64_%7C_aarch64-c084fc?style=flat-square"/>
   <img alt="wire" src="https://img.shields.io/badge/wire-zstd_%7C_5--byte_header-d29922?style=flat-square"/>
-  <img alt="deps" src="https://img.shields.io/badge/deps-stdlib_only-f85149?style=flat-square"/>
+  <img alt="install" src="https://img.shields.io/badge/install-uvx_perflens-f85149?style=flat-square"/>
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@ No frontend frameworks. No Docker. Plain HTML/CSS/JS for the UI, and a single st
 - **ARM + x86** — same agent code runs on aarch64, aarch64_be, armv7l, x86_64
 - **Session save / replay** — raw chunks saved to disk, replayed lazily on demand via the UI's session list
 - **Static C agent** — single binary with vendored zstd, no runtime dependencies; cross-compiles to aarch64, aarch64_be, armv7l, armeb, x86_64; one-line curl install and built-in self-update
-- **Portable release packages** — PyInstaller-frozen server for Linux/macOS/Windows, prebuilt static agent binaries for five architectures
+- **Zero-friction server install** — `uvx perflens` (or `pipx` / `pip install --user`); everything resolves user-space, no sudo, corporate-machine friendly. Missing binutils? `perflens provision` downloads static addr2line/readelf into `~/.perflens/bin`
 - **Capability probing** — the agent discovers which perf events and call-graph modes (`fp` / `dwarf` / `lbr`) actually work on the target before collecting
 - **Zstd compression** — typical perf script payloads compress 20–40× before hitting the wire
 
@@ -101,15 +101,20 @@ The server reads the 5 header bytes first, then exactly `LEN` more. Compressed f
 
 ## Quick Start
 
-### Option A — pre-built release tarballs (recommended)
+### Option A — install with uv/pip (recommended)
 
 ```bash
-# On the machine where you want to view profiles
-tar xf perflens-server-<ver>-linux-x86_64.tar.gz
-./perflens-server-<ver>/perflens-server \
+# On the machine where you want to view profiles (Python 3.10+, no sudo):
+uvx perflens serve \
     --source-dir /path/to/sources \
     --binary     /path/to/unstripped-binary
 # → http://localhost:8080
+
+# Equivalent alternatives:
+#   pipx install perflens          then: perflens serve ...
+#   pip install --user perflens    then: perflens serve ...
+# Until the PyPI release, install from a release asset instead:
+#   uvx --from ./perflens-<ver>-py3-none-any.whl perflens serve ...
 ```
 
 ```bash
@@ -125,22 +130,22 @@ curl -fsSL https://raw.githubusercontent.com/harshithsunku/perflens/master/insta
 
 # Update later (downloads, verifies, atomically replaces itself):
 ~/.perflens/bin/perflens-agent --update
+
+# Or push the agent to the device from your machine (ssh arch-detect):
+perflens push-agent user@device
 ```
 
-Pre-built server tarballs are published on every tagged release for:
+Release assets published on every tagged release:
 
-| Platform | Tarball |
-|----------|---------|
-| Linux x86_64 | `perflens-server-<ver>-linux-x86_64.tar.gz` |
-| macOS arm64 (Apple Silicon) | `perflens-server-<ver>-macos-arm64.tar.gz` |
-| Windows x86_64 | `perflens-server-<ver>-windows-x86_64.tar.gz` |
-| Agent — Linux x86_64 (static binary) | `perflens-agent-linux-x86_64` |
-| Agent — Linux aarch64 (static binary) | `perflens-agent-linux-aarch64` |
-| Agent — Linux aarch64 BE (static binary) | `perflens-agent-linux-aarch64_be` |
-| Agent — Linux armv7l (static binary) | `perflens-agent-linux-armv7l` |
-| Agent — Linux armv7 BE (static binary) | `perflens-agent-linux-armeb` |
-
-> **Intel Mac users:** GitHub retired the free `macos-13` runner, so there's no pre-built macOS x86_64 tarball. Either build from source (`./build_package.sh --no-freeze --server`) or run the Linux tarball under a VM/container.
+| Asset | What it is |
+|-------|------------|
+| `perflens-<ver>-py3-none-any.whl` | Server — Python wheel (`uvx --from ...`) |
+| `perflens-agent-linux-x86_64` | Agent — static binary, Linux x86_64 |
+| `perflens-agent-linux-aarch64` | Agent — static binary, Linux aarch64 |
+| `perflens-agent-linux-aarch64_be` | Agent — static binary, Linux aarch64 BE |
+| `perflens-agent-linux-armv7l` | Agent — static binary, Linux armv7l |
+| `perflens-agent-linux-armeb` | Agent — static binary, Linux armv7 BE |
+| `perflens-tools-linux-{x86_64,aarch64}.tar.gz` | Static addr2line+readelf for `perflens provision` |
 
 ### Option B — build the agent yourself
 
@@ -165,8 +170,9 @@ The agent is a single static binary (~2 MB) with zstd built in.
 ### Option C — from source (dev / contributors)
 
 ```bash
-# Server
-python3 server/perflens_server.py \
+# Server (editable install pulls fastapi/uvicorn/orjson/zstandard)
+uv venv && uv pip install -e .
+.venv/bin/perflens serve \
     --source-dir /path/to/source \
     --binary     /path/to/myprogram \
     --port       9999 \
@@ -186,7 +192,7 @@ Then browse to `http://<server-ip>:8080`.
 | Component | Needs |
 |-----------|-------|
 | **Target device** | Linux and `perf` — nothing else (the static agent has zstd built in) |
-| **Local machine** | Python 3.8+ (or frozen tarball), `addr2line` and `readelf` from binutils (bundled in `bin/` or on PATH), ideally `zstd` for decompression. For cross-compiled targets: a matching toolchain with `<prefix>addr2line` and `<prefix>readelf` |
+| **Local machine** | Python 3.10+ and `uv`/`pip`. `addr2line`/`readelf` from binutils for source mapping — if missing, `perflens provision` downloads static builds into `~/.perflens/bin` (no sudo). For cross-compiled targets: a matching toolchain with `<prefix>addr2line` and `<prefix>readelf` |
 | **Binary** | Compiled with `-g` (debug symbols), not stripped |
 | **Source** | A checkout of the source tree readable from the server machine |
 
@@ -278,34 +284,24 @@ The agent probes each event before use and only emits the ones the kernel actual
 ## Building release packages
 
 ```bash
-./build_package.sh              # frozen server + agent (PyInstaller)
-./build_package.sh --server     # server only
-./build_package.sh --agent      # agent only
-./build_package.sh --no-freeze  # skip PyInstaller, ship raw Python
+./build_package.sh              # server wheel/sdist + native C agent
+./build_package.sh --server     # Python wheel + sdist only
+./build_package.sh --agent-c    # C agent only (native static binary)
 ```
 
 Output lands in `dist/`:
 
 ```
 dist/
-├── perflens-server-<ver>.tar.gz
-└── perflens-agent-<ver>.tar.gz
+├── perflens-<ver>-py3-none-any.whl     # server (uvx / pipx / pip)
+├── perflens-<ver>.tar.gz               # server sdist
+├── perflens-agent-c-<ver>.tar.gz       # agent tarball
+└── perflens-agent-linux-<arch>         # agent raw binary (stable name)
 ```
-
-Drop cross-compiled binaries into the right slots before building to ship a fully self-contained package:
-
-```
-server/bin/         zstd, addr2line, readelf           (server target OS)
-agent/bin/aarch64/  zstd                               (ARM64 little-endian)
-agent/bin/aarch64_be/ zstd                             (ARM64 big-endian)
-agent/bin/armv7l/   zstd                               (32-bit ARM)
-```
-
-The agent launcher auto-prepends the correct arch directory to `$PATH` based on `uname -m`. If a bundled binary is missing, agent and server both fall back to system tools.
 
 ### CI
 
-[`.github/workflows/build.yml`](.github/workflows/build.yml) builds the server on three runners (`ubuntu-latest`, `macos-latest`, `windows-latest`) and the static C agent for five architectures (x86_64, aarch64, aarch64_be, armv7l, armeb). Big-endian targets use musl toolchains from musl.cc since Ubuntu only ships little-endian sysroots. Tagged pushes (`v*`) create a GitHub Release and attach all artifacts — including raw `perflens-agent-linux-<arch>` binaries with stable names that `install-agent.sh` and the agent's `--update` fetch from `releases/latest/download/`.
+[`.github/workflows/build.yml`](.github/workflows/build.yml) lints (`ruff`), runs the test suites, builds and smoke-runs the Python wheel (with a wheel-contents check), builds the static C agent for five architectures (x86_64, aarch64, aarch64_be, armv7l, armeb), and builds static addr2line/readelf tools bundles (x86_64, aarch64) for `perflens provision`. Big-endian agent targets use musl toolchains from musl.cc since Ubuntu only ships little-endian sysroots. Tagged pushes (`v*`) create a GitHub Release and attach all artifacts — including raw `perflens-agent-linux-<arch>` binaries with stable names that `install-agent.sh` and the agent's `--update` fetch from `releases/latest/download/`. A PyPI publish job is prepared but disabled until Trusted Publishing is configured.
 
 ---
 
@@ -318,15 +314,20 @@ perflens/
 │   ├── perflens_agent.c          # C agent (~3200 lines, static binary, zero deps)
 │   ├── Makefile                  # native + cross-compile targets
 │   └── vendor/zstd/              # vendored zstd amalgamation
-├── server/
-│   ├── perflens_server.py        # TCP listener + ThreadingHTTPServer
+├── pyproject.toml                # pip/uv package (console script: perflens)
+├── src/perflens/                 # the server package
+│   ├── server.py                 # agent TCP protocol + state + sessions
+│   ├── web.py                    # FastAPI/uvicorn HTTP layer + SSE hub
+│   ├── cli.py                    # perflens serve/import/push-agent/provision
 │   ├── parser.py                 # perf script / perf stat parser
+│   ├── aggregator.py             # incremental per-event aggregation
 │   ├── source_mapper.py          # addr2line pipeline + path remap
-│   └── bin/                      # bundled zstd / addr2line / readelf
-├── ui/
-│   ├── index.html                # single-page app
-│   ├── app.js                    # all UI logic (vanilla JS, ~2000 lines)
-│   └── style.css                 # dark + light themes (CSS custom properties)
+│   ├── symcache.py               # persistent caches (~/.perflens/cache)
+│   ├── provision.py              # user-space static-tools download
+│   └── ui/                       # single-page app (ships in the wheel)
+│       ├── index.html
+│       ├── app.js                # all UI logic (vanilla JS)
+│       └── style.css             # dark + light themes
 ├── docs/
 │   ├── hero.svg
 │   ├── architecture.svg
@@ -334,8 +335,8 @@ perflens/
 ├── test/
 │   ├── sample_workload.c         # multi-function test program
 │   └── Makefile                  # gcc -g -O0 -lm
-├── build_package.sh              # builds the release tarballs
-├── .github/workflows/build.yml   # multi-OS CI + release automation
+├── build_package.sh              # local wheel + agent builds
+├── .github/workflows/build.yml   # lint + test + wheel + agents + release
 ├── VERSION
 ├── LICENSE (MIT)
 └── README.md (this file)
@@ -367,7 +368,7 @@ sudo sysctl -w kernel.perf_event_paranoid=1
 
 These are the rules the project is built to:
 
-- **Simplicity first** — Python stdlib, plain HTML/JS/CSS, no framework, no npm, no virtualenv
+- **Simplicity first** — a small, deliberate server stack (fastapi/uvicorn/orjson/zstandard, all user-space via uv); plain HTML/JS/CSS, no bundler, no npm; the agent stays zero-dependency static C
 - **Defensive parsing** — `perf` output format varies across kernel versions; parser is forgiving
 - **No secrets in code** — generic and open-source-friendly
 - **No over-engineering** — if it doesn't earn its complexity, it gets cut

@@ -10,28 +10,13 @@ permissions:
   contents: write
 
 jobs:
-  build-server:
-    name: server (${{ matrix.platform }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            platform: linux-x86_64
-            binary_name: perflens-server-bin
-            freeze_mode: script
-          - os: macos-latest
-            platform: macos-arm64
-            binary_name: perflens-server-bin
-            freeze_mode: script
-          # macOS Intel (x86_64) dropped: GitHub retired the free `macos-13`
-          # runner. Intel-Mac users can build from source or use the
-          # `--no-freeze` script tarball until we wire up a paid runner.
-          - os: windows-latest
-            platform: windows-x86_64
-            binary_name: perflens-server-bin.exe
-            freeze_mode: windows
-    runs-on: ${{ matrix.os }}
+  # -------------------------------------------------------------------------
+  # Python package: lint + tests + wheel/sdist + contents check.
+  # The wheel is the ONLY server distribution (uvx / pipx / pip install).
+  # -------------------------------------------------------------------------
+  python-package:
+    name: python package
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -41,170 +26,164 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install PyInstaller
-        shell: bash
+      - name: Install build tooling
+        run: python -m pip install --upgrade pip build twine ruff
+
+      - name: Lint (ruff)
+        run: ruff check src/
+
+      - name: Run test suites
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install pyinstaller
+          python3 test/test_parser_compat.py
+          python3 test/test_aggregator_diff.py
 
-      - name: Read version
-        id: ver
-        shell: bash
+      - name: Build wheel + sdist
+        run: python -m build
+
+      - name: Check metadata
+        run: twine check dist/*
+
+      - name: Verify wheel contents
         run: |
-          VERSION="$(tr -d '[:space:]' < VERSION)"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          python3 - <<'EOF'
+          import glob, sys, zipfile
+          whl = glob.glob('dist/perflens-*-py3-none-any.whl')[0]
+          names = zipfile.ZipFile(whl).namelist()
+          required = ['perflens/server.py', 'perflens/web.py',
+                      'perflens/provision.py', 'perflens/cli.py']
+          missing = [r for r in required if r not in names]
+          ui = [n for n in names if '/ui/' in n]
+          for f in ('index.html', 'app.js', 'style.css'):
+              if not any(n.endswith(f) for n in ui):
+                  missing.append(f'ui/{f}')
+          if missing:
+              sys.exit(f'wheel is missing: {missing}')
+          print(f'wheel OK: {len(names)} files, UI bundled')
+          EOF
 
-      # -------------------------------------------------------------------
-      # Linux / macOS: the build script does all the packaging work.
-      # -------------------------------------------------------------------
-      - name: Build server package (Linux/macOS)
-        if: matrix.freeze_mode == 'script'
-        shell: bash
+      - name: Smoke-run the wheel
         run: |
-          chmod +x build_package.sh
-          ./build_package.sh --server
-
-      # -------------------------------------------------------------------
-      # Windows: call PyInstaller directly (the bash build script relies on
-      # a POSIX environment). We still produce the same on-disk layout.
-      # -------------------------------------------------------------------
-      - name: Build server package (Windows)
-        if: matrix.freeze_mode == 'windows'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $Version = (Get-Content VERSION -Raw).Trim()
-          $PkgName = "perflens-server-$Version"
-          $PkgDir  = "build/$PkgName"
-          $Stage   = "build/server-stage"
-          if (Test-Path build) { Remove-Item build -Recurse -Force }
-          if (Test-Path dist)  { Remove-Item dist  -Recurse -Force }
-          New-Item -ItemType Directory -Path "$Stage/server" | Out-Null
-          New-Item -ItemType Directory -Path "$Stage/ui"     | Out-Null
-          Copy-Item server/perflens_server.py "$Stage/server/"
-          Copy-Item server/parser.py          "$Stage/server/"
-          Copy-Item server/source_mapper.py   "$Stage/server/"
-          Copy-Item ui/index.html,ui/app.js,ui/style.css "$Stage/ui/"
-          Copy-Item VERSION "$Stage/VERSION"
-
-          # Run PyInstaller with ';' as add-data separator on Windows.
-          Push-Location $Stage
-          pyinstaller `
-            --noconfirm --clean `
-            --onefile `
-            --name perflens-server-bin `
-            --paths server `
-            --hidden-import parser `
-            --hidden-import source_mapper `
-            --add-data "ui/index.html;ui" `
-            --add-data "ui/app.js;ui" `
-            --add-data "ui/style.css;ui" `
-            --add-data "VERSION;." `
-            --exclude-module tkinter `
-            --exclude-module unittest `
-            --exclude-module pydoc `
-            --exclude-module doctest `
-            --console `
-            server/perflens_server.py
-          Pop-Location
-
-          New-Item -ItemType Directory -Path $PkgDir             | Out-Null
-          New-Item -ItemType Directory -Path "$PkgDir/bin"       | Out-Null
-          New-Item -ItemType Directory -Path "$PkgDir/sessions"  | Out-Null
-          Copy-Item "$Stage/dist/perflens-server-bin.exe" `
-                    "$PkgDir/perflens-server-bin.exe"
-          Copy-Item VERSION "$PkgDir/VERSION"
-
-          # Simple .bat launcher (built from an array so indentation is safe
-          # inside a YAML block scalar and we don't need a here-string).
-          $Launcher = @(
-            '@echo off',
-            'setlocal',
-            'set SELF_DIR=%~dp0',
-            'set PATH=%SELF_DIR%bin;%PATH%',
-            '"%SELF_DIR%perflens-server-bin.exe" %*'
-          )
-          Set-Content -Encoding ASCII -Path "$PkgDir/perflens-server.bat" -Value $Launcher
-
-          if (-not (Test-Path dist)) { New-Item -ItemType Directory -Path dist | Out-Null }
-          Push-Location build
-          tar -czf "../dist/$PkgName.tar.gz" $PkgName
-          Pop-Location
-
-      - name: Verify binary exists
-        shell: bash
-        run: |
-          VERSION="${{ steps.ver.outputs.version }}"
-          PKG="build/perflens-server-${VERSION}"
-          if [ ! -d "$PKG" ]; then
-            echo "::error::package directory $PKG missing" >&2
-            exit 1
-          fi
-          if [ ! -f "$PKG/${{ matrix.binary_name }}" ]; then
-            echo "::warning::expected binary ${{ matrix.binary_name }} not found in $PKG (non-frozen build?)"
-          fi
-          ls -la "$PKG"
-
-      - name: Rename tarball for platform
-        shell: bash
-        run: |
-          VERSION="${{ steps.ver.outputs.version }}"
-          SRC="dist/perflens-server-${VERSION}.tar.gz"
-          DST="dist/perflens-server-${VERSION}-${{ matrix.platform }}.tar.gz"
-          mv "$SRC" "$DST"
+          python -m pip install dist/perflens-*-py3-none-any.whl
+          perflens version
+          perflens serve --http-port 8080 --port 9999 &
+          SERVER_PID=$!
+          for i in $(seq 1 30); do
+            curl -sf localhost:8080/api/status && break
+            sleep 1
+          done
+          curl -sf localhost:8080/api/status | grep -q '"status":"ok"'
+          curl -sf localhost:8080/ | grep -q '<title>PerfLens</title>'
+          kill "$SERVER_PID"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: perflens-server-${{ matrix.platform }}
-          path: dist/perflens-server-*-${{ matrix.platform }}.tar.gz
+          name: python-package
+          path: dist/*
           if-no-files-found: error
 
-  build-server-legacy:
-    name: server (linux-x86_64-legacy)
+  # -------------------------------------------------------------------------
+  # Prepared-but-disabled PyPI publish. To enable:
+  #   1. Create the project on pypi.org and configure Trusted Publishing
+  #      (repo: harshithsunku/perflens, workflow: build.yml, env: pypi).
+  #   2. Create a GitHub environment named `pypi`.
+  #   3. Change `if: false` below to:
+  #      if: startsWith(github.ref, 'refs/tags/v')
+  # -------------------------------------------------------------------------
+  publish-pypi:
+    name: publish to PyPI (disabled)
+    if: false
+    needs: [python-package]
     runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Download package
+        uses: actions/download-artifact@v4
+        with:
+          name: python-package
+          path: dist
 
-      - name: Read version
-        id: ver
-        run: echo "version=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_OUTPUT"
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
 
-      - name: Build inside AlmaLinux 8 (glibc 2.28)
+  # -------------------------------------------------------------------------
+  # Static addr2line/readelf bundle for `perflens provision` — lets the
+  # server do source mapping on machines without binutils (user-space,
+  # sha256-verified download into ~/.perflens/bin).
+  # -------------------------------------------------------------------------
+  build-tools:
+    name: tools bundle (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    env:
+      BINUTILS_VERSION: '2.44'
+      BINUTILS_SHA256: 'ce2017e059d63e67ddb9240e9d4ec49c2893605035cd60e92ad53177f4377237'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            host: ''
+            cross_pkg: ''
+          - arch: aarch64
+            host: 'aarch64-linux-gnu'
+            cross_pkg: 'gcc-aarch64-linux-gnu'
+    steps:
+      - name: Install cross-compiler
+        if: matrix.cross_pkg != ''
         run: |
-          docker run --rm \
-            -v "${{ github.workspace }}:/src" \
-            -w /src \
-            almalinux:8 bash -c '
-              set -e
-              dnf install -y python39 python39-pip gcc make binutils
-              python3.9 -m pip install --upgrade pip
-              python3.9 -m pip install pyinstaller
-              chmod +x build_package.sh
-              ./build_package.sh --server
-            '
-          sudo chown -R "$(id -u):$(id -g)" build dist
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ${{ matrix.cross_pkg }}
 
-      - name: Verify binary exists
+      - name: Download binutils source (pinned + verified)
         run: |
-          VERSION="${{ steps.ver.outputs.version }}"
-          PKG="build/perflens-server-${VERSION}"
-          ls -la "$PKG"
+          curl -fsSL -o binutils.tar.xz \
+            "https://ftp.gnu.org/gnu/binutils/binutils-${BINUTILS_VERSION}.tar.xz"
+          echo "${BINUTILS_SHA256}  binutils.tar.xz" | sha256sum -c -
+          tar xf binutils.tar.xz
 
-      - name: Rename tarball for platform
+      - name: Build static addr2line + readelf
         run: |
-          VERSION="${{ steps.ver.outputs.version }}"
-          mv "dist/perflens-server-${VERSION}.tar.gz" \
-             "dist/perflens-server-${VERSION}-linux-x86_64-legacy.tar.gz"
+          mkdir build && cd build
+          HOST_FLAG=""
+          [ -n "${{ matrix.host }}" ] && HOST_FLAG="--host=${{ matrix.host }}"
+          "../binutils-${BINUTILS_VERSION}/configure" $HOST_FLAG \
+            --disable-werror --disable-gdb --disable-gdbserver \
+            --disable-sim --disable-readline --disable-libdecnumber \
+            --disable-gprofng --disable-shared --enable-static --disable-nls
+          make -j"$(nproc)" all-binutils
+          # libtool needs -all-static for a fully static final link
+          rm -f binutils/addr2line binutils/readelf
+          make -C binutils LDFLAGS=-all-static addr2line readelf
+          STRIP="${{ matrix.host }}-strip"; [ -n "${{ matrix.host }}" ] || STRIP=strip
+          "$STRIP" binutils/addr2line binutils/readelf
+          file binutils/addr2line binutils/readelf
+          file binutils/addr2line | grep -q 'statically linked'
+          # Native build: verify the tools actually run
+          if [ -z "${{ matrix.host }}" ]; then
+            ./binutils/addr2line --version | head -1
+            ./binutils/readelf --version | head -1
+          fi
+
+      - name: Package bundle
+        run: |
+          mkdir -p dist
+          ASSET="perflens-tools-linux-${{ matrix.arch }}.tar.gz"
+          tar -czf "dist/${ASSET}" -C build/binutils addr2line readelf
+          (cd dist && sha256sum "${ASSET}" > "${ASSET}.sha256")
+          ls -la dist
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: perflens-server-linux-x86_64-legacy
-          path: dist/perflens-server-*-linux-x86_64-legacy.tar.gz
+          name: perflens-tools-${{ matrix.arch }}
+          path: dist/perflens-tools-*
           if-no-files-found: error
 
+  # -------------------------------------------------------------------------
+  # Static C agent for all supported device architectures.
+  # -------------------------------------------------------------------------
   build-agent-c:
     name: agent-c (${{ matrix.arch }})
     runs-on: ubuntu-latest
@@ -296,10 +275,13 @@ jobs:
             dist/perflens-agent-linux-*
           if-no-files-found: error
 
+  # -------------------------------------------------------------------------
+  # Release on tag: agent binaries, tools bundles, wheel + sdist.
+  # -------------------------------------------------------------------------
   release:
     name: release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-server, build-server-legacy, build-agent-c]
+    needs: [python-package, build-agent-c, build-tools]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -318,21 +300,20 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Collect release assets
-        id: collect
         shell: bash
         run: |
           mkdir -p release
-          find artifacts -name 'perflens-*.tar.gz' -exec cp {} release/ \;
           # Raw agent binaries (stable names used by install-agent.sh and
-          # the agent's --update)
-          find artifacts -name 'perflens-agent-linux-*' -exec cp {} release/ \;
+          # the agent's --update) + versioned agent tarballs
+          find artifacts -name 'perflens-agent-*' -exec cp {} release/ \;
+          # Static tools bundles + checksums (used by `perflens provision`)
+          find artifacts -name 'perflens-tools-*' -exec cp {} release/ \;
+          # Python package (also published to PyPI once enabled)
+          find artifacts -path '*python-package*' -name 'perflens-*' \
+            -exec cp {} release/ \;
           ls -la release
-          echo "assets<<EOF" >> "$GITHUB_OUTPUT"
-          (cd release && ls perflens-*) >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
 
       - name: Generate release notes
-        id: notes
         shell: bash
         run: |
           VERSION="${{ steps.ver.outputs.version }}"
@@ -345,8 +326,6 @@ jobs:
           ' CHANGELOG.md || true)"
           {
             echo "## PerfLens ${VERSION}"
-            echo
-            echo "Self-contained, portable packages for the PerfLens profiling tool."
             if [ -n "${CHANGELOG_BODY}" ]; then
               echo
               echo "### Highlights"
@@ -354,43 +333,34 @@ jobs:
               echo "${CHANGELOG_BODY}"
             fi
             echo
-            echo "### Downloads"
+            echo "### Install"
             echo
-            echo "| Platform | File |"
-            echo "|----------|------|"
+            echo '```bash'
+            echo "# Server (any machine with Python 3.10+; everything user-space):"
+            echo "uvx perflens                       # or: pipx install perflens"
+            echo "uvx --from ./perflens-${VERSION}-py3-none-any.whl perflens   # from this release"
+            echo
+            echo "# Agent (on the target device — zero dependencies, no sudo):"
+            echo "curl -fsSL https://raw.githubusercontent.com/harshithsunku/perflens/master/install-agent.sh | sh"
+            echo '```'
+            echo
+            echo "### Assets"
+            echo
+            echo "| Asset | What it is |"
+            echo "|-------|------------|"
             for f in release/perflens-*; do
               fname="$(basename "$f")"
               case "$fname" in
-                perflens-agent-linux-aarch64_be) plat="Agent — Linux aarch64 BE (static binary)" ;;
-                perflens-agent-linux-aarch64)    plat="Agent — Linux aarch64 (static binary)" ;;
-                perflens-agent-linux-armeb)      plat="Agent — Linux armv7 BE (static binary)" ;;
-                perflens-agent-linux-armv7l)     plat="Agent — Linux armv7l (static binary)" ;;
-                perflens-agent-linux-x86_64)     plat="Agent — Linux x86_64 (static binary)" ;;
-                *agent-c*aarch64_be*) plat="Agent tarball — Linux aarch64 BE" ;;
-                *agent-c*aarch64*)   plat="Agent tarball — Linux aarch64" ;;
-                *agent-c*armeb*)     plat="Agent tarball — Linux armv7 BE" ;;
-                *agent-c*armv7l*)    plat="Agent tarball — Linux armv7l" ;;
-                *agent-c*x86_64*)    plat="Agent tarball — Linux x86_64" ;;
-                *linux-x86_64-legacy*)  plat="Server — Linux x86_64 (legacy glibc ≥ 2.28)" ;;
-                *linux-x86_64*)    plat="Server — Linux x86_64" ;;
-                *macos-arm64*)     plat="Server — macOS arm64" ;;
-                *macos-x86_64*)    plat="Server — macOS x86_64" ;;
-                *windows-x86_64*)  plat="Server — Windows x86_64" ;;
-                *)                 plat="other" ;;
+                perflens-agent-linux-*)   what="Agent — static binary (stable name; used by install-agent.sh and --update)" ;;
+                perflens-agent-c-*)       what="Agent — versioned tarball" ;;
+                perflens-tools-*.sha256)  what="Tools bundle checksum" ;;
+                perflens-tools-*)         what="Static addr2line+readelf for \`perflens provision\`" ;;
+                *.whl)                    what="Server — Python wheel" ;;
+                *.tar.gz)                 what="Server — Python sdist" ;;
+                *)                        what="other" ;;
               esac
-              echo "| ${plat} | ${fname} |"
+              echo "| ${fname} | ${what} |"
             done
-            echo
-            echo "### Usage"
-            echo
-            echo '```'
-            echo "# Agent (on the target device — zero dependencies, no sudo):"
-            echo "curl -fsSL https://raw.githubusercontent.com/harshithsunku/perflens/master/install-agent.sh | sh"
-            echo
-            echo "# Server:"
-            echo "tar xf perflens-server-${VERSION}-<platform>.tar.gz"
-            echo "./perflens-server-${VERSION}/perflens-server --source-dir ... --binary ..."
-            echo '```'
           } > release_notes.md
           cat release_notes.md
 

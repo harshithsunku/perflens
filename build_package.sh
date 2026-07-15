@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 #
-# build_package.sh -- produce self-contained artifacts for the PerfLens
-# server and the static C agent. No pre-installed dependencies needed on
-# the target machines.
+# build_package.sh -- build PerfLens distributables locally.
+#
+#   Server: Python wheel + sdist (what `uvx perflens` / pip installs).
+#   Agent:  static C binary, zero dependencies.
 #
 # Usage:
-#   ./build_package.sh              # build server + C agent
-#   ./build_package.sh --server     # server package only
-#   ./build_package.sh --agent-c    # C agent (native static binary)
-#   ./build_package.sh --no-freeze  # skip PyInstaller, package scripts only
+#   ./build_package.sh              # build server wheel + C agent
+#   ./build_package.sh --server     # server wheel/sdist only
+#   ./build_package.sh --agent-c    # C agent only (native static binary)
+#
+# CI (.github/workflows/build.yml) is the source of truth for release
+# artifacts (all agent arches + static tools bundles); this script covers
+# the local/native subset.
 #
 set -e
 
@@ -21,15 +25,13 @@ cd "$REPO_ROOT"
 
 BUILD_SERVER=1
 BUILD_AGENT_C=1
-NO_FREEZE=0
 
 for arg in "$@"; do
     case "$arg" in
         --server)    BUILD_SERVER=1; BUILD_AGENT_C=0 ;;
         --agent-c)   BUILD_AGENT_C=1; BUILD_SERVER=0 ;;
-        --no-freeze) NO_FREEZE=1 ;;
         -h|--help)
-            sed -n '3,15p' "$0"
+            sed -n '3,16p' "$0"
             exit 0
             ;;
         *)
@@ -73,242 +75,45 @@ mkdir -p "$BUILD_DIR" "$DIST_DIR"
 info "PerfLens build -- version ${VERSION}"
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Server: Python wheel + sdist
 # ---------------------------------------------------------------------------
 
-write_server_launcher() {
-    local dest="$1"
-    cat > "$dest" <<'LAUNCHER_EOF'
-#!/usr/bin/env bash
-set -e
-SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
-export PATH="$SELF_DIR/bin:$PATH"
-if [ -f "$SELF_DIR/perflens-server-bin" ]; then
-    exec "$SELF_DIR/perflens-server-bin" "$@"
-fi
-if [ -d "$SELF_DIR/lib" ] && [ "$(ls -A "$SELF_DIR/lib" 2>/dev/null)" ]; then
-    export PYTHONPATH="$SELF_DIR/lib:${PYTHONPATH:-}"
-fi
-exec python3 "$SELF_DIR/server/perflens_server.py" "$@"
-LAUNCHER_EOF
-    chmod +x "$dest"
-}
+build_server() {
+    info "Building Python wheel + sdist"
+    if command -v uv >/dev/null 2>&1; then
+        uv build
+    elif python3 -c 'import build' 2>/dev/null; then
+        python3 -m build
+    else
+        err "Need either 'uv' or the 'build' module (pip install build)"
+        return 1
+    fi
 
-write_server_readme() {
-    local dest="$1"
-    cat > "$dest" <<README_EOF
-PerfLens Server ${VERSION}
-==========================
+    local whl
+    whl="$(ls "$DIST_DIR"/perflens-*-py3-none-any.whl 2>/dev/null | head -1)"
+    if [ -z "$whl" ]; then
+        err "wheel not produced"
+        return 1
+    fi
 
-Real-time Linux perf profiler server. Receives perf data from agents over
-TCP, decompresses it, and serves a web UI for browsing flame graphs,
-function-level breakdowns, and annotated source.
-
-Quick start
------------
-
-    ./perflens-server --source-dir /path/to/sources --binary /path/to/unstripped-binary
-
-Then open http://localhost:8080 in your browser. Run an agent on the target
-device that points back at this machine's IP address.
-
-CLI options
------------
-
-    --port PORT           TCP port for agent connections (default: 9999)
-    --http-port PORT      HTTP port for the web UI        (default: 8080)
-    --source-dir DIR      Path to source code root
-    --binary PATH         Path to unstripped binary with debug symbols
-    --map PATH            Path to linker .map file (optional)
-    --path-map FROM=TO    Compile-time path prefix mapping
-                          (e.g. /build/src=/home/user/src)
-    --addr2line PATH      Custom addr2line binary (optional)
-    --max-samples N       Max samples retained in memory (default: 500000)
-
-Required binaries (bundled in ./bin/)
--------------------------------------
-
-    zstd       -- decompresses agent payloads (flag 1)
-    addr2line  -- resolves addresses to source:line (from binutils)
-    readelf    -- reads symbol tables (from binutils)
-
-If these are not present in ./bin/, the launcher will fall back to the
-system PATH. When missing entirely, source mapping and compressed streams
-will be degraded -- the server still runs.
-
-Directory layout
-----------------
-
-    perflens-server       -- launcher (bash)
-    perflens-server-bin   -- frozen PyInstaller binary (if built)
-    server/               -- script-mode sources (if --no-freeze)
-    ui/                   -- bundled web UI (frozen mode only)
-    bin/                  -- zstd / addr2line / readelf
-    sessions/             -- saved profiling sessions (created on demand)
-    VERSION               -- package version
-README_EOF
-}
-
-write_pyinstaller_spec() {
-    local spec_path="$1"
-    local src_dir="$2"
-    cat > "$spec_path" <<SPEC_EOF
-# -*- mode: python ; coding: utf-8 -*-
-# Generated by build_package.sh -- edit build_package.sh, not this file.
-
-import os
-
-block_cipher = None
-
-SRC = r"${src_dir}"
-
-datas = [
-    (os.path.join(SRC, 'ui', 'index.html'), 'ui'),
-    (os.path.join(SRC, 'ui', 'app.js'),     'ui'),
-    (os.path.join(SRC, 'ui', 'style.css'),  'ui'),
-    (os.path.join(SRC, 'VERSION'),          '.'),
-]
-
-a = Analysis(
-    [os.path.join(SRC, 'server', 'perflens_server.py')],
-    pathex=[os.path.join(SRC, 'server')],
-    binaries=[],
-    datas=datas,
-    hiddenimports=['parser', 'source_mapper'],
-    hookspath=[],
-    runtime_hooks=[],
-    excludes=['tkinter', 'unittest', 'pydoc', 'doctest'],
-    win_no_prefer_redirects=False,
-    win_private_assemblies=False,
-    cipher=block_cipher,
-    noarchive=False,
-)
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
-
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    [],
-    name='perflens-server-bin',
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=True,
-    upx=False,
-    upx_exclude=[],
-    runtime_tmpdir=None,
-    console=True,
-    disable_windowed_traceback=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-)
-SPEC_EOF
+    # Contents check: server modules + bundled UI must be inside
+    python3 - "$whl" <<'EOF'
+import sys, zipfile
+names = zipfile.ZipFile(sys.argv[1]).namelist()
+required = ['perflens/server.py', 'perflens/web.py',
+            'perflens/provision.py', 'perflens/cli.py']
+missing = [r for r in required if r not in names]
+for f in ('index.html', 'app.js', 'style.css'):
+    if not any(n.endswith(f) and '/ui/' in n for n in names):
+        missing.append(f'ui/{f}')
+if missing:
+    sys.exit(f'wheel is missing: {missing}')
+EOF
+    ok "Wrote ${whl} (contents verified)"
 }
 
 # ---------------------------------------------------------------------------
-# Server package
-# ---------------------------------------------------------------------------
-
-build_server_frozen() {
-    local stage="$BUILD_DIR/server-stage"
-    local pkg_dir="$BUILD_DIR/perflens-server-${VERSION}"
-    rm -rf "$stage" "$pkg_dir"
-    mkdir -p "$stage"
-
-    info "Staging server sources"
-    mkdir -p "$stage/server" "$stage/ui"
-    cp server/perflens_server.py "$stage/server/"
-    cp server/parser.py           "$stage/server/"
-    cp server/source_mapper.py    "$stage/server/"
-    cp ui/index.html ui/app.js ui/style.css "$stage/ui/"
-    cp VERSION "$stage/VERSION" 2>/dev/null || echo "$VERSION" > "$stage/VERSION"
-
-    local spec="$stage/perflens_server.spec"
-    write_pyinstaller_spec "$spec" "$stage"
-
-    info "Running PyInstaller"
-    local pyi_ok=0
-    if command -v pyinstaller >/dev/null 2>&1; then
-        if ( cd "$stage" && pyinstaller --clean --noconfirm --distpath "$stage/_dist" \
-                --workpath "$stage/_work" "$spec" ) >/dev/null 2>&1; then
-            pyi_ok=1
-        fi
-    fi
-    if [ "$pyi_ok" -ne 1 ]; then
-        warn "PyInstaller failed or not available -- falling back to script mode"
-        build_server_scripts
-        return
-    fi
-
-    mkdir -p "$pkg_dir/bin" "$pkg_dir/sessions"
-    cp "$stage/_dist/perflens-server-bin" "$pkg_dir/perflens-server-bin"
-    chmod +x "$pkg_dir/perflens-server-bin"
-    write_server_launcher "$pkg_dir/perflens-server"
-    echo "$VERSION" > "$pkg_dir/VERSION"
-    write_server_readme "$pkg_dir/README.txt"
-
-    copy_server_bins "$pkg_dir/bin"
-
-    local tarball="$DIST_DIR/perflens-server-${VERSION}.tar.gz"
-    ( cd "$BUILD_DIR" && tar -czf "$tarball" "perflens-server-${VERSION}" )
-    ok "Wrote ${tarball}"
-}
-
-build_server_scripts() {
-    local pkg_dir="$BUILD_DIR/perflens-server-${VERSION}"
-    rm -rf "$pkg_dir"
-    mkdir -p "$pkg_dir/server" "$pkg_dir/ui" "$pkg_dir/bin" "$pkg_dir/lib" "$pkg_dir/sessions"
-
-    cp server/perflens_server.py "$pkg_dir/server/"
-    cp server/parser.py           "$pkg_dir/server/"
-    cp server/source_mapper.py    "$pkg_dir/server/"
-    cp ui/index.html ui/app.js ui/style.css "$pkg_dir/ui/"
-
-    write_server_launcher "$pkg_dir/perflens-server"
-    echo "$VERSION" > "$pkg_dir/VERSION"
-    write_server_readme "$pkg_dir/README.txt"
-
-    # Vendored pip packages (optional -- requirements-server.txt may be empty)
-    if [ -f "$REPO_ROOT/requirements-server.txt" ] \
-            && [ -s "$REPO_ROOT/requirements-server.txt" ]; then
-        info "Vendoring pip dependencies into lib/"
-        if command -v pip3 >/dev/null 2>&1; then
-            pip3 install --quiet --target "$pkg_dir/lib" \
-                -r "$REPO_ROOT/requirements-server.txt" --no-deps || \
-                warn "pip3 install failed -- lib/ may be incomplete"
-        else
-            warn "pip3 not found -- skipping vendored dependencies"
-        fi
-    fi
-
-    copy_server_bins "$pkg_dir/bin"
-
-    local tarball="$DIST_DIR/perflens-server-${VERSION}.tar.gz"
-    ( cd "$BUILD_DIR" && tar -czf "$tarball" "perflens-server-${VERSION}" )
-    ok "Wrote ${tarball}"
-}
-
-copy_server_bins() {
-    local dest="$1"
-    mkdir -p "$dest"
-    local any=0
-    for name in zstd addr2line readelf; do
-        if [ -f "server/bin/$name" ]; then
-            cp "server/bin/$name" "$dest/"
-            chmod +x "$dest/$name"
-            any=1
-        fi
-    done
-    if [ "$any" -eq 0 ]; then
-        warn "No binaries found in server/bin/ -- drop zstd/addr2line/readelf there before distributing"
-    fi
-}
-
-# ---------------------------------------------------------------------------
-# C Agent package (static binary)
+# C Agent (static binary)
 # ---------------------------------------------------------------------------
 
 build_agent_c() {
@@ -348,11 +153,7 @@ build_agent_c() {
 # ---------------------------------------------------------------------------
 
 if [ "$BUILD_SERVER" -eq 1 ]; then
-    if [ "$NO_FREEZE" -eq 1 ]; then
-        build_server_scripts
-    else
-        build_server_frozen
-    fi
+    build_server
 fi
 
 if [ "$BUILD_AGENT_C" -eq 1 ]; then
@@ -364,16 +165,15 @@ info "Build complete. Artifacts in: $DIST_DIR"
 ls -1 "$DIST_DIR" 2>/dev/null | sed 's/^/    /'
 echo
 cat <<DEPLOY_EOF
-Deployment
-----------
-  Server:
-    1. scp ${DIST_DIR}/perflens-server-${VERSION}.tar.gz host:
-    2. ssh host 'tar xf perflens-server-${VERSION}.tar.gz'
-    3. ssh host './perflens-server-${VERSION}/perflens-server --source-dir ... --binary ...'
-    4. Browse to http://host:8080
+Usage
+-----
+  Server (this machine or any machine with Python 3.10+):
+    uvx --from ${DIST_DIR}/perflens-${VERSION}-py3-none-any.whl perflens serve
+    # or from PyPI once published:  uvx perflens
 
   Agent (static C binary, zero deps):
     1. scp ${DIST_DIR}/perflens-agent-linux-\$(uname -m) device:perflens-agent
     2. ssh device './perflens-agent --listen'        # or --server SERVER_IP
     (or on the device:  curl -fsSL .../install-agent.sh | sh)
+    (or from this machine:  perflens push-agent user@device)
 DEPLOY_EOF

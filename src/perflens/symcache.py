@@ -90,7 +90,7 @@ class SymbolCache:
                 rows = self._conn.execute(
                     'SELECT vaddr, file, line FROM addr2line WHERE bkey=?',
                     (bkey,)).fetchall()
-            return {v: (f, l) for v, f, l in rows}
+            return {v: (f, ln) for v, f, ln in rows}
         except sqlite3.Error:
             return {}
 
@@ -102,7 +102,7 @@ class SymbolCache:
             with self._lock:
                 self._conn.executemany(
                     'INSERT OR REPLACE INTO addr2line VALUES (?,?,?,?)',
-                    [(bkey, v, f, l) for v, (f, l) in entries.items()])
+                    [(bkey, v, f, ln) for v, (f, ln) in entries.items()])
                 self._conn.commit()
         except sqlite3.Error:
             pass

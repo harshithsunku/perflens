@@ -233,20 +233,17 @@ wizard_state: dict = None              # wizard UI state
 # Startup probing
 # ---------------------------------------------------------------------------
 
-def _find_binary(name, bundled_subdir='bin'):
-    """Find a binary: check server/bin/ first, then system PATH."""
-    bundled = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                           bundled_subdir, name)
-    if os.path.isfile(bundled) and os.access(bundled, os.X_OK):
-        return bundled
-    try:
-        r = subprocess.run(['which', name], capture_output=True,
-                           text=True, timeout=5)
-        if r.returncode == 0:
-            return r.stdout.strip()
-    except Exception:
-        pass
-    return None
+def _perflens_bin_dir():
+    from perflens.provision import bin_dir
+    return bin_dir()
+
+
+def _find_binary(name, download=False):
+    """Find a binary: PATH, then ~/.perflens/bin, then (for addr2line/
+    readelf, when download=True) the static tools bundle from the release."""
+    from perflens.provision import resolve_tool
+    path, _origin = resolve_tool(name, download=download)
+    return path
 
 
 def probe_tools(cfg):
@@ -285,16 +282,21 @@ def probe_tools(cfg):
               file=sys.stderr)
     else:
         # Prefer llvm-addr2line: GNU-compatible flags, but dramatically
-        # faster on GB-scale DWARF (lazy index vs full scan)
-        found = _find_binary('llvm-addr2line') or _find_binary('addr2line')
+        # faster on GB-scale DWARF (lazy index vs full scan). If neither
+        # variant is on PATH or in ~/.perflens/bin, try downloading the
+        # static tools bundle from the release (user-space, sha256-checked).
+        found = (_find_binary('llvm-addr2line')
+                 or _find_binary('addr2line', download=True))
         if found:
             cfg.addr2line_bin = found
-            label = 'bundled' if 'server/bin' in found else 'system'
+            label = ('provisioned' if found.startswith(_perflens_bin_dir())
+                     else 'system')
             print(f"[server]   addr2line: {found} ({label})", file=sys.stderr)
         else:
             cfg.addr2line_bin = None
-            print("[server]   addr2line: NOT FOUND (source mapping disabled)",
-                  file=sys.stderr)
+            print("[server]   addr2line: NOT FOUND (source mapping disabled "
+                  "— run `perflens provision`, install binutils, or pass "
+                  "--addr2line)", file=sys.stderr)
 
     # llvm-dwarfdump (optional): fast DWARF source-file listing
     found = _find_binary('llvm-dwarfdump')
@@ -322,14 +324,16 @@ def probe_tools(cfg):
         except Exception:
             cfg.readelf_bin = None
     if not cfg.readelf_bin:
-        found = _find_binary('readelf')
+        found = _find_binary('readelf', download=True)
         if found:
             cfg.readelf_bin = found
-            label = 'bundled' if 'server/bin' in found else 'system'
+            label = ('provisioned' if found.startswith(_perflens_bin_dir())
+                     else 'system')
             print(f"[server]   readelf: {found} ({label})", file=sys.stderr)
         else:
             cfg.readelf_bin = 'readelf'  # fallback, may fail at runtime
-            print("[server]   readelf: NOT FOUND (using 'readelf' fallback)",
+            print("[server]   readelf: NOT FOUND (using 'readelf' fallback "
+                  "— run `perflens provision` or install binutils)",
                   file=sys.stderr)
 
     # sysroot
@@ -341,16 +345,16 @@ def probe_tools(cfg):
                   file=sys.stderr)
             cfg.sysroot = None
 
-    # zstd
+    # zstd (fallback only — decompression is in-process via zstandard)
     found = _find_binary('zstd')
     if found:
         cfg.zstd_bin = found
-        label = 'bundled' if 'server/bin' in found else 'system'
-        print(f"[server]   zstd: {found} ({label})", file=sys.stderr)
+        print(f"[server]   zstd: {found}", file=sys.stderr)
     else:
         cfg.zstd_bin = None
-        print("[server]   zstd: NOT FOUND (compressed payloads will fail)",
-              file=sys.stderr)
+        if _zstd is None:
+            print("[server]   zstd: NOT FOUND and zstandard module missing "
+                  "(compressed payloads will fail)", file=sys.stderr)
 
     # Path map
     if cfg.path_map:
@@ -774,7 +778,8 @@ def connect_to_agent(host, port, timeout=10):
         sock.connect((host, port))
     except (IOError, OSError) as e:
         sock.close()
-        raise RuntimeError(f'Cannot connect to agent at {host}:{port}: {e}')
+        raise RuntimeError(
+            f'Cannot connect to agent at {host}:{port}: {e}') from e
 
     # Read hello message (flag 3)
     header = recv_exactly(sock, 5)
@@ -796,7 +801,7 @@ def connect_to_agent(host, port, timeout=10):
         hello = json.loads(payload.decode('utf-8', errors='replace'))
     except ValueError as e:
         sock.close()
-        raise RuntimeError(f'Invalid hello JSON: {e}')
+        raise RuntimeError(f'Invalid hello JSON: {e}') from e
 
     if hello.get('type') != 'hello':
         sock.close()
@@ -1047,7 +1052,8 @@ def _run_perf_script(perf_data_path):
         if r.returncode == 0 and r.stdout.strip():
             return r.stdout
     except subprocess.TimeoutExpired:
-        raise RuntimeError('perf script timed out (file too large?)')
+        raise RuntimeError(
+            'perf script timed out (file too large?)') from None
     except Exception:
         pass
 
@@ -1062,7 +1068,8 @@ def _run_perf_script(perf_data_path):
         stderr = r.stderr.strip() if r.stderr else 'unknown error'
         raise RuntimeError(f'perf script failed: {stderr}')
     except subprocess.TimeoutExpired:
-        raise RuntimeError('perf script timed out (file too large?)')
+        raise RuntimeError(
+            'perf script timed out (file too large?)') from None
 
 
 def import_perf_data(perf_data_path):
@@ -1128,10 +1135,11 @@ def build_per_event_data(all_samples, event_types, mapper, source=False):
     source_builder = None
     if source:
         if mapper:
-            source_builder = lambda evt_orig: build_annotated_source(
-                mapper, evt_orig)
+            def source_builder(evt_orig):
+                return build_annotated_source(mapper, evt_orig)
         else:
-            source_builder = lambda evt_orig: {}
+            def source_builder(evt_orig):
+                return {}
     return build_per_event_batch(all_samples, mapper,
                                  source_builder=source_builder)
 
@@ -1273,7 +1281,7 @@ def _render_flamegraph_svg(fg_root, total_samples, event_type):
         title = f"{_svg_escape(r['name'])}{inlined_tag} ({r['value']} samples, {pct}%)"
         stroke = ' stroke-dasharray="3 2" stroke="rgba(0,0,0,0.3)" stroke-width="1"' \
             if inlined else ''
-        lines.append(f'<g>')
+        lines.append('<g>')
         lines.append(f'  <rect x="{r["x"]:.1f}" y="{y}" width="{rw:.1f}"'
                      f' height="{row_height - 1}" fill="{color}" rx="1"{stroke}>'
                      f'<title>{title}</title></rect>')

@@ -4,6 +4,7 @@
     perflens serve [server flags]  # explicit form
     perflens import FILE           # import a perf.data file and serve it
     perflens push-agent USER@HOST  # install the agent binary on a device
+    perflens provision [--status]  # fetch static addr2line/readelf tools
     perflens version
 """
 
@@ -23,6 +24,9 @@ Commands:
                 Detect the device arch over ssh, download the matching
                 static agent binary from the latest GitHub release, and
                 scp it to the device
+  provision     Download the static addr2line/readelf tools bundle into
+                ~/.perflens/bin (for machines without binutils).
+                `provision --status` shows what resolves from where
   version       Print version and exit
 
 Run `perflens serve --help` for the full server flag reference.
@@ -177,6 +181,9 @@ def main(argv=None):
         return _run_import(argv[1:])
     if argv and argv[0] == 'push-agent':
         return _run_push_agent(argv[1:])
+    if argv and argv[0] == 'provision':
+        from perflens.provision import run_provision
+        return run_provision(argv[1:])
 
     # Default: everything is server flags
     _run_serve(argv)

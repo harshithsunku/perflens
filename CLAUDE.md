@@ -99,11 +99,12 @@ perflens/
 ├── src/perflens/                 # the server package
 │   ├── server.py                 # agent TCP protocol + state + sessions
 │   ├── web.py                    # FastAPI/uvicorn HTTP layer + SSE hub
-│   ├── cli.py                    # perflens serve / import / push-agent
+│   ├── cli.py                    # perflens serve/import/push-agent/provision
 │   ├── parser.py                 # perf script / perf stat parser
 │   ├── aggregator.py             # incremental per-event aggregation
 │   ├── source_mapper.py          # addr2line pipeline + path remap
 │   ├── symcache.py               # persistent caches (~/.perflens/cache)
+│   ├── provision.py              # static addr2line/readelf download (~/.perflens/bin)
 │   └── ui/                       # single-page app (ships in the wheel)
 ├── server/perflens_server.py     # compat shim (one release)
 ├── docs/

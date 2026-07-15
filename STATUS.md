@@ -6,8 +6,8 @@ plan file; this is the executable summary.
 
 ## Current phase
 
-**Phases 0–2, 3a+3b, and 3e complete.** Next up: **Phase 3c+3d —
-provision.py + CI overhaul** (then Phase 4 tests, Phase 5 device E2E).
+**Phases 0–3 complete** (0, 1, 2, 3a+3b, 3e, 3c+3d). Next up:
+**Phase 4 — pytest suite** (then Phase 5 device E2E + 0.6.0 release).
 
 ### Start-here for the next session
 
@@ -19,12 +19,10 @@ provision.py + CI overhaul** (then Phase 4 tests, Phase 5 device E2E).
   for the compat shim `server/perflens_server.py`.
 - Regression suites: `python3 test/test_parser_compat.py` and
   `python3 test/test_aggregator_diff.py` (both green).
-- KNOWN-STALE after the restructure (fix in 3c+3d, do NOT ship a release
-  before): `build_package.sh --server` and the CI server jobs still
-  reference the old `server/*.py` + `ui/` paths — the whole PyInstaller
-  server build is being DROPPED in 3d in favor of the wheel; CI needs
-  `python -m build` + wheel-contents check + prepared-but-disabled PyPI
-  publish. README/docs still describe the tarball install story.
+- Build/CI/README are all current as of 3c+3d (PyInstaller gone, wheel is
+  the only server artifact, CI lint is strict). Remaining doc debt: the
+  docs/ GitHub Pages site still describes the old tarball install —
+  refresh it during Phase 5 release prep.
 - Sessions now default to `~/.perflens/sessions` (`--sessions-dir` to
   override; `PERFLENS_HOME` moves the whole root — tests use this).
   The old repo-root `sessions/` dir is no longer read.
@@ -135,10 +133,34 @@ provision.py + CI overhaul** (then Phase 4 tests, Phase 5 device E2E).
       summaries had hash-randomized ordering for equal-count functions
       (`set(a)|set(b)` union in aggregator.py + parser.py) — now a
       deterministic dict-based union; output stable across processes.
-- [ ] **Phase 3c+3d** — `provision.py` binary auto-download to
-      `~/.perflens/bin` (graceful degrade offline); CI: sdist/wheel +
-      wheel-contents check + ruff; drop PyInstaller server + Python-agent
-      jobs; publish-on-tag prepared but disabled.
+- [x] **Phase 3c+3d** — Done. `src/perflens/provision.py`: tool resolution
+      flag → PATH → `~/.perflens/bin` → sha256-verified download of the
+      static `perflens-tools-linux-<arch>.tar.gz` release asset (x86_64 +
+      aarch64); `perflens provision` / `provision --status` CLI; server
+      `probe_tools` auto-provisions addr2line/readelf at startup when
+      both PATH and cache miss, degrades with instructions offline.
+      Verified against a fake release server: fresh-home download,
+      idempotent re-run, checksum-mismatch REFUSED, offline degrade
+      (exit 1 + instructions), and a full bare-machine e2e (stripped
+      PATH + fresh PERFLENS_HOME → server auto-provisions at startup →
+      replay with line-level source annotation through the downloaded
+      static addr2line, inline probe passes). CI overhauled: PyInstaller
+      server matrix + AlmaLinux legacy job DELETED; new `python-package`
+      job (ruff + both suites + `python -m build` + twine check +
+      wheel-contents assert + install-and-serve smoke test); new
+      `build-tools` job builds static binutils 2.44 (pinned sha256)
+      addr2line+readelf for x86_64 + aarch64 — recipe validated locally
+      for BOTH arches (key trick: `make -C binutils LDFLAGS=-all-static`
+      relink; plain `-static` produces dynamic binaries via libtool);
+      `publish-pypi` job prepared but `if: false` (enable steps are in
+      the workflow comment); release job attaches wheel/sdist + agent
+      binaries + tools bundles with new uvx-first release notes.
+      `build_package.sh` rewritten (--server → uv/python -m build with
+      contents check; PyInstaller path deleted). README install story
+      now uvx/pipx-first; layout + badges + prerequisites updated.
+      All 15 pre-existing ruff findings fixed — `ruff check src/` is
+      CLEAN and the CI lint job is strict. VERSION file synced 0.5.0 →
+      0.6.0 (it drives agent version + asset names).
 - [ ] **Phase 4** — pytest suite: parser, differential aggregator,
       source_mapper, HTTP API (httpx TestClient), C-agent protocol tests
       (fake framing server + mocked `perf` shim).
@@ -291,3 +313,12 @@ old batch path vs new incremental path must produce identical snapshots.
   nothing to do with the migration itself. ruff run on src/: web.py
   clean; ~15 pre-existing style findings (B904/E741/B007/E731/F541 in
   server/source_mapper/symcache/parser) left for the 3d ruff CI job.
+- **2026-07-15 (cont.)** — Phase 3c+3d (see roadmap entry for detail).
+  Notes for the future: the static-binutils CI recipe was validated
+  locally for both arches before landing (x86_64 native + aarch64 via
+  local cross toolchain); binutils 2.44 source sha256 is pinned in the
+  workflow env. `perflens provision` flows all tested against a local
+  fake release server (PERFLENS_UPDATE_URL override — same mechanism
+  the agent self-update tests used). The misleading "inline disabled
+  (-i not supported)" log line when no --binary is set was reworded.
+  All 15 ruff findings fixed; `ruff check src/` clean.

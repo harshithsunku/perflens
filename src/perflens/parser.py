@@ -456,8 +456,6 @@ def _extract_stat_comment(line):
 
 
 if __name__ == '__main__':
-    import json
-
     text = sys.stdin.read()
     script_text, stat_text = split_perf_data(text)
 

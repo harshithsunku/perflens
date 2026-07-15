@@ -295,8 +295,12 @@ class SourceMapper:
                       file=sys.stderr)
             else:
                 self.inline = False
-                print("[source_mapper] Inline resolution disabled "
-                      "(-i not supported by addr2line)", file=sys.stderr)
+                if not self.binary_path:
+                    print("[source_mapper] Inline resolution off "
+                          "(no --binary configured yet)", file=sys.stderr)
+                else:
+                    print("[source_mapper] Inline resolution disabled "
+                          "(-i not supported by addr2line)", file=sys.stderr)
 
     def _get_pipe(self, binary):
         """Get or create an addr2line pipe for a binary."""
@@ -510,7 +514,7 @@ class SourceMapper:
 
         # Step 3: Build line data from cached results
         line_data = defaultdict(lambda: defaultdict(lambda: {'samples': 0}))
-        for i, binary, vaddr in frame_addrs:
+        for _i, binary, vaddr in frame_addrs:
             file_path, line_no = self._addr2line_cache.get(
                 (binary, vaddr), ('??', 0))
             if file_path != '??' and line_no > 0:
@@ -647,7 +651,8 @@ class SourceMapper:
                 for cand in candidates:
                     cand_parts = cand.replace('\\', '/').split('/')
                     score = 0
-                    for a, b in zip(reversed(parts), reversed(cand_parts)):
+                    for a, b in zip(reversed(parts), reversed(cand_parts),
+                                    strict=False):
                         if a == b:
                             score += 1
                         else:
@@ -808,7 +813,7 @@ class SourceMapper:
                 if chain:
                     # chain[0] = innermost (most inlined)
                     # chain[-1] = actual non-inlined function
-                    for j, (func, fpath, lineno) in enumerate(chain):
+                    for j, (func, _fpath, _lineno) in enumerate(chain):
                         new_frame = {
                             'addr': frame['addr'],
                             'func': func,
@@ -1046,11 +1051,11 @@ if __name__ == '__main__':
 
     for file_path, lines in annotated.items():
         print(f"\n=== {file_path} ===")
-        for l in lines:
-            if l['samples'] > 0:
-                marker = f"[{l['samples']:4d} | {l['percent']:5.1f}%]"
+        for ln in lines:
+            if ln['samples'] > 0:
+                marker = f"[{ln['samples']:4d} | {ln['percent']:5.1f}%]"
             else:
                 marker = "              "
-            print(f"{l['line']:4d} {marker}  {l['source']}")
+            print(f"{ln['line']:4d} {marker}  {ln['source']}")
 
     mapper.close()
