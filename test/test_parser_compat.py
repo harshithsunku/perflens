@@ -11,9 +11,9 @@ import os
 import sys
 
 # Allow running from repo root or test/ directory
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'server'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-from parser import HEADER_RE, parse_perf_script
+from perflens.parser import HEADER_RE, parse_perf_script
 
 
 # Each entry: (label, full_sample_text, expected_comm, expected_pid, expected_event)

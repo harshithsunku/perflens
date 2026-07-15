@@ -6,8 +6,26 @@ plan file; this is the executable summary.
 
 ## Current phase
 
-**Phases 0–2 complete (0, 1a, 1b, 1c+1d, 2a, 2b+2c, 2d).** Next up:
-**Phase 3a+3b — src/perflens restructure + pyproject.toml + uvx**.
+**Phases 0–2 and 3a+3b complete.** Next up: **Phase 3e — FastAPI/uvicorn
+migration** (then 3c+3d provisioning + CI, then Phase 4 tests, Phase 5
+device E2E).
+
+### Start-here for the next session
+
+- Run the packaged server: `uvx --from ./dist/perflens-0.6.0-py3-none-any.whl
+  perflens serve ...` or dev-mode `PYTHONPATH=src python3 -m perflens.cli
+  serve ...` (or the compat shim `python3 server/perflens_server.py ...`).
+- Regression suites: `python3 test/test_parser_compat.py` and
+  `python3 test/test_aggregator_diff.py` (both green).
+- KNOWN-STALE after the restructure (fix in 3c+3d, do NOT ship a release
+  before): `build_package.sh --server` and the CI server jobs still
+  reference the old `server/*.py` + `ui/` paths — the whole PyInstaller
+  server build is being DROPPED in 3d in favor of the wheel; CI needs
+  `python -m build` + wheel-contents check + prepared-but-disabled PyPI
+  publish. README/docs still describe the tarball install story.
+- Sessions now default to `~/.perflens/sessions` (`--sessions-dir` to
+  override; `PERFLENS_HOME` moves the whole root — tests use this).
+  The old repo-root `sessions/` dir is no longer read.
 
 ## Overhaul roadmap
 
@@ -75,10 +93,22 @@ plan file; this is the executable summary.
       Verified: 100k-file synthetic tree scans+persists in 0.14s, warm
       start loads it in 0.05s; live session populated symbols.db; warm
       restart hits all three caches (symbols/addr2line/index) on replay.
-- [ ] **Phase 3a+3b** — src-layout restructure + `pyproject.toml` (hatchling;
-      deps: fastapi, uvicorn, zstandard, orjson) + `perflens` console script
-      (serve / import / push-agent / provision) + `uvx perflens`.
-      PyPI name `perflens` verified free (2026-07-15). Prepare, don't publish.
+- [x] **Phase 3a+3b** — Done. `git mv` to src-layout: `src/perflens/{server,
+      cli,parser,aggregator,source_mapper,symcache}.py` + `ui/` inside the
+      package; intra-package imports fixed; UI served via
+      `importlib.resources`; sessions moved to `~/.perflens/sessions`
+      (`--sessions-dir` flag); in-process `zstandard` decompression with
+      external-binary fallback; compat shim kept at
+      `server/perflens_server.py`. `pyproject.toml` (hatchling, dep:
+      zstandard only for now — fastapi/uvicorn/orjson land WITH the 3e
+      migration); console script `perflens` with subcommands `serve`
+      (default) / `import` / `push-agent USER@HOST` (ssh arch detect →
+      download release binary → scp) / `version`. Verified: wheel builds
+      via `uv build` (100 KB, UI files confirmed inside), `uvx --from
+      ./dist/...whl perflens serve` cold-runs with UI served from the
+      wheel and an agent connect round-trip, shim works, both test
+      suites pass. PyPI name `perflens` free (2026-07-15); prepare, don't
+      publish.
 - [ ] **Phase 3e** — FastAPI/uvicorn migration of the HTTP layer (typed
       routes, asyncio SSE, StaticFiles from importlib.resources,
       GZipMiddleware, orjson). URL paths + JSON shapes preserved exactly.
@@ -223,3 +253,10 @@ old batch path vs new incremental path must produce identical snapshots.
   (perf_stat accumulation confirmed: cycles 74.2B→98.8B→172.9B final in
   saved session; replay OK). NOTE: x86 device rebooted into kernel
   7.0.14-4-pve since baseline (was 6.17.13-2-pve).
+- **2026-07-15 (cont.)** — Phases 2a–2d (see roadmap entries above for
+  detail + verification evidence) and Phase 3a+3b: package restructure,
+  pyproject, `perflens` CLI, uvx cold-run verified. Dev-box note: it has
+  a hybrid CPU (event names like `cpu_atom/cycles/`) and slow perf-script
+  rounds (~15-20s per 5s round) — use the real devices for timing-
+  sensitive checks, and never `pgrep -f` for the workload (matches
+  wrapper shells; use `pgrep -x workload`).

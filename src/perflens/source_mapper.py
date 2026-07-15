@@ -16,7 +16,7 @@ import sys
 import threading
 from collections import defaultdict
 
-import symcache
+from perflens import symcache
 
 
 class MapFileParser:

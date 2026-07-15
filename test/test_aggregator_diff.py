@@ -13,12 +13,12 @@ import gzip
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'server'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-from parser import (parse_perf_script, split_perf_data,
+from perflens.parser import (parse_perf_script, split_perf_data,
                     build_function_summary, build_flamegraph_data,
                     filter_samples_by_event, get_event_types)
-from aggregator import AggregatorSet
+from perflens.aggregator import AggregatorSet
 
 FIXTURES = os.path.join(os.path.dirname(__file__), 'fixtures')
 

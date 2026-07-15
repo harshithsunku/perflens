@@ -86,15 +86,16 @@ perflens/
 │   ├── perflens_agent.c          # C agent (~3200 lines, static binary)
 │   ├── Makefile                  # native + cross-compile targets
 │   └── vendor/zstd/              # zstd single-file amalgamation
-├── server/
-│   ├── perflens_server.py        # TCP listener + ThreadingHTTPServer
+├── pyproject.toml                # pip/uv package (console script: perflens)
+├── src/perflens/                 # the server package
+│   ├── server.py                 # TCP listener + ThreadingHTTPServer
+│   ├── cli.py                    # perflens serve / import / push-agent
 │   ├── parser.py                 # perf script / perf stat parser
+│   ├── aggregator.py             # incremental per-event aggregation
 │   ├── source_mapper.py          # addr2line pipeline + path remap
-│   └── bin/                      # bundled zstd / addr2line / readelf
-├── ui/
-│   ├── index.html                # single-page app
-│   ├── app.js                    # all UI logic (vanilla JS)
-│   └── style.css                 # dark + light themes
+│   ├── symcache.py               # persistent caches (~/.perflens/cache)
+│   └── ui/                       # single-page app (ships in the wheel)
+├── server/perflens_server.py     # compat shim (one release)
 ├── docs/
 │   ├── hero.svg
 │   ├── architecture.svg
