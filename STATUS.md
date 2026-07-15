@@ -6,8 +6,14 @@ plan file; this is the executable summary.
 
 ## Current phase
 
-**Phases 0–4 complete** (0, 1, 2, 3a+3b, 3e, 3c+3d, 4). Next up:
-**Phase 5 — device E2E matrix + 0.6.0 release prep**.
+**Phases 0–4 complete** (0, 1, 2, 3a+3b, 3e, 3c+3d, 4), and
+**perflens 0.6.0 is LIVE on PyPI** (published 2026-07-15 via twine;
+`uvx perflens` / `pip install perflens` work from the index now —
+verified with a clean-venv install + serve smoke test). Remaining for
+**Phase 5**: device E2E matrix, 1h RSS scale test, 500k-file index
+test, docs-site refresh, GitHub release tag `v0.6.0` (agents + tools
+bundles), and optionally enabling the CI Trusted-Publishing job for
+future releases.
 
 ### Start-here for the next session
 
@@ -367,3 +373,11 @@ snapshots), the HTTP API replay tests, and the browser e2e.
   e2e clicks on re-renderable lists must be dispatched inside the page
   (`page.evaluate(... .click())`), not via element handles, or the
   initial-load `loadSessions()` race detaches them.
+- **2026-07-15 (cont.)** — Docs made fully current (wire-protocol flags
+  0–4, complete HTTP API tables, --sessions-dir, FastAPI architecture
+  wording, dependency policy replacing the stdlib-only rule), CHANGELOG
+  0.6.0 written, and **perflens 0.6.0 published to PyPI** (twine, user
+  account token; name was free). Verified live: clean-venv
+  `pip install perflens` → `perflens serve` → /api/status + UI 200.
+  User was advised to delete the account-scoped token and set up
+  Trusted Publishing (build.yml job is prepared, `if: false`).

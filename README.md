@@ -5,6 +5,7 @@
 <p align="center">
   <a href="https://harshithsunku.github.io/perflens/"><img alt="docs site" src="https://img.shields.io/badge/docs-online-38bdf8?style=flat-square&logo=readthedocs&logoColor=white"/></a>
   <a href="https://github.com/harshithsunku/perflens/actions/workflows/build.yml"><img alt="build" src="https://github.com/harshithsunku/perflens/actions/workflows/build.yml/badge.svg?branch=master"/></a>
+  <a href="https://pypi.org/project/perflens/"><img alt="PyPI" src="https://img.shields.io/pypi/v/perflens?style=flat-square&color=3775a9&logo=pypi&logoColor=white"/></a>
   <a href="https://github.com/harshithsunku/perflens/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/harshithsunku/perflens?style=flat-square&color=blue"/></a>
   <a href="https://github.com/harshithsunku/perflens/stargazers"><img alt="stars" src="https://img.shields.io/github/stars/harshithsunku/perflens?style=flat-square&color=fbbf24"/></a>
   <a href="#quick-start"><img alt="quick start" src="https://img.shields.io/badge/quick_start-60s-3fb950?style=flat-square"/></a>
@@ -123,8 +124,6 @@ uvx perflens serve \
 # Equivalent alternatives:
 #   pipx install perflens          then: perflens serve ...
 #   pip install --user perflens    then: perflens serve ...
-# Until the PyPI release, install from a release asset instead:
-#   uvx --from ./perflens-<ver>-py3-none-any.whl perflens serve ...
 ```
 
 ```bash
