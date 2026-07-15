@@ -12,8 +12,12 @@ plan file; this is the executable summary.
 verified with a clean-venv install + serve smoke test). Remaining for
 **Phase 5**: device E2E matrix, 1h RSS scale test, 500k-file index
 test, docs-site refresh, GitHub release tag `v0.6.0` (agents + tools
-bundles), and optionally enabling the CI Trusted-Publishing job for
-future releases.
+bundles; the publish-pypi job now runs on tags with skip-existing, so
+the v0.6.0 tag is safe). ONE-TIME SETUP REQUIRED before tagging: add
+the GitHub publisher on pypi.org (project perflens → Publishing:
+owner harshithsunku, repo perflens, workflow build.yml, environment
+pypi) and create the `pypi` environment in the GitHub repo settings —
+without both, the publish job errors (the release itself still works).
 
 ### Start-here for the next session
 
@@ -380,4 +384,7 @@ snapshots), the HTTP API replay tests, and the browser e2e.
   account token; name was free). Verified live: clean-venv
   `pip install perflens` → `perflens serve` → /api/status + UI 200.
   User was advised to delete the account-scoped token and set up
-  Trusted Publishing (build.yml job is prepared, `if: false`).
+  Trusted Publishing. The build.yml publish-pypi job was then ENABLED
+  (fires on `v*` tags, `skip-existing: true` so the already-uploaded
+  0.6.0 doesn't fail the first tag) — needs the one-time pypi.org
+  publisher + GitHub `pypi` environment setup noted in Current phase.

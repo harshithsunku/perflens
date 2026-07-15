@@ -86,16 +86,19 @@ jobs:
           if-no-files-found: error
 
   # -------------------------------------------------------------------------
-  # Prepared-but-disabled PyPI publish. To enable:
-  #   1. Create the project on pypi.org and configure Trusted Publishing
-  #      (repo: harshithsunku/perflens, workflow: build.yml, env: pypi).
-  #   2. Create a GitHub environment named `pypi`.
-  #   3. Change `if: false` below to:
-  #      if: startsWith(github.ref, 'refs/tags/v')
+  # PyPI publish on version tags, via Trusted Publishing (OIDC — no
+  # long-lived tokens). One-time setup this job depends on:
+  #   1. pypi.org → project perflens → Publishing → add GitHub publisher
+  #      (owner: harshithsunku, repo: perflens, workflow: build.yml,
+  #      environment: pypi).
+  #   2. GitHub repo → Settings → Environments → create `pypi`.
+  # Version bumps: pyproject.toml `version` and VERSION must both be
+  # bumped before tagging — PyPI rejects re-uploads of an existing
+  # version, so tagging without the bump fails this job (harmlessly).
   # -------------------------------------------------------------------------
   publish-pypi:
-    name: publish to PyPI (disabled)
-    if: false
+    name: publish to PyPI
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: [python-package]
     runs-on: ubuntu-latest
     environment: pypi
@@ -110,6 +113,10 @@ jobs:
 
       - name: Publish
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Don't fail the release when the version is already on PyPI
+          # (e.g. v0.6.0 was uploaded manually before this job existed).
+          skip-existing: true
 
   # -------------------------------------------------------------------------
   # Static addr2line/readelf bundle for `perflens provision` — lets the

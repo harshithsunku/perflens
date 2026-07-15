@@ -78,7 +78,7 @@ node tools/capture-demo-gif.js && tools/encode-demo-gif.sh
 
 ## Releasing
 
-Releases are tag-driven: pushing `v<x.y.z>` triggers `.github/workflows/build.yml`, which builds the Python wheel + sdist, static C agent binaries for five architectures, and static addr2line/readelf tools bundles, then attaches them to a GitHub Release.
+Releases are tag-driven: pushing `v<x.y.z>` triggers `.github/workflows/build.yml`, which builds the Python wheel + sdist, static C agent binaries for five architectures, and static addr2line/readelf tools bundles, attaches them to a GitHub Release, and publishes the package to PyPI via Trusted Publishing. Bump `version` in `pyproject.toml` **and** the `VERSION` file before tagging — they must match the tag.
 
 ## License
 
