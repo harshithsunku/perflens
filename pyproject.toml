@@ -27,11 +27,14 @@ classifiers = [
     "Topic :: System :: Monitoring",
 ]
 dependencies = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "orjson>=3.9",
     "zstandard>=0.21",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "build", "ruff"]
+dev = ["pytest>=7", "httpx>=0.27", "build", "ruff"]
 
 [project.scripts]
 perflens = "perflens.cli:main"

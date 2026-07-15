@@ -262,8 +262,11 @@ def build_function_summary(samples):
                 seen.add(key)
                 total_counts[key] += 1
 
-    # Merge into function list
-    all_keys = set(self_counts.keys()) | set(total_counts.keys())
+    # Merge into function list. Deterministic union (dict preserves
+    # insertion order) — a set here would hash-randomize the order of
+    # equal-count functions per process.
+    all_keys = dict.fromkeys(total_counts)
+    all_keys.update(dict.fromkeys(self_counts))
     func_list = []
     for key in all_keys:
         func, module = key

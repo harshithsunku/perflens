@@ -6,15 +6,17 @@ plan file; this is the executable summary.
 
 ## Current phase
 
-**Phases 0–2 and 3a+3b complete.** Next up: **Phase 3e — FastAPI/uvicorn
-migration** (then 3c+3d provisioning + CI, then Phase 4 tests, Phase 5
-device E2E).
+**Phases 0–2, 3a+3b, and 3e complete.** Next up: **Phase 3c+3d —
+provision.py + CI overhaul** (then Phase 4 tests, Phase 5 device E2E).
 
 ### Start-here for the next session
 
 - Run the packaged server: `uvx --from ./dist/perflens-0.6.0-py3-none-any.whl
-  perflens serve ...` or dev-mode `PYTHONPATH=src python3 -m perflens.cli
-  serve ...` (or the compat shim `python3 server/perflens_server.py ...`).
+  perflens serve ...` (build with `uv build`). Dev mode now needs the deps
+  (fastapi/uvicorn/orjson/zstandard): `uv venv .venv && uv pip install -e .`
+  then `.venv/bin/perflens serve ...`. Plain `PYTHONPATH=src python3 -m
+  perflens.cli serve` only works in an env with those deps installed; same
+  for the compat shim `server/perflens_server.py`.
 - Regression suites: `python3 test/test_parser_compat.py` and
   `python3 test/test_aggregator_diff.py` (both green).
 - KNOWN-STALE after the restructure (fix in 3c+3d, do NOT ship a release
@@ -109,9 +111,30 @@ device E2E).
       wheel and an agent connect round-trip, shim works, both test
       suites pass. PyPI name `perflens` free (2026-07-15); prepare, don't
       publish.
-- [ ] **Phase 3e** — FastAPI/uvicorn migration of the HTTP layer (typed
-      routes, asyncio SSE, StaticFiles from importlib.resources,
-      GZipMiddleware, orjson). URL paths + JSON shapes preserved exactly.
+- [x] **Phase 3e** — Done. HTTP layer migrated to FastAPI/uvicorn: new
+      `src/perflens/web.py` (all 26 endpoints ported 1:1, orjson responses,
+      asyncio SSE hub fed from worker threads via call_soon_threadsafe,
+      StaticFiles for the UI, uvicorn in the main thread); `server.py` lost
+      its 876-line BaseHTTPRequestHandler and now owns only agent
+      protocol/state/sessions (SSE broadcasts go through a pluggable sink
+      the web layer registers). Deliberate parity choices: manual JSON body
+      + query parsing (no pydantic validation → error shapes stay
+      `{'error': ...}`, never FastAPI's `{'detail': ...}`), hand-rolled
+      gzip in `_json()` (same >8KB/level-1 policy; GZipMiddleware avoided
+      because it interacts badly with SSE streaming). Verified by
+      golden-diff: every endpoint captured from the OLD server pre-
+      migration and compared — all JSON semantically identical, exports
+      (collapsed/SVG) + index.html byte-identical, all error status codes
+      equal, traversal probes still 404. Live e2e on the new stack: agent
+      connect → ping → start → 3 chunks streamed → SSE (agent_connected,
+      data_version per chunk, accumulated perf_stat, all 3 metrics types,
+      keepalives) → gzip per-event fetch (20KB→2.4KB) → pause/resume/stop
+      → session saved → replay 0.27s cold / 9ms cached; puppeteer browser
+      run clean (only pre-existing favicon 404); uvx cold-run of the wheel
+      OK (16 deps resolved). BONUS FIX found by the golden diff: function
+      summaries had hash-randomized ordering for equal-count functions
+      (`set(a)|set(b)` union in aggregator.py + parser.py) — now a
+      deterministic dict-based union; output stable across processes.
 - [ ] **Phase 3c+3d** — `provision.py` binary auto-download to
       `~/.perflens/bin` (graceful degrade offline); CI: sdist/wheel +
       wheel-contents check + ruff; drop PyInstaller server + Python-agent
@@ -260,3 +283,11 @@ old batch path vs new incremental path must produce identical snapshots.
   rounds (~15-20s per 5s round) — use the real devices for timing-
   sensitive checks, and never `pgrep -f` for the workload (matches
   wrapper shells; use `pgrep -x workload`).
+- **2026-07-15 (cont.)** — Phase 3e: FastAPI/uvicorn migration (see roadmap
+  entry for full detail + verification evidence). Method worth reusing:
+  golden-capture every endpoint from the old implementation BEFORE
+  touching it, then semantic-diff the new one — this caught a latent
+  hash-randomization bug in function-summary tie ordering that had
+  nothing to do with the migration itself. ruff run on src/: web.py
+  clean; ~15 pre-existing style findings (B904/E741/B007/E731/F541 in
+  server/source_mapper/symcache/parser) left for the 3d ruff CI job.

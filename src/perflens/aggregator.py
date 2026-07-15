@@ -118,7 +118,10 @@ class EventAccumulator:
 
         total = self.total_samples
         func_list = []
-        all_keys = set(self._self_counts) | set(self._total_counts)
+        # Deterministic union (dict preserves insertion order) — a set here
+        # would hash-randomize the order of equal-count functions per process
+        all_keys = dict.fromkeys(self._total_counts)
+        all_keys.update(dict.fromkeys(self._self_counts))
         for key in all_keys:
             func, module = key
             sc = self._self_counts.get(key, 0)

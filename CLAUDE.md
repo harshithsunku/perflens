@@ -16,7 +16,7 @@ history.
 
 ```
 [Target device]                       [Local machine]
-   Process (PID)                         Python server (perflens_server.py)
+   Process (PID)                         Python server (perflens serve)
       |                                      |
    perf record + perf stat                   |
       |                                      |
@@ -43,15 +43,24 @@ history.
   - `4` = health metrics JSON (agent → server)
 - Perf data payload: UTF-8 perf script output, optionally followed by a
   `### PERF_STAT ###` section.
-- Agent compresses with in-process zstd (C agent) or `zstd -1 -c` (Python
-  agent). Server decompresses with `zstd -d -c`. Typical ratio 20–40×.
+- Agent compresses with in-process zstd (vendored). Server decompresses
+  in-process via the `zstandard` package (external `zstd` binary as
+  fallback). Typical ratio 20–40×.
 
 ### Key design decisions
-- Python stdlib only. No Flask, no npm, no Docker, no virtualenv, no pip
-  dependencies on either side.
+- The agent is a zero-dependency static C binary. The server is a normal
+  Python package with a small, deliberate dependency set (fastapi, uvicorn,
+  orjson, zstandard) — everything resolves user-space via `uvx perflens`
+  or `pip install --user`; no sudo, no Docker, corporate-machine friendly.
 - Plain HTML + vanilla JS + CSS for the UI. No bundler, no framework.
-- `ThreadingHTTPServer` for concurrent HTTP + SSE; a separate thread owns
-  the TCP listener.
+- HTTP layer (`web.py`): FastAPI on uvicorn. Every handler is a direct
+  port of the original stdlib implementation — URL paths and JSON shapes
+  are frozen (the UI depends on them). SSE fan-out is an asyncio hub;
+  worker threads publish via `loop.call_soon_threadsafe`.
+- The agent TCP listener, recv loops, and the aggregation rebuild worker
+  are plain threads (blocking sockets + subprocess work); uvicorn owns
+  only the HTTP side. Heavy request handlers are sync `def` routes that
+  run in the threadpool.
 - `addr2line -f` (or `-fi` with `--inline`) pipelined in batches of 500
   addresses.
 - Session replay is lazy: raw chunks are saved to disk and parsed on demand.
@@ -88,7 +97,8 @@ perflens/
 │   └── vendor/zstd/              # zstd single-file amalgamation
 ├── pyproject.toml                # pip/uv package (console script: perflens)
 ├── src/perflens/                 # the server package
-│   ├── server.py                 # TCP listener + ThreadingHTTPServer
+│   ├── server.py                 # agent TCP protocol + state + sessions
+│   ├── web.py                    # FastAPI/uvicorn HTTP layer + SSE hub
 │   ├── cli.py                    # perflens serve / import / push-agent
 │   ├── parser.py                 # perf script / perf stat parser
 │   ├── aggregator.py             # incremental per-event aggregation
