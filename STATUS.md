@@ -6,8 +6,8 @@ plan file; this is the executable summary.
 
 ## Current phase
 
-**Phases 0, 1a, 1b, 1c+1d complete.** Next up: **Phase 2a — incremental
-aggregation (server/aggregator.py)**.
+**Phases 0, 1a, 1b, 1c+1d, 2a complete.** Next up: **Phase 2b+2c — disk
+spooling + SSE notify-and-fetch**.
 
 ## Overhaul roadmap
 
@@ -35,9 +35,15 @@ aggregation (server/aggregator.py)**.
       `/api/browse` confined to `--browse-root` (default: home);
       `--token`/`PERFLENS_TOKEN` validated at hello (hmac.compare_digest);
       stale parser test group index fixed (30/30 pass now).
-- [ ] **Phase 2a** — Incremental aggregation (`server/aggregator.py`):
-      EventAccumulator per event, inline expansion at ingest only,
-      differential test vs old batch path (use `test/fixtures/`).
+- [x] **Phase 2a** — Incremental aggregation done: `server/aggregator.py`
+      (EventAccumulator + AggregatorSet + build_per_event_batch); rebuild
+      worker now folds only NEW chunks (O(new) per chunk, was O(total));
+      inline expansion + addr2line at ingest only; source-file index
+      incremental; replay/import reuse the same aggregator path;
+      `test/test_aggregator_diff.py` pins batch↔incremental equivalence on
+      both device fixtures (12/12 event combos identical). Aggregates cover
+      the full session; the --max-samples deque remains only as the raw
+      window for thread/source drill-downs.
 - [ ] **Phase 2b+2c** — Disk spooling of raw chunks (kills unbounded
       `_raw_chunks` RAM growth); replay cache; SSE → notify (`data_version`)
       + fetch (`GET /api/per-event`, gzip); UI version-tracked fetch with
@@ -182,6 +188,11 @@ old batch path vs new incremental path must produce identical snapshots.
   and run_agent.sh deleted, install-agent.sh added (endianness detection
   verified on x86_64 + aarch64 device), build_package.sh + CI reworked
   (raw stable-name binaries as release assets), all docs updated.
+- **2026-07-15 (cont.)** — Phase 2a: incremental aggregation. Differential
+  test 12/12 identical vs batch on device fixtures; live streaming verified
+  (consecutive per_event snapshots grow 2985→3057 samples, hybrid-CPU event
+  names like cpu_core/cycles/ handled); replay through the new batch path
+  0.22s. NOTE: local dev box has a hybrid CPU — useful extra test coverage.
 - **2026-07-15 (cont.)** — Phase 1c+1d: server correctness + security.
   Verified live: traversal blocked (plain + URL-encoded + session-id),
   bind 127.0.0.1, browse snapped to home, token rejection AND acceptance

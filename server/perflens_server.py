@@ -20,6 +20,7 @@ from urllib.parse import urlparse, parse_qs
 from parser import (parse_perf_script, build_function_summary, build_flamegraph_data,
                     split_perf_data, get_event_types, filter_samples_by_event,
                     parse_perf_stat, merge_perf_stat)
+from aggregator import AggregatorSet, build_per_event_batch
 from source_mapper import SourceMapper, build_annotated_source
 
 
@@ -71,13 +72,19 @@ class ProfilingState:
         # Running set — event types only accumulate, never removed
         # (event types don't change mid-session in practice)
         self._event_types_set = set()
+        # Incremental per-event aggregation. Chunks queue here and the
+        # rebuild worker folds them in off the recv thread; accumulators
+        # cover the whole session (the deque above is only the raw window
+        # backing thread/source drill-downs).
+        self.aggregators = AggregatorSet()
+        self._pending_chunks = []
         # Background rebuild state
         self._rebuild_needed = threading.Condition(self.lock)
         self._dirty = False
         self._cached_per_event = {}
 
     def add_samples(self, new_samples, perf_stat=None):
-        """Add samples and return (all_samples_copy, event_types_copy)."""
+        """Add samples and return (total_count, event_types_copy)."""
         with self.lock:
             self.all_samples.extend(new_samples)
             self.chunk_count += 1
@@ -87,9 +94,10 @@ class ProfilingState:
             self.event_types = sorted(self._event_types_set)
             if perf_stat:
                 self.perf_stat = merge_perf_stat(self.perf_stat, perf_stat)
+            self._pending_chunks.append(new_samples)
             self._dirty = True
             self._rebuild_needed.notify()
-            return list(self.all_samples), list(self.event_types)
+            return len(self.all_samples), list(self.event_types)
 
     def get_snapshot(self):
         with self.lock:
@@ -106,8 +114,10 @@ class ProfilingState:
             self.event_types = []
             self._event_types_set.clear()
             self.perf_stat = {}
+            self._pending_chunks = []
             self._cached_per_event = {}
             self._dirty = False
+        self.aggregators.reset()
 
 
 class MetricsState:
@@ -550,10 +560,10 @@ class AgentSession:
                         continue
 
                     # add_samples sets dirty flag and signals rebuild worker
-                    all_samples, event_types = state.add_samples(samples, perf_stat)
+                    total_count, event_types = state.add_samples(samples, perf_stat)
 
                     print(f"[server] Managed agent chunk: "
-                          f"{len(samples)} new, {len(all_samples)} total",
+                          f"{len(samples)} new, {total_count} total",
                           file=sys.stderr)
 
                     # Lightweight SSE: event types + stat pushed immediately.
@@ -669,7 +679,9 @@ def _install_agent_session(session):
             state._event_types_set.clear()
             state.event_types = []
             state.perf_stat = {}
+            state._pending_chunks = []
             state._cached_per_event = {}
+        state.aggregators.reset()
         metrics_state.reset()
 
         agent_session = session
@@ -797,25 +809,28 @@ def broadcast_sse(event_type, data):
 
 
 def _rebuild_worker():
-    """Background thread: wait for dirty flag, rebuild per_event, broadcast.
+    """Background thread: folds newly arrived chunks into the incremental
+    per-event accumulators and broadcasts fresh snapshots.
 
-    Coalesces rapid updates — if data arrives while rebuilding, we loop
-    and rebuild again with the latest snapshot.
+    Only the NEW chunks are processed (inline expansion + addr2line included)
+    — cost per wakeup is O(new samples), not O(all samples). Coalesces rapid
+    updates: chunks that arrive while folding are picked up next loop.
     """
     while True:
         with state.lock:
             while not state._dirty:
                 state._rebuild_needed.wait()
             state._dirty = False
-            all_samples = list(state.all_samples)
-            event_types = list(state.event_types)
-            perf_stat = dict(state.perf_stat)
+            pending = state._pending_chunks
+            state._pending_chunks = []
 
-        if not all_samples:
+        if not pending:
             continue
 
         mapper = state.source_mapper
-        per_event = build_per_event_data(all_samples, event_types, mapper)
+        for chunk in pending:
+            state.aggregators.add_chunk(chunk, mapper)
+        per_event = state.aggregators.snapshot_per_event(mapper)
 
         with state.lock:
             state._cached_per_event = per_event
@@ -1031,45 +1046,21 @@ def import_perf_data(perf_data_path):
 # ---------------------------------------------------------------------------
 
 def build_per_event_data(all_samples, event_types, mapper, source=False):
-    """Build per-event data dict for UI consumption.
+    """Build per-event data dict for UI consumption (batch: replay/import).
 
-    Expands inline frames (if mapper has inline enabled) before building
-    flamegraph trees and function summaries.
-
-    Args:
-        all_samples: raw sample list
-        event_types: list of event type strings
-        mapper: SourceMapper instance (or None)
-        source: if True, include annotated source in the output
+    Runs through the same AggregatorSet code path as live streaming, fed in
+    one shot. `event_types` is accepted for backward compatibility; the
+    events are derived from the samples themselves.
     """
-    expanded = mapper.expand_inline_frames(all_samples) if mapper else all_samples
-
-    per_event = {}
-    for evt in event_types:
-        evt_expanded = filter_samples_by_event(expanded, evt)
-        evt_orig = filter_samples_by_event(all_samples, evt)
-        # Extract unique threads for this event
-        seen_tids = {}
-        for s in evt_expanded:
-            tid = s.get('tid', s.get('pid', 0))
-            if tid not in seen_tids:
-                seen_tids[tid] = s.get('comm', '')
-        threads = [{'tid': t, 'comm': c} for t, c in
-                   sorted(seen_tids.items(), key=lambda x: x[0])]
-        entry = {
-            'function_summary': build_function_summary(evt_expanded),
-            'flamegraph': build_flamegraph_data(evt_expanded),
-            'source_files': mapper.get_files_with_samples(evt_orig)
-                            if mapper else [],
-            'threads': threads,
-        }
-        if source:
-            if mapper:
-                entry['source'] = build_annotated_source(mapper, evt_orig)
-            else:
-                entry['source'] = {}
-        per_event[evt] = entry
-    return per_event
+    source_builder = None
+    if source:
+        if mapper:
+            source_builder = lambda evt_orig: build_annotated_source(
+                mapper, evt_orig)
+        else:
+            source_builder = lambda evt_orig: {}
+    return build_per_event_batch(all_samples, mapper,
+                                 source_builder=source_builder)
 
 
 # ---------------------------------------------------------------------------
