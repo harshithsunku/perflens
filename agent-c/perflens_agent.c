@@ -39,6 +39,7 @@
 #include <poll.h>
 #include <limits.h>
 #include <netdb.h>
+#include <netinet/tcp.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -269,9 +270,10 @@ static void buf_free(struct buf *b)
 static int buf_ensure(struct buf *b, size_t needed)
 {
     if (b->cap >= needed) return 0;
+    if (needed > MAX_BUF_SIZE) return -1;
     size_t newcap = b->cap ? b->cap : INITIAL_BUF_SIZE;
     while (newcap < needed) newcap *= 2;
-    if (newcap > MAX_BUF_SIZE) return -1;
+    if (newcap > MAX_BUF_SIZE) newcap = MAX_BUF_SIZE;
     char *p = realloc(b->data, newcap);
     if (!p) return -1;
     b->data = p;
@@ -852,6 +854,21 @@ static const char *json_find_object(const char *json, const char *key)
  * TCP helpers
  * -------------------------------------------------------------------------- */
 
+/* Detect a dead peer even when idle: without keepalive a dropped network
+ * path leaves the agent blocked in recv() forever (so --server mode never
+ * reconnects). ~2 minutes to declare the connection dead. */
+static void tcp_enable_keepalive(int fd)
+{
+    int on = 1;
+    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof(on));
+#ifdef TCP_KEEPIDLE
+    int idle = 60, intvl = 10, cnt = 6;
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
+#endif
+}
+
 static int tcp_send_all(int fd, const void *data, size_t len)
 {
     const char *p = (const char *)data;
@@ -916,6 +933,13 @@ static int tcp_recv_frame(int fd, char **payload, uint32_t *out_len,
     if (len == 0) {
         *payload = NULL;
         return 0;
+    }
+
+    /* Server→agent frames are small JSON commands. A huge length means a
+     * corrupt stream or a stray client — don't try to allocate it. */
+    if (len > MAX_BUF_SIZE) {
+        agent_warn("Oversized frame (%u bytes) — dropping connection", len);
+        return -1;
     }
 
     char *data = malloc(len + 1);
@@ -1433,6 +1457,7 @@ static void cmdq_push(struct cmd_queue *q, const char *json)
     struct cmd_entry *e = malloc(sizeof(*e));
     if (!e) return;
     e->json = strdup(json);
+    if (!e->json) { free(e); return; }
     e->next = NULL;
 
     pthread_mutex_lock(&q->lock);
@@ -2026,18 +2051,29 @@ static int collect_network_metrics(metrics_collector_t *mc, char *buf, size_t bu
         rx_errs = fields[2]; rx_drops = fields[3];
         tx_bytes = fields[8]; tx_packets = fields[9]; tx_errs = fields[10];
 
-        if (count > 0) off += snprintf(buf + off, bufsz - off, ",");
-        off += snprintf(buf + off, bufsz - off,
-            "\"%s\":{\"rx_bytes\":%lu,\"rx_packets\":%lu,\"rx_errors\":%lu,"
+        /* Build the entry separately and bounds-check before appending:
+         * hosts with many interfaces (container veth pairs) can exceed
+         * the buffer, and off > bufsz would underflow bufsz - off. */
+        char entry[512];
+        int elen = snprintf(entry, sizeof(entry),
+            "%s\"%s\":{\"rx_bytes\":%lu,\"rx_packets\":%lu,\"rx_errors\":%lu,"
             "\"rx_drops\":%lu,\"tx_bytes\":%lu,\"tx_packets\":%lu,\"tx_errors\":%lu}",
-            iface, rx_bytes, rx_packets, rx_errs, rx_drops,
+            count > 0 ? "," : "", iface,
+            rx_bytes, rx_packets, rx_errs, rx_drops,
             tx_bytes, tx_packets, tx_errs);
+        if (elen < 0 || (size_t)elen >= sizeof(entry))
+            continue;
+        if ((size_t)off + (size_t)elen + 3 > bufsz)
+            break;  /* buffer full — keep the interfaces we have */
+        memcpy(buf + off, entry, (size_t)elen);
+        off += elen;
         count++;
     }
     fclose(f);
     if (count == 0) return -1;
 
-    off += snprintf(buf + off, bufsz - off, "}}");
+    memcpy(buf + off, "}}", 3);
+    off += 2;
     return off;
 }
 
@@ -2236,7 +2272,10 @@ static void cmd_list_processes(struct agent_state *a, const char *cmd_id,
     int n = snprintf(resp, JSON_BUF_SIZE,
         "{\"id\":\"%s\",\"ok\":true,\"processes\":[", cmd_id);
 
-    for (int i = 0; i < count && (size_t)n + 512 < JSON_BUF_SIZE; i++) {
+    /* Reserve enough for a worst-case entry (escaped comm + cmdline
+     * + format) so a full buffer stops cleanly instead of truncating
+     * mid-entry into invalid JSON. */
+    for (int i = 0; i < count && (size_t)n + 768 < JSON_BUF_SIZE; i++) {
         char esc_comm[128], esc_cmdline[512];
         json_escape(esc_comm, sizeof(esc_comm), procs[i].comm);
         json_escape(esc_cmdline, sizeof(esc_cmdline), procs[i].cmdline);
@@ -3134,15 +3173,20 @@ static void run_interactive(struct agent_state *a)
         a->metrics_thread_active = 0;
     }
 
-    /* Close socket (wakes recv thread if blocked in recv) */
+    /* shutdown() reliably wakes a recv thread blocked in recv(); close()
+     * alone does not, and would let the fd number be reused while the
+     * recv thread still reads from it. Close only after the join. */
+    if (a->sock_fd >= 0)
+        shutdown(a->sock_fd, SHUT_RDWR);
+
+    /* Wait for recv thread */
+    pthread_join(recv_tid, NULL);
+
     if (a->sock_fd >= 0) {
         close(a->sock_fd);
         a->sock_fd = -1;
         g_agent_sock_fd = -1;
     }
-
-    /* Wait for recv thread */
-    pthread_join(recv_tid, NULL);
 
     /* Reset state */
     pthread_mutex_lock(&a->state_lock);
@@ -3252,6 +3296,7 @@ static void run_listen(struct agent_state *a, int port)
         agent_log("Server connected from %s:%d",
                   client_ip, ntohs(client_addr.sin_port));
 
+        tcp_enable_keepalive(conn_fd);
         a->sock_fd = conn_fd;
         g_agent_sock_fd = conn_fd;
         run_interactive(a);
@@ -3296,30 +3341,31 @@ static void run_connect(struct agent_state *a, const char *host, int port)
                 sock = socket(res->ai_family, res->ai_socktype,
                               res->ai_protocol);
                 if (sock < 0) {
-                    agent_warn("socket() failed: %s", strerror(errno));
+                    /* Transient (fd exhaustion etc.) — retry, don't exit */
+                    agent_warn("socket() failed (%s), retrying in %.0fs...",
+                               strerror(errno), delay);
                     freeaddrinfo(res);
-                    return;
+                } else {
+                    /* Connect timeout */
+                    struct timeval tv;
+                    tv.tv_sec = 30;
+                    tv.tv_usec = 0;
+                    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+                    int crc = connect(sock, res->ai_addr,
+                                      (socklen_t)res->ai_addrlen);
+                    freeaddrinfo(res);
+
+                    if (crc == 0) {
+                        agent_log("Connected to %s:%d", host, port);
+                        break;
+                    }
+
+                    agent_log("Connection failed (%s), retrying in %.0fs...",
+                              strerror(errno), delay);
+                    close(sock);
+                    sock = -1;
                 }
-
-                /* Connect timeout */
-                struct timeval tv;
-                tv.tv_sec = 30;
-                tv.tv_usec = 0;
-                setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-
-                int crc = connect(sock, res->ai_addr,
-                                  (socklen_t)res->ai_addrlen);
-                freeaddrinfo(res);
-
-                if (crc == 0) {
-                    agent_log("Connected to %s:%d", host, port);
-                    break;
-                }
-
-                agent_log("Connection failed (%s), retrying in %.0fs...",
-                          strerror(errno), delay);
-                close(sock);
-                sock = -1;
             }
 
             /* Sleep with shutdown check (200ms ticks) */
@@ -3344,6 +3390,7 @@ static void run_connect(struct agent_state *a, const char *host, int port)
         no_tv.tv_usec = 0;
         setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &no_tv, sizeof(no_tv));
 
+        tcp_enable_keepalive(sock);
         a->sock_fd = sock;
         g_agent_sock_fd = sock;
         run_interactive(a);

@@ -383,7 +383,10 @@ class SourceMapper:
                 for line in proc.stdout:
                     parts = line.split()
                     if len(parts) >= 8 and parts[3] == 'FUNC':
-                        addr = int(parts[1], 16)
+                        try:
+                            addr = int(parts[1], 16)
+                        except ValueError:
+                            continue  # readelf formats vary; skip odd lines
                         name = parts[7]
                         if addr > 0:
                             symbols[name] = addr

@@ -113,7 +113,11 @@ class ProfilingState:
             self._pending_chunks = []
             self._cached_per_event = {}
             self._dirty = False
-        self.aggregators.reset()
+            # Swap (don't reset in place): the rebuild worker may be folding
+            # already-popped chunks into the old set right now — folding into
+            # a discarded object is harmless, folding into a fresh one would
+            # leak the previous session's samples into the new session.
+            self.aggregators = AggregatorSet()
 
 
 class MetricsState:
@@ -220,6 +224,11 @@ FLAG_CMD_REQUEST = 2
 FLAG_CMD_RESPONSE = 3
 FLAG_METRICS = 4
 
+# Cap on a single wire frame. The agent bounds its own payloads at 64 MB;
+# anything larger is a corrupt stream or a stray client, and allocating it
+# blindly (a garbage header can claim 4 GB) is a trivial DoS.
+MAX_FRAME_SIZE = 128 * 1024 * 1024
+
 # Module-level instances, set in main()
 config: ServerConfig = None
 state: ProfilingState = None
@@ -309,19 +318,16 @@ def probe_tools(cfg):
         print(f"[server]   readelf: {cfg.readelf_bin} (user-provided)",
               file=sys.stderr)
     elif cfg.readelf_bin:
-        # Toolchain-derived path — check if it exists on PATH
-        try:
-            r = subprocess.run(['which', cfg.readelf_bin], capture_output=True,
-                               text=True, timeout=5)
-            if r.returncode == 0:
-                cfg.readelf_bin = r.stdout.strip()
-                print(f"[server]   readelf: {cfg.readelf_bin} (toolchain)",
-                      file=sys.stderr)
-            else:
-                print(f"[server]   readelf: {cfg.readelf_bin} (NOT FOUND, "
-                      f"falling back to system)", file=sys.stderr)
-                cfg.readelf_bin = None
-        except Exception:
+        # Toolchain-derived name — resolve it on PATH
+        import shutil
+        found = shutil.which(cfg.readelf_bin)
+        if found:
+            cfg.readelf_bin = found
+            print(f"[server]   readelf: {cfg.readelf_bin} (toolchain)",
+                  file=sys.stderr)
+        else:
+            print(f"[server]   readelf: {cfg.readelf_bin} (NOT FOUND, "
+                  f"falling back to system)", file=sys.stderr)
             cfg.readelf_bin = None
     if not cfg.readelf_bin:
         found = _find_binary('readelf', download=True)
@@ -575,6 +581,11 @@ class AgentSession:
                 length, flag = struct.unpack('!IB', header)
                 if length == 0:
                     continue
+                if length > MAX_FRAME_SIZE:
+                    print(f"[server] Managed agent {self.addr}: oversized "
+                          f"frame ({length} bytes) — disconnecting",
+                          file=sys.stderr)
+                    break
 
                 payload = recv_exactly(self.sock, length)
                 if payload is None:
@@ -662,11 +673,20 @@ class AgentSession:
                 event.set()
             self._pending.clear()
         with state.lock:
-            state.agent_connected = False
-            state.agent_conn = None
-            all_samples = list(state.all_samples)
-            perf_stat_final = dict(state.perf_stat)
-        broadcast_sse('status', {'connected': False, 'agent': None})
+            # Only tear down live state if this session still owns it — a
+            # replacement agent may already have been installed, in which
+            # case the state (and its samples) belong to the new session.
+            still_current = state.agent_conn is self.sock
+            if still_current:
+                state.agent_connected = False
+                state.agent_conn = None
+                all_samples = list(state.all_samples)
+                perf_stat_final = dict(state.perf_stat)
+            else:
+                all_samples = []
+                perf_stat_final = {}
+        if still_current:
+            broadcast_sse('status', {'connected': False, 'agent': None})
 
         # Save session metadata (chunks are already spooled to disk)
         m_snap = metrics_state.snapshot_for_save()
@@ -723,18 +743,11 @@ def _install_agent_session(session):
             print("[server] Replacing existing agent session", file=sys.stderr)
             agent_session.close()
 
+        state.reset()
         with state.lock:
             state.agent_connected = True
             state.agent_addr = session.addr
             state.agent_conn = session.sock
-            state.all_samples.clear()
-            state.chunk_count = 0
-            state._event_types_set.clear()
-            state.event_types = []
-            state.perf_stat = {}
-            state._pending_chunks = []
-            state._cached_per_event = {}
-        state.aggregators.reset()
         metrics_state.reset()
 
         agent_session = session
@@ -791,6 +804,9 @@ def connect_to_agent(host, port, timeout=10):
     if flag != FLAG_CMD_RESPONSE:
         sock.close()
         raise RuntimeError(f'Expected hello (flag 3), got flag {flag}')
+    if length > MAX_FRAME_SIZE:
+        sock.close()
+        raise RuntimeError(f'Oversized hello frame ({length} bytes)')
 
     payload = recv_exactly(sock, length)
     if payload is None:
@@ -897,16 +913,27 @@ def _rebuild_worker():
             state._dirty = False
             pending = state._pending_chunks
             state._pending_chunks = []
+            aggs = state.aggregators
 
         if not pending:
             continue
 
         mapper = state.source_mapper
-        for chunk in pending:
-            state.aggregators.add_chunk(chunk, mapper)
-        per_event = state.aggregators.snapshot_per_event(mapper)
+        try:
+            for chunk in pending:
+                aggs.add_chunk(chunk, mapper)
+            per_event = aggs.snapshot_per_event(mapper)
+        except Exception as e:
+            # Never let one bad chunk (or a mapper hiccup) kill the worker —
+            # that would silently freeze all UI updates for the session.
+            import traceback
+            print(f"[server] Rebuild worker error: {e}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            continue
 
         with state.lock:
+            if state.aggregators is not aggs:
+                continue  # session was reset mid-fold — discard stale build
             state._cached_per_event = per_event
             version = {
                 'chunk_count': state.chunk_count,
@@ -948,6 +975,11 @@ def handle_inbound_agent(conn, addr):
         if flag != FLAG_CMD_RESPONSE:
             print(f"[server] Inbound agent {addr_str}: expected hello (flag 3), "
                   f"got flag {flag}", file=sys.stderr)
+            conn.close()
+            return
+        if length > MAX_FRAME_SIZE:
+            print(f"[server] Inbound agent {addr_str}: oversized hello "
+                  f"({length} bytes)", file=sys.stderr)
             conn.close()
             return
 

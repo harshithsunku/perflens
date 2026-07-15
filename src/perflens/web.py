@@ -19,7 +19,7 @@ import asyncio
 import gzip
 import json
 import os
-import subprocess
+import shutil
 import sys
 import tempfile
 import threading
@@ -726,18 +726,11 @@ def _config_toolchain_impl(body):
         # Verify at least addr2line exists
         found = os.path.isfile(a2l)
         if not found:
-            try:
-                r = subprocess.run(['which', a2l], capture_output=True,
-                                   text=True, timeout=5)
-                found = r.returncode == 0
-                if found:
-                    a2l = r.stdout.strip()
-                    r2 = subprocess.run(['which', rel], capture_output=True,
-                                        text=True, timeout=5)
-                    if r2.returncode == 0:
-                        rel = r2.stdout.strip()
-            except Exception:
-                pass
+            resolved = shutil.which(a2l)
+            if resolved:
+                found = True
+                a2l = resolved
+                rel = shutil.which(rel) or rel
         if not found:
             return _json({'ok': False,
                           'error': f'addr2line not found: {a2l}'}, 400)
