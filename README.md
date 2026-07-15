@@ -68,11 +68,11 @@ The pipeline in one sentence: **`perf record` → agent → TCP+zstd → server 
 
 ### Local machine
 
-- `perflens_server.py` (`ThreadingHTTPServer` + a TCP listener thread) accepts one agent at a time and broadcasts parsed state to any number of SSE clients
-- `parser.py` parses `perf script` and `perf stat` text into per-event sample lists, function summaries, and flame graph trees
-- `source_mapper.py` pipelines addresses through `addr2line` in batches of 500, applies compile-time path prefix rewrites, and builds annotated source views
+- `perflens serve` runs a FastAPI/uvicorn HTTP layer (`web.py`) in front of a plain-threads agent side (`server.py`: TCP listener, recv loops, aggregation worker); one agent at a time, any number of SSE browser clients
+- `parser.py` parses `perf script` and `perf stat` text into per-event sample lists; `aggregator.py` folds each new chunk incrementally into function summaries and flame graph trees (O(new samples) per chunk, not O(total))
+- `source_mapper.py` pipelines addresses through `addr2line` in batches of 500, applies compile-time path prefix rewrites, and builds annotated source views; `symcache.py` persists resolutions and source-file indexes under `~/.perflens/cache` so warm restarts skip the work
 - A single `SourceMapper` is created at startup and shared across requests — no per-request forking
-- Sessions are saved as raw chunks on disk and rebuilt on demand when the user replays them from the UI
+- Sessions are spooled to disk as compressed chunks while streaming and replayed lazily on demand (with a config-keyed replay cache) when the user opens them from the UI
 
 ---
 
@@ -92,10 +92,20 @@ sock.sendall(header + payload)
 | Field | Size | Meaning |
 |-------|------|---------|
 | `LEN` | 4 bytes (uint32, big-endian) | Payload length in bytes |
-| `FLAG` | 1 byte (uint8) | `0` = raw UTF-8, `1` = zstd-compressed |
-| `PAYLOAD` | `LEN` bytes | `perf script` text, optionally followed by a `### PERF_STAT ###` section |
+| `FLAG` | 1 byte (uint8) | Frame type (see below) |
+| `PAYLOAD` | `LEN` bytes | Perf data, JSON command/response, or JSON metrics |
 
-The server reads the 5 header bytes first, then exactly `LEN` more. Compressed frames are piped through `zstd -d -c`. Typical ratio on real `perf script` output is **20–40×**.
+The protocol is bidirectional — data and health metrics flow agent → server, commands flow server → agent over the same socket:
+
+| Flag | Direction | Payload |
+|------|-----------|---------|
+| `0` | agent → server | Raw `perf script` text, optionally followed by a `### PERF_STAT ###` section |
+| `1` | agent → server | Same, zstd-compressed |
+| `2` | server → agent | Command request (JSON: `start`, `stop`, `pause`, `resume`, `configure`, ...) |
+| `3` | agent → server | Command response / `hello` handshake (JSON) |
+| `4` | agent → server | Device health metrics (JSON, every 2s: CPU, memory, temperature, per-process stats) |
+
+The server reads the 5 header bytes first, then exactly `LEN` more. Compression is in-process zstd on both ends (vendored in the agent, the `zstandard` package on the server, external `zstd` binary as a fallback). Typical ratio on real `perf script` output is **20–40×**.
 
 ---
 
@@ -214,7 +224,8 @@ Then browse to `http://<server-ip>:8080`.
 | `--readelf PATH` | — | Custom `readelf` binary |
 | `--toolchain-prefix PREFIX` | — | Cross-compilation prefix (e.g. `arm-linux-gnueabihf-`); derives addr2line and readelf |
 | `--sysroot DIR` | — | Sysroot for resolving shared library modules and source files |
-| `--max-samples N` | `500000` | Ring buffer cap before oldest samples drop |
+| `--max-samples N` | `500000` | Raw-sample ring buffer cap (aggregates always cover the full session) |
+| `--sessions-dir DIR` | `~/.perflens/sessions` | Where saved sessions are stored (`PERFLENS_HOME` moves the whole `~/.perflens` root) |
 | `--http-bind ADDR` | `127.0.0.1` | Web UI bind address (`0.0.0.0` to expose — the UI has no auth) |
 | `--browse-root DIR` | `~` | Directory the wizard's file picker is confined to |
 | `--token SECRET` | — | Shared secret agents must present (or `PERFLENS_TOKEN`) |
@@ -251,13 +262,28 @@ Options:
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/status` | GET | Server + agent connection state, sample totals |
-| `/api/stream` | GET | Server-Sent Events: `status`, `event_types`, `per_event`, `perf_stat` |
+| `/api/stream` | GET | Server-Sent Events: `status`, `agent_connected`, `event_types`, `data_version` (per chunk), `perf_stat`, `metrics_<type>` |
+| `/api/per-event?event=<evt>` | GET | Cached per-event snapshot (gzip); clients fetch it when SSE `data_version` bumps |
 | `/api/sessions` | GET | List saved sessions (metadata only) |
-| `/api/sessions/<id>` | GET | Lazy-replay a session (parses raw chunks on demand) |
+| `/api/sessions/<id>` | GET | Lazy-replay a session (parses raw chunks on demand, cached) |
+| `/api/export/session/<id>?format=` | GET | Export a session: `collapsed` (FlameGraph stacks) or `json` |
+| `/api/export/flamegraph?event=&session=` | GET | Standalone SVG flame graph |
 | `/api/source?file=<path>&event=<evt>&tid=<tid>` | GET | Annotated source for a single file (optionally filtered by thread) |
 | `/api/thread-view?event=<evt>&tid=<tid>` | GET | Per-thread flamegraph and function summary |
 | `/api/thread-summary?event=<evt>` | GET | Thread overview: all threads with sample counts and top functions |
+| `/api/index/status` | GET | Source-index / DWARF file-list state (truncated preview) |
+| `/api/index/files?offset=&limit=&q=` | GET | Paginated DWARF source-file list |
+| `/api/metrics/current` | GET | Latest device health metrics per type |
+| `/api/metrics/history?type=&start=` | GET | Health metrics time series |
+| `/api/connect` | POST | Connect out to a `--listen` agent (`{"host": ..., "port": ...}`) |
+| `/api/agent/command` | POST | Send a command to the connected agent (`start`, `stop`, `pause`, ...) |
+| `/api/wizard/state` | GET/POST | Persisted Live Debug wizard state |
+| `/api/browse?path=` | GET | File picker listing (confined to `--browse-root`) |
+| `/api/config/binary` | POST | Set the unstripped binary at runtime |
+| `/api/config/source` | POST | Set the source directory at runtime |
+| `/api/config/pathmap` | POST | Set compile-time path rewrites at runtime |
 | `/api/config/toolchain` | POST | Set toolchain prefix and sysroot at runtime |
+| `/api/import` | POST | Import an uploaded `perf.data` file as a session (needs `perf` on the server) |
 | `/api/stop` | GET | Disconnect the active agent (triggers normal session save) |
 | `/*` | GET | Static files from `ui/` |
 

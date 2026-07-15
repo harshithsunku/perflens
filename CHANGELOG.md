@@ -5,6 +5,110 @@ All notable changes to PerfLens are recorded here. Format follows
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html); pre-1.0
 releases may break APIs between minor versions when needed.
 
+## [0.6.0] — 2026-07-15
+
+**The "pip install perflens" release.** The server is now a proper Python
+package — `uvx perflens` / `pipx install perflens` / `pip install --user
+perflens` — with a FastAPI/uvicorn HTTP layer, incremental aggregation
+that scales to long sessions and huge codebases, persistent symbol
+caches, security hardening, a single self-updating C agent, and a full
+automated test suite.
+
+### Added
+
+- **Python package** — src-layout + `pyproject.toml`; console script
+  `perflens` with subcommands `serve` (default), `import`, `push-agent
+  USER@HOST` (ssh arch-detect → download → scp), `provision`, and
+  `version`. The web UI ships inside the wheel.
+- **`install-agent.sh`** — one-line curl installer for the agent:
+  detects arch + endianness, verifies the binary, installs to
+  `~/.perflens/bin`, no sudo.
+- **Agent self-update and hardening** — `--update` (download, verify,
+  atomic self-replace), `--rounds N` for headless capture, `--version`,
+  `--token`/`PERFLENS_TOKEN` shared-secret auth, hostname support in
+  `--server`.
+- **`perflens provision`** — when binutils is missing, downloads
+  sha256-verified static `addr2line`/`readelf` bundles (x86_64,
+  aarch64) into `~/.perflens/bin`; the server auto-provisions at
+  startup and degrades with instructions when offline.
+- **Persistent symbol/source caches** under `~/.perflens/cache` —
+  sqlite-backed addr2line resolutions, inline chains, symbol tables,
+  and DWARF file lists keyed by binary identity, plus a cached source
+  index built in the background (100k-file tree: 0.14s cold scan,
+  0.05s warm load). `llvm-addr2line`/`llvm-dwarfdump` preferred when
+  present.
+- **`GET /api/per-event`** — gzipped per-event snapshots; SSE now
+  carries only a tiny `data_version` stamp per chunk (was a multi-MB
+  blob). Flamegraph zoom became an ancestry name-path that survives
+  live data refreshes.
+- **Paginated `/api/index/files`** (+ truncated `/api/index/status`)
+  for very large DWARF file lists.
+- **`--sessions-dir`** — sessions now live under `~/.perflens/sessions`
+  (`PERFLENS_HOME` relocates the whole root).
+- **Test suite** — 109 pytest tests: parser, differential aggregator
+  checks against device-captured fixtures, source mapper, every HTTP
+  endpoint (including traversal and gzip regressions), provisioning
+  against a fake release server, and the C-agent wire protocol driven
+  end-to-end through a fake framing server with a `perf` shim. Plus a
+  self-contained puppeteer browser E2E replaying a real fixture
+  session through the UI.
+
+### Changed
+
+- **Single agent** — the C agent (static binary, ~2 MB, vendored zstd,
+  zero runtime dependencies) is now the only agent.
+- **HTTP layer migrated to FastAPI/uvicorn** (`web.py`) with orjson
+  responses and an asyncio SSE hub. Every URL path and JSON shape is
+  unchanged — verified by golden-diffing all endpoints against the old
+  stdlib server.
+- **Incremental aggregation** — each new chunk folds into the running
+  per-event state in O(new samples) instead of re-aggregating
+  everything (~8s cycle on long sessions before). Aggregates now cover
+  the full session; `--max-samples` only bounds the raw-sample window
+  used for thread/source drill-downs.
+- **Sessions spool to disk as compressed chunks while streaming** —
+  server RAM stays flat over long sessions; replay is parsed on demand
+  and cached (second open ~40× faster).
+- **Security defaults** — the web UI binds `127.0.0.1` unless
+  `--http-bind` says otherwise; the wizard's file browser is confined
+  to `--browse-root` (default: home); agents can be required to
+  present a shared `--token` (constant-time comparison).
+- **Server requirements** — Python 3.10+ with a small, deliberate
+  dependency set (fastapi, uvicorn, orjson, zstandard), all
+  user-space; zstd decompression is in-process now (external binary
+  only as fallback).
+
+### Fixed
+
+- Agent: child-PID tracking race in the signal path (lock-free CAS
+  slots), start-while-paused thread leak, reprobe-while-profiling
+  use-after-free, unlocked metrics config.
+- Server: command-response and agent-session install races; `perf stat`
+  totals now accumulate across rounds (last-write-wins before);
+  multi-round `--output` captures no longer lose rounds 2..N on
+  import; path traversal via static files and session ids; function
+  summaries had hash-randomized ordering for equal-count ties.
+- UI: the Flame Graph tab rendered empty after a session replay (the
+  layout aborts at zero width while the tab is hidden and replay mode
+  never repaints).
+
+### Removed
+
+- The Python agent and `run_agent.sh` — superseded by the C agent +
+  `install-agent.sh`.
+- PyInstaller frozen-server tarballs (and the AlmaLinux legacy build) —
+  the wheel is the only server artifact.
+
+### Infrastructure
+
+- New `test.yml` workflow: pytest matrix on Python 3.10–3.13 (with the
+  agent built first) + a browser-E2E job, on every push/PR.
+- `build.yml` overhauled: strict ruff, pytest, wheel/sdist with
+  contents check and install-and-serve smoke test, static C agents for
+  five architectures, static binutils tools bundles for two, tag-driven
+  GitHub Releases with stable-name agent assets, and a prepared
+  (disabled until Trusted Publishing is configured) PyPI publish job.
+
 ## [0.5.0] — 2026-05-17
 
 **The "enterprise + docs" release.** Per-thread analysis lands as a full

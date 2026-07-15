@@ -134,15 +134,28 @@ perflens/
 | Endpoint                  | Method | Description                                     |
 |---------------------------|--------|-------------------------------------------------|
 | `/api/status`             | GET    | Server + agent connection state, sample totals  |
-| `/api/stream`             | GET    | SSE: `status`, `event_types`, `per_event`, `perf_stat` |
+| `/api/stream`             | GET    | SSE: `status`, `agent_connected`, `event_types`, `data_version`, `perf_stat`, `metrics_<type>` |
+| `/api/per-event?event=`   | GET    | Cached per-event snapshot (gzip); pairs with SSE `data_version` |
 | `/api/sessions`           | GET    | List saved sessions                             |
-| `/api/sessions/<id>`      | GET    | Lazy-replay a session from saved chunks         |
+| `/api/sessions/<id>`      | GET    | Lazy-replay a session from saved chunks (cached) |
+| `/api/export/session/<id>?format=` | GET | Export: `collapsed` or `json`             |
+| `/api/export/flamegraph?event=&session=` | GET | Standalone SVG flame graph          |
 | `/api/source?file=&event=&tid=` | GET | Annotated source (optionally per-thread)        |
 | `/api/thread-view?event=&tid=`  | GET | Per-thread flamegraph + function summary         |
 | `/api/thread-summary?event=`    | GET | Thread overview with sample counts and top funcs |
-| `/api/config/toolchain`         | POST| Set toolchain prefix and sysroot at runtime      |
-| `/api/per-event?event=`   | GET    | Cached per-event snapshot (gzip); pairs with SSE `data_version` |
+| `/api/index/status`       | GET    | Source-index / DWARF list state (truncated)     |
 | `/api/index/files?offset=&limit=&q=` | GET | Paginated DWARF source-file list            |
+| `/api/metrics/current`    | GET    | Latest device health metrics per type           |
+| `/api/metrics/history?type=&start=` | GET | Health metrics time series               |
+| `/api/connect`            | POST   | Connect out to a `--listen` agent               |
+| `/api/agent/command`      | POST   | Send a command to the connected agent           |
+| `/api/wizard/state`       | GET/POST | Persisted Live Debug wizard state             |
+| `/api/browse?path=`       | GET    | File picker (confined to `--browse-root`)      |
+| `/api/config/binary`      | POST   | Set the unstripped binary at runtime            |
+| `/api/config/source`      | POST   | Set the source directory at runtime             |
+| `/api/config/pathmap`     | POST   | Set compile-time path rewrites at runtime       |
+| `/api/config/toolchain`   | POST   | Set toolchain prefix and sysroot at runtime     |
+| `/api/import`             | POST   | Import an uploaded `perf.data` as a session     |
 | `/api/stop`               | GET    | Disconnect the active agent                     |
 | `/*`                      | GET    | Static files from `ui/`                         |
 
@@ -161,7 +174,8 @@ perflens/
 --readelf PATH        Custom readelf binary
 --toolchain-prefix P  Cross-compilation prefix (e.g. arm-linux-gnueabihf-)
 --sysroot DIR         Sysroot for shared library and source resolution
---max-samples N       Ring buffer cap             (default 500000)
+--max-samples N       Raw-sample ring buffer cap  (default 500000)
+--sessions-dir DIR    Saved-session location      (default ~/.perflens/sessions)
 --http-bind ADDR      Web UI bind address         (default 127.0.0.1)
 --browse-root DIR     File-picker confinement root (default: home dir)
 --token SECRET        Shared secret agents must present (or PERFLENS_TOKEN)
@@ -196,7 +210,10 @@ Options:
 
 ## Development rules
 
-- **Simplicity first.** Stdlib Python, plain HTML/JS/CSS, no frameworks.
+- **Simplicity first.** A small, deliberate server dependency set
+  (fastapi, uvicorn, orjson, zstandard — all user-space); plain HTML/JS/CSS
+  for the UI, no bundler, no npm at runtime; the agent stays
+  zero-dependency static C.
 - **Defensive parsing.** `perf` output format varies across kernel versions;
   the parser is forgiving.
 - **Generic.** No proprietary names, no IPs, no credentials, no company
