@@ -36,6 +36,7 @@ class ServerConfig:
     map_file_path: str = None
     addr2line_bin: str = None
     readelf_bin: str = None
+    dwarfdump_bin: str = None
     zstd_bin: str = None
     perf_bin: str = None
     path_map: dict = None
@@ -289,7 +290,9 @@ def probe_tools(cfg):
         print(f"[server]   addr2line: {cfg.addr2line_bin} (user-provided)",
               file=sys.stderr)
     else:
-        found = _find_binary('addr2line')
+        # Prefer llvm-addr2line: GNU-compatible flags, but dramatically
+        # faster on GB-scale DWARF (lazy index vs full scan)
+        found = _find_binary('llvm-addr2line') or _find_binary('addr2line')
         if found:
             cfg.addr2line_bin = found
             label = 'bundled' if 'server/bin' in found else 'system'
@@ -298,6 +301,12 @@ def probe_tools(cfg):
             cfg.addr2line_bin = None
             print("[server]   addr2line: NOT FOUND (source mapping disabled)",
                   file=sys.stderr)
+
+    # llvm-dwarfdump (optional): fast DWARF source-file listing
+    found = _find_binary('llvm-dwarfdump')
+    if found:
+        cfg.dwarfdump_bin = found
+        print(f"[server]   llvm-dwarfdump: {found}", file=sys.stderr)
 
     # readelf
     if cfg.readelf_bin and os.path.isfile(cfg.readelf_bin):
@@ -375,8 +384,10 @@ def probe_tools(cfg):
 
 
 def _create_source_mapper():
-    """Create a SourceMapper from current config. Used at startup and reconfiguration."""
-    return SourceMapper(
+    """Create a SourceMapper from current config. Used at startup and
+    reconfiguration. Loads any persisted source index instantly and kicks
+    a background refresh — request paths never walk the source tree."""
+    mapper = SourceMapper(
         config.source_dir,
         binary_path=config.binary_path,
         map_file_path=config.map_file_path,
@@ -385,7 +396,10 @@ def _create_source_mapper():
         path_map=config.path_map or {},
         inline=config.inline,
         sysroot=config.sysroot,
+        dwarfdump_bin=config.dwarfdump_bin,
     )
+    mapper.start_background_index()
+    return mapper
 
 
 # ---------------------------------------------------------------------------
@@ -1363,6 +1377,23 @@ class PerfLensHTTPHandler(SimpleHTTPRequestHandler):
             else:
                 self._send_json({'indexing': False, 'symbols_loaded': 0,
                                  'source_files_found': 0})
+        elif path == '/api/index/files':
+            mapper = state.source_mapper
+            params = parse_qs(parsed.query)
+            try:
+                offset = int(params.get('offset', ['0'])[0])
+                limit = int(params.get('limit', ['200'])[0])
+            except ValueError:
+                self._send_json({'error': 'bad offset/limit'}, 400)
+                return
+            query = params.get('q', [''])[0]
+            if mapper:
+                self._send_json(
+                    mapper.list_dwarf_files(offset, limit, query),
+                    allow_gzip=True)
+            else:
+                self._send_json({'total': 0, 'offset': 0, 'limit': limit,
+                                 'files': []})
         elif path == '/api/metrics/current':
             self._send_json(metrics_state.get_latest())
         elif path == '/api/metrics/history':

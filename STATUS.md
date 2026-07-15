@@ -6,8 +6,8 @@ plan file; this is the executable summary.
 
 ## Current phase
 
-**Phases 0, 1a, 1b, 1c+1d, 2a, 2b+2c complete.** Next up: **Phase 2d —
-source mapping at 500k-file / GB-DWARF scale**.
+**Phases 0–2 complete (0, 1a, 1b, 1c+1d, 2a, 2b+2c, 2d).** Next up:
+**Phase 3a+3b — src/perflens restructure + pyproject.toml + uvx**.
 
 ## Overhaul roadmap
 
@@ -60,10 +60,21 @@ source mapping at 500k-file / GB-DWARF scale**.
       NOTE: test/e2e_flamegraph.mjs is stale relative to the CURRENT UI
       (expects pre-swap single/double-click semantics; fails identically
       on HEAD) — rewrite in Phase 4.
-- [ ] **Phase 2d** — Source mapping at scale: background index (never sync
-      `os.walk` on request path), persistent caches under `~/.perflens/cache`
-      (source index + sqlite symbols.db), prefer llvm-symbolizer/dwarfdump,
-      paginated `/api/index/files`.
+- [x] **Phase 2d** — Done. New `server/symcache.py`: persistent caches under
+      `~/.perflens/cache` (override root: `PERFLENS_HOME`) — sqlite
+      `symbols.db` for addr2line resolutions / inline chains / symbol
+      tables / DWARF file lists keyed by binary identity
+      (realpath+mtime+size), plus `source_index_<sha1>.json.gz`.
+      Source index: `os.scandir` background build, instant load from
+      cache at startup, atomic swap; `_find_source_file` NEVER walks the
+      tree (misses aren't negative-cached while the index is missing).
+      Probe prefers `llvm-addr2line`; `llvm-dwarfdump --show-sources`
+      used for DWARF file lists when present. `/api/index/status` now
+      truncates the DWARF list (200 + total + truncated flag); new
+      paginated `/api/index/files?offset=&limit=&q=`.
+      Verified: 100k-file synthetic tree scans+persists in 0.14s, warm
+      start loads it in 0.05s; live session populated symbols.db; warm
+      restart hits all three caches (symbols/addr2line/index) on replay.
 - [ ] **Phase 3a+3b** — src-layout restructure + `pyproject.toml` (hatchling;
       deps: fastapi, uvicorn, zstandard, orjson) + `perflens` console script
       (serve / import / push-agent / provision) + `uvx perflens`.

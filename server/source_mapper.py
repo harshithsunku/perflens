@@ -13,7 +13,10 @@ import os
 import re
 import subprocess
 import sys
+import threading
 from collections import defaultdict
+
+import symcache
 
 
 class MapFileParser:
@@ -226,14 +229,23 @@ class SourceMapper:
 
     def __init__(self, source_dir, binary_path=None, map_file_path=None,
                  addr2line_bin=None, readelf_bin=None, path_map=None,
-                 inline=False, sysroot=None):
+                 inline=False, sysroot=None, dwarfdump_bin=None,
+                 sym_cache=None):
         self.source_dir = os.path.abspath(source_dir)
         self.binary_path = binary_path
         self.addr2line_bin = addr2line_bin
         self.readelf_bin = readelf_bin or 'readelf'
+        self.dwarfdump_bin = dwarfdump_bin  # llvm-dwarfdump, when available
         self.path_map = path_map or {}
         self.inline = inline
         self.sysroot = sysroot
+
+        # Persistent cross-restart cache (~/.perflens/cache)
+        self._sym_cache = sym_cache if sym_cache is not None \
+            else symcache.SymbolCache()
+        self._bkeys = {}            # binary path -> identity key (memoized)
+        self._a2l_loaded = set()    # binaries whose addr2line rows are loaded
+        self._inline_loaded = set() # binaries whose inline rows are loaded
 
         # Map file symbols
         self._map_symbols = {}
@@ -253,8 +265,12 @@ class SourceMapper:
         self._inline_cache = {}
         # vaddr cache: (binary, func, offset_str) -> vaddr or None
         self._vaddr_cache = {}
-        # Source file index: basename -> [full_paths]
+        # Source file index: basename -> [full_paths]. Loaded instantly
+        # from the persistent cache when available; (re)built by a
+        # background thread — request paths NEVER trigger a tree walk.
         self._source_index = None
+        self._index_build_lock = threading.Lock()
+        self._index_building = False
         # Full path cache: reported_path -> actual_path
         self._path_cache = {}
 
@@ -263,6 +279,14 @@ class SourceMapper:
         self._dwarf_source_files = []  # list of source file paths from DWARF
         self._index_symbols_loaded = 0
         self._index_source_files_found = 0
+
+        # Instant (possibly stale) index from a previous run
+        cached_index = symcache.load_source_index(self.source_dir)
+        if cached_index:
+            self._source_index = defaultdict(list, cached_index)
+            print("[source_mapper] Source index loaded from cache "
+                  f"({sum(len(v) for v in cached_index.values())} files); "
+                  "refreshing in background", file=sys.stderr)
 
         # Probe inline support at startup
         if self.inline:
@@ -310,15 +334,33 @@ class SourceMapper:
         except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
             return False
 
+    def _bkey(self, binary):
+        """Persistent-cache identity for a binary (memoized)."""
+        if binary not in self._bkeys:
+            self._bkeys[binary] = symcache.binary_key(binary) if binary else None
+        return self._bkeys[binary]
+
     def _load_symbols(self, binary):
-        """Load symbol table. Priority: map file → readelf.
+        """Load symbol table. Priority: persistent cache → readelf → map file.
 
         Uses streaming parse for readelf output so that very large
         binaries (100-200 MB+) don't require the entire symbol table
-        text to be held in memory at once.
+        text to be held in memory at once. Results persist in
+        ~/.perflens/cache/symbols.db so restarts skip readelf entirely.
         """
         if binary in self._symbol_cache:
             return self._symbol_cache[binary]
+
+        bkey = self._bkey(binary)
+        cached = self._sym_cache.load_symtab(bkey)
+        if cached is not None:
+            for name, addr in self._map_symbols.items():
+                if name not in cached:
+                    cached[name] = addr
+            self._symbol_cache[binary] = cached
+            print(f"[source_mapper] Symbols from cache: {len(cached)} "
+                  f"({os.path.basename(binary or '?')})", file=sys.stderr)
+            return cached
 
         symbols = {}
 
@@ -350,6 +392,10 @@ class SourceMapper:
                 if proc and proc.poll() is None:
                     proc.kill()
                     proc.wait()
+
+        # Persist before merging map-file symbols (which belong to the map
+        # file, not to this binary's identity)
+        self._sym_cache.store_symtab(bkey, symbols)
 
         # Supplement with map file symbols
         for name, addr in self._map_symbols.items():
@@ -394,7 +440,23 @@ class SourceMapper:
         return result
 
     def _resolve_addrs_batch(self, binary, addrs):
-        """Resolve multiple addresses at once using the pipe."""
+        """Resolve multiple addresses at once using the pipe.
+
+        First touch of a binary bulk-loads its previously resolved
+        addresses from the persistent cache; anything newly resolved is
+        written back, so restarts against the same binary skip addr2line.
+        """
+        if binary not in self._a2l_loaded:
+            self._a2l_loaded.add(binary)
+            persisted = self._sym_cache.load_addr2line(self._bkey(binary))
+            for vaddr, (fpath, lineno) in persisted.items():
+                self._addr2line_cache.setdefault((binary, vaddr),
+                                                 (fpath, lineno))
+            if persisted:
+                print(f"[source_mapper] addr2line cache: {len(persisted)} "
+                      f"addrs ({os.path.basename(binary or '?')})",
+                      file=sys.stderr)
+
         uncached = [a for a in addrs
                     if (binary, a) not in self._addr2line_cache]
         if not uncached:
@@ -407,15 +469,19 @@ class SourceMapper:
             return
 
         batch_results = pipe.resolve_batch(uncached)
+        new_entries = {}
         for addr in uncached:
             if addr in batch_results:
                 func, fpath, lineno = batch_results[addr]
                 if fpath != '??' and lineno > 0:
                     self._addr2line_cache[(binary, addr)] = (fpath, lineno)
+                    new_entries[addr] = (fpath, lineno)
                 else:
                     self._addr2line_cache[(binary, addr)] = ('??', 0)
+                    new_entries[addr] = ('??', 0)
             else:
                 self._addr2line_cache[(binary, addr)] = ('??', 0)
+        self._sym_cache.store_addr2line(self._bkey(binary), new_entries)
 
     def map_samples_to_lines(self, samples):
         """Map all samples to source lines using batch resolution.
@@ -480,20 +546,71 @@ class SourceMapper:
         'third_party', 'external', 'deps', 'vendor',
     ))
 
-    def _build_source_index(self):
-        """Build an index of source files: basename -> [full_paths]."""
-        if self._source_index is not None:
+    def _scan_source_tree(self):
+        """Walk the source tree (os.scandir, iterative) and return a fresh
+        basename -> [full_paths] index. Safe to run in a background thread."""
+        index = defaultdict(list)
+        stack = [self.source_dir]
+        while stack:
+            d = stack.pop()
+            try:
+                with os.scandir(d) as it:
+                    for entry in it:
+                        name = entry.name
+                        try:
+                            if entry.is_dir(follow_symlinks=False):
+                                if (not name.startswith('.')
+                                        and name not in self._SKIP_DIRS):
+                                    stack.append(entry.path)
+                            else:
+                                index[name].append(entry.path)
+                        except OSError:
+                            continue
+            except OSError:
+                continue
+        return index
+
+    def _build_source_index(self, force=False):
+        """(Re)build the source index synchronously and persist it.
+        Called from background threads and pre_index() — never from a
+        request path."""
+        if self._source_index is not None and not force:
             return
-        self._source_index = defaultdict(list)
-        for root, dirs, files in os.walk(self.source_dir):
-            dirs[:] = [d for d in dirs if not d.startswith('.')
-                       and d not in self._SKIP_DIRS]
-            for fname in files:
-                full = os.path.join(root, fname)
-                self._source_index[fname].append(full)
+        index = self._scan_source_tree()
+        self._source_index = index  # atomic swap
+        # Retry-able negatives may now resolve
+        self._path_cache = {k: v for k, v in self._path_cache.items()
+                            if v is not None}
+        symcache.save_source_index(self.source_dir, dict(index))
+
+    def start_background_index(self):
+        """Kick a background (re)build of the source index. The request
+        path keeps serving from the cached/stale index (or exact-path
+        checks only) until the fresh one atomically swaps in."""
+        with self._index_build_lock:
+            if self._index_building:
+                return
+            self._index_building = True
+
+        def worker():
+            try:
+                self._build_source_index(force=True)
+                total = sum(len(v) for v in (self._source_index or {}).values())
+                print(f"[source_mapper] Source index ready: {total} files "
+                      f"in {self.source_dir}", file=sys.stderr)
+            finally:
+                with self._index_build_lock:
+                    self._index_building = False
+
+        threading.Thread(target=worker, daemon=True,
+                         name='source-index').start()
 
     def _find_source_file(self, file_path):
-        """Find a source file: path map → exact path → basename match."""
+        """Find a source file: path map → exact path → basename match.
+
+        Never triggers a tree walk: if the index isn't ready yet the
+        basename fallback is skipped (and the miss is NOT cached, so the
+        lookup retries once the background index lands)."""
         if file_path in self._path_cache:
             return self._path_cache[file_path]
 
@@ -510,11 +627,15 @@ class SourceMapper:
             sysroot_path = os.path.join(self.sysroot, mapped.lstrip('/'))
             if os.path.isfile(sysroot_path):
                 result = sysroot_path
+
+        index = self._source_index
         if result is None:
+            if index is None:
+                # Index not built yet — don't cache the miss
+                return None
             # Try basename matching
-            self._build_source_index()
             basename = os.path.basename(mapped)
-            candidates = self._source_index.get(basename, [])
+            candidates = index.get(basename, [])
 
             if len(candidates) == 1:
                 result = candidates[0]
@@ -637,32 +758,43 @@ class SourceMapper:
         if not self.inline:
             return samples
 
-        # Step 1: Collect unique (binary, vaddr) pairs not yet cached
+        # Step 1: Collect unique (binary, vaddr) pairs not yet cached.
+        # First touch of a binary bulk-loads its persisted inline chains.
         to_resolve = defaultdict(list)
         for sample in samples:
             for frame in sample['frames']:
                 binary = self.binary_path or self._resolve_module_path(frame.get('module', ''))
                 if not binary:
                     continue
+                if binary not in self._inline_loaded:
+                    self._inline_loaded.add(binary)
+                    persisted = self._sym_cache.load_inline(self._bkey(binary))
+                    for vaddr, chain in persisted.items():
+                        self._inline_cache.setdefault((binary, vaddr), chain)
                 vaddr = self._compute_vaddr(frame, binary)
                 if vaddr is not None and (binary, vaddr) not in self._inline_cache:
                     to_resolve[binary].append(vaddr)
 
-        # Step 2: Resolve via inline pipes
+        # Step 2: Resolve via inline pipes; persist what we learned
         for binary, addrs in to_resolve.items():
             unique_addrs = list(set(addrs))
+            new_entries = {}
             pipe = self._get_inline_pipe(binary)
             if not pipe:
                 for addr in unique_addrs:
                     self._inline_cache[(binary, addr)] = None
-                continue
-            results = pipe.resolve_inline(unique_addrs)
-            for addr in unique_addrs:
-                chain = results.get(addr)
-                if chain and len(chain) > 1:
-                    self._inline_cache[(binary, addr)] = chain
-                else:
-                    self._inline_cache[(binary, addr)] = None
+                    new_entries[addr] = None
+            else:
+                results = pipe.resolve_inline(unique_addrs)
+                for addr in unique_addrs:
+                    chain = results.get(addr)
+                    if chain and len(chain) > 1:
+                        self._inline_cache[(binary, addr)] = chain
+                        new_entries[addr] = chain
+                    else:
+                        self._inline_cache[(binary, addr)] = None
+                        new_entries[addr] = None
+            self._sym_cache.store_inline(self._bkey(binary), new_entries)
 
         # Step 3: Expand frames in each sample
         expanded_samples = []
@@ -746,13 +878,45 @@ class SourceMapper:
     def _extract_dwarf_source_files(self, binary):
         """Extract source file paths from DWARF debug info.
 
-        Uses 'readelf --debug-dump=decodedline' to get compilation unit
-        file tables.  Returns a sorted list of unique absolute paths
-        that appear in the debug info.
+        Cached persistently by binary identity. Prefers
+        'llvm-dwarfdump --show-sources' (emits exactly the file list —
+        dramatically faster on GB-scale debug info), falling back to
+        'readelf --debug-dump=decodedline'.
         """
         if not binary or not os.path.isfile(binary):
             return []
 
+        bkey = self._bkey(binary)
+        cached = self._sym_cache.load_dwarf_files(bkey)
+        if cached is not None:
+            print(f"[source_mapper] DWARF file list from cache "
+                  f"({len(cached)} files)", file=sys.stderr)
+            return cached
+
+        result = self._dwarf_files_llvm(binary)
+        if result is None:
+            result = self._dwarf_files_readelf(binary)
+        self._sym_cache.store_dwarf_files(bkey, result)
+        return result
+
+    def _dwarf_files_llvm(self, binary):
+        """File list via llvm-dwarfdump --show-sources, or None when the
+        tool is unavailable/fails."""
+        if not self.dwarfdump_bin:
+            return None
+        try:
+            r = subprocess.run(
+                [self.dwarfdump_bin, '--show-sources', binary],
+                capture_output=True, text=True, timeout=300)
+            if r.returncode != 0:
+                return None
+            files = {line.strip() for line in r.stdout.splitlines()
+                     if line.strip() and '/' in line}
+            return sorted(files)
+        except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+            return None
+
+    def _dwarf_files_readelf(self, binary):
         files = set()
         proc = None
         try:
@@ -800,12 +964,38 @@ class SourceMapper:
         return sorted(files)
 
     def get_index_status(self):
-        """Return current indexing status for the UI."""
+        """Return current indexing status for the UI.
+
+        The DWARF file list is truncated — on millions-of-LOC binaries the
+        full list is multi-MB; use list_dwarf_files() for pagination.
+        """
+        index = self._source_index
         return {
-            'indexing': self._indexing,
+            'indexing': self._indexing or self._index_building,
             'symbols_loaded': self._index_symbols_loaded,
             'source_files_found': self._index_source_files_found,
-            'dwarf_source_files': self._dwarf_source_files,
+            'source_index_ready': index is not None,
+            'source_index_files': (sum(len(v) for v in index.values())
+                                   if index is not None else 0),
+            'dwarf_total': len(self._dwarf_source_files),
+            'dwarf_source_files': self._dwarf_source_files[:200],
+            'dwarf_truncated': len(self._dwarf_source_files) > 200,
+        }
+
+    def list_dwarf_files(self, offset=0, limit=200, query=''):
+        """Paginated (optionally filtered) DWARF source-file list."""
+        files = self._dwarf_source_files
+        if query:
+            q = query.lower()
+            files = [f for f in files if q in f.lower()]
+        total = len(files)
+        offset = max(0, offset)
+        limit = max(1, min(limit, 1000))
+        return {
+            'total': total,
+            'offset': offset,
+            'limit': limit,
+            'files': files[offset:offset + limit],
         }
 
 

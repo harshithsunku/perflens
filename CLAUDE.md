@@ -124,6 +124,8 @@ perflens/
 | `/api/thread-view?event=&tid=`  | GET | Per-thread flamegraph + function summary         |
 | `/api/thread-summary?event=`    | GET | Thread overview with sample counts and top funcs |
 | `/api/config/toolchain`         | POST| Set toolchain prefix and sysroot at runtime      |
+| `/api/per-event?event=`   | GET    | Cached per-event snapshot (gzip); pairs with SSE `data_version` |
+| `/api/index/files?offset=&limit=&q=` | GET | Paginated DWARF source-file list            |
 | `/api/stop`               | GET    | Disconnect the active agent                     |
 | `/*`                      | GET    | Static files from `ui/`                         |
 
