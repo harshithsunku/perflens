@@ -1,0 +1,86 @@
+{
+  "version": "0.5.0",
+  "session_id": "20260715_030454_10.10.3.249:9999",
+  "agent": "10.10.3.249:9999",
+  "timestamp": "2026-07-15T03:06:05.190039",
+  "total_samples": 15257,
+  "chunks": 6,
+  "event_types": [
+    "branch-instructions",
+    "branch-misses",
+    "cache-misses",
+    "cache-references",
+    "cycles",
+    "instructions"
+  ],
+  "perf_stat": {
+    "cycles": {
+      "value": 20497591793,
+      "comment": ""
+    },
+    "instructions": {
+      "value": 38579224068,
+      "comment": ""
+    },
+    "cache-misses": {
+      "value": 6007331,
+      "comment": ""
+    },
+    "cache-references": {
+      "value": 7873229504,
+      "comment": ""
+    },
+    "branch-misses": {
+      "value": 88627562,
+      "comment": ""
+    },
+    "branch-instructions": {
+      "value": 5003343115,
+      "comment": ""
+    },
+    "page-faults": {
+      "value": 0,
+      "comment": ""
+    },
+    "context-switches": {
+      "value": 0,
+      "comment": ""
+    },
+    "cpu-migrations": {
+      "value": 0,
+      "comment": ""
+    },
+    "task-clock": {
+      "value": 7832.93,
+      "comment": ""
+    },
+    "time_elapsed": {
+      "value": 8.003785372,
+      "comment": "seconds"
+    },
+    "ipc": {
+      "value": 1.88,
+      "comment": "instructions per cycle"
+    },
+    "cache_miss_rate": {
+      "value": 0.08,
+      "comment": "% cache miss rate"
+    }
+  },
+  "platform": {
+    "arch": "aarch64",
+    "kernel": "6.12.92-sdm845-nh",
+    "perf_version": "perf version 7.0.12",
+    "perf_event_paranoid": 2
+  },
+  "metrics_summary": {
+    "snapshots": 36,
+    "duration_sec": 70.1,
+    "avg_cpu_pct": 38.1,
+    "max_cpu_pct": 40.0,
+    "avg_mem_pct": 20.3,
+    "max_mem_pct": 20.4,
+    "avg_temp_c": 64,
+    "max_temp_c": 70
+  }
+}
