@@ -37,6 +37,8 @@
 #include <errno.h>
 #include <getopt.h>
 #include <poll.h>
+#include <limits.h>
+#include <netdb.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -45,6 +47,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
@@ -59,6 +62,16 @@
 
 #define LOG_PREFIX       "[perflens-agent]"
 #define PERF             "perf"
+
+/* Version is injected by the Makefile (-DAGENT_VERSION=\"x.y.z\") */
+#ifndef AGENT_VERSION
+#define AGENT_VERSION    "dev"
+#endif
+
+/* Self-update: release assets are named perflens-agent-linux-<arch>.
+ * Override the base URL with PERFLENS_UPDATE_URL (e.g. corporate mirror). */
+#define UPDATE_URL_BASE \
+    "https://github.com/harshithsunku/perflens/releases/latest/download"
 #define DEFAULT_PORT     9999
 #define DEFAULT_FREQ     99
 #define DEFAULT_DURATION 8
@@ -123,8 +136,8 @@ static void *collection_thread_fn(void *arg);
  * -------------------------------------------------------------------------- */
 
 static volatile sig_atomic_t g_shutdown = 0;
-static volatile pid_t g_child_pids[8];
-static volatile int g_child_count = 0;
+#define MAX_TRACKED_CHILDREN 8
+static volatile pid_t g_child_pids[MAX_TRACKED_CHILDREN];
 static struct agent_state *g_agent = NULL;  /* for signal handler */
 static volatile int g_agent_sock_fd = -1;   /* mirror of agent sock_fd for signal handler */
 
@@ -155,6 +168,41 @@ static void agent_warn(const char *fmt, ...)
 }
 
 /* --------------------------------------------------------------------------
+ * Child process tracking
+ *
+ * Fixed slots claimed/released with CAS so track/untrack/kill are safe from
+ * the collection thread, the command thread, and the signal handler
+ * concurrently — no mutex (the signal handler can't take one).
+ * -------------------------------------------------------------------------- */
+
+static void track_child(pid_t pid)
+{
+    for (int i = 0; i < MAX_TRACKED_CHILDREN; i++) {
+        if (__sync_bool_compare_and_swap(&g_child_pids[i], 0, pid))
+            return;
+    }
+    agent_warn("child pid %d not tracked (all slots busy)", (int)pid);
+}
+
+static void untrack_child(pid_t pid)
+{
+    for (int i = 0; i < MAX_TRACKED_CHILDREN; i++) {
+        if (__sync_bool_compare_and_swap(&g_child_pids[i], pid, 0))
+            return;
+    }
+}
+
+/* Async-signal-safe: only volatile reads + kill(2). */
+static void kill_tracked_children(void)
+{
+    for (int i = 0; i < MAX_TRACKED_CHILDREN; i++) {
+        pid_t p = g_child_pids[i];
+        if (p > 0)
+            kill(p, SIGTERM);
+    }
+}
+
+/* --------------------------------------------------------------------------
  * Signal handling
  * -------------------------------------------------------------------------- */
 
@@ -162,11 +210,7 @@ static void signal_handler(int sig)
 {
     (void)sig;
     g_shutdown = 1;
-    /* Kill tracked child processes */
-    for (int i = 0; i < g_child_count; i++) {
-        if (g_child_pids[i] > 0)
-            kill(g_child_pids[i], SIGTERM);
-    }
+    kill_tracked_children();
     /* Unblock recv thread by shutting down socket */
     if (g_agent_sock_fd >= 0)
         shutdown(g_agent_sock_fd, SHUT_RDWR);
@@ -185,22 +229,6 @@ static void install_signal_handlers(void)
     /* Ignore SIGPIPE — we handle send errors via return codes */
     sa.sa_handler = SIG_IGN;
     sigaction(SIGPIPE, &sa, NULL);
-}
-
-static void track_child(pid_t pid)
-{
-    if (g_child_count < (int)(sizeof(g_child_pids)/sizeof(g_child_pids[0])))
-        g_child_pids[g_child_count++] = pid;
-}
-
-static void untrack_child(pid_t pid)
-{
-    for (int i = 0; i < g_child_count; i++) {
-        if (g_child_pids[i] == pid) {
-            g_child_pids[i] = g_child_pids[--g_child_count];
-            return;
-        }
-    }
 }
 
 /* Block SIGINT/SIGTERM in worker threads — only main thread handles signals */
@@ -1483,6 +1511,7 @@ struct agent_state {
     int pid;
     int frequency;
     int duration;
+    const char *token;          /* optional shared secret, sent in hello */
 
     /* Probed state */
     struct platform_info platform;
@@ -1516,6 +1545,7 @@ static void agent_state_init(struct agent_state *a)
     a->pid = -1;
     a->frequency = DEFAULT_FREQ;
     a->duration = DEFAULT_DURATION;
+    a->token = NULL;
     memset(&a->platform, 0, sizeof(a->platform));
     a->caps = NULL;
     a->collect_thread_active = 0;
@@ -2021,9 +2051,19 @@ static void *metrics_thread_fn(void *arg)
     char buf[8192];
 
     while (!g_shutdown && !a->session_done) {
-        if (!a->metrics_enabled) {
+        /* Snapshot config + pid under the lock once per tick */
+        int enabled, interval, network, pid = 0;
+        pthread_mutex_lock(&a->state_lock);
+        enabled  = a->metrics_enabled;
+        interval = a->metrics_interval;
+        network  = a->metrics_network;
+        if (a->state == AGENT_PROFILING || a->state == AGENT_PAUSED)
+            pid = a->pid;
+        pthread_mutex_unlock(&a->state_lock);
+
+        if (!enabled) {
             /* Sleep in short intervals so we notice shutdown quickly */
-            int wait_ms = a->metrics_interval * 1000;
+            int wait_ms = interval * 1000;
             struct timespec tick = {0, 200000000L}; /* 200ms */
             while (wait_ms > 0 && !g_shutdown && !a->session_done) {
                 nanosleep(&tick, NULL);
@@ -2032,14 +2072,8 @@ static void *metrics_thread_fn(void *arg)
             continue;
         }
 
-        /* Set PID only when profiling */
-        int pid = 0;
-        pthread_mutex_lock(&a->state_lock);
-        if (a->state == AGENT_PROFILING || a->state == AGENT_PAUSED)
-            pid = a->pid;
-        pthread_mutex_unlock(&a->state_lock);
         metrics_set_pid(&mc, pid);
-        mc.include_network = a->metrics_network;
+        mc.include_network = network;
 
         /* System metrics */
         int len = collect_system_metrics(&mc, buf, sizeof(buf));
@@ -2064,7 +2098,7 @@ static void *metrics_thread_fn(void *arg)
         }
 
         /* Sleep in short intervals so we notice shutdown quickly */
-        int wait_ms = a->metrics_interval * 1000;
+        int wait_ms = interval * 1000;
         struct timespec tick = {0, 200000000L}; /* 200ms */
         while (wait_ms > 0 && !g_shutdown && !a->session_done) {
             nanosleep(&tick, NULL);
@@ -2353,6 +2387,21 @@ static void cmd_verify_perf(struct agent_state *a, const char *cmd_id,
 static void cmd_reprobe(struct agent_state *a, const char *cmd_id,
                         const char *json)
 {
+    /* The collection thread reads a->caps while running — re-probing now
+     * would free it out from under it. */
+    pthread_mutex_lock(&a->state_lock);
+    if (a->state == AGENT_PROFILING || a->state == AGENT_PAUSED) {
+        pthread_mutex_unlock(&a->state_lock);
+        char resp[256];
+        snprintf(resp, sizeof(resp),
+            "{\"id\":\"%s\",\"ok\":false,"
+            "\"error\":\"cannot reprobe while profiling — stop first\"}",
+            cmd_id);
+        agent_send_response(a, resp);
+        return;
+    }
+    pthread_mutex_unlock(&a->state_lock);
+
     const char *args = json_find_object(json, "args");
     int pid = a->pid;
     if (args) json_get_int(args, "pid", &pid);
@@ -2422,16 +2471,27 @@ static void cmd_start(struct agent_state *a, const char *cmd_id,
                       const char *json)
 {
     pthread_mutex_lock(&a->state_lock);
-    if (a->state == AGENT_PROFILING) {
+    if (a->state == AGENT_PROFILING || a->state == AGENT_PAUSED) {
+        int paused = (a->state == AGENT_PAUSED);
         pthread_mutex_unlock(&a->state_lock);
         char resp[256];
         snprintf(resp, sizeof(resp),
-            "{\"id\":\"%s\",\"ok\":false,\"error\":\"already profiling\"}",
-            cmd_id);
+            "{\"id\":\"%s\",\"ok\":false,\"error\":\"%s\"}",
+            cmd_id,
+            paused ? "already profiling (paused — use resume or stop)"
+                   : "already profiling");
         agent_send_response(a, resp);
         return;
     }
     pthread_mutex_unlock(&a->state_lock);
+
+    /* A previous collection thread may have ended on its own (e.g. target
+     * process exited set state back to IDLE) without anyone joining it. */
+    if (a->collect_thread_active) {
+        a->collect_stop = 1;
+        pthread_join(a->collect_thread, NULL);
+        a->collect_thread_active = 0;
+    }
 
     const char *args = json_find_object(json, "args");
     int pid = a->pid;
@@ -2553,10 +2613,7 @@ static void cmd_stop(struct agent_state *a, const char *cmd_id,
     a->collect_stop = 1;
 
     /* Kill active perf subprocesses for immediate stop */
-    for (int i = 0; i < g_child_count; i++) {
-        if (g_child_pids[i] > 0)
-            kill(g_child_pids[i], SIGTERM);
-    }
+    kill_tracked_children();
 
     if (a->collect_thread_active) {
         pthread_join(a->collect_thread, NULL);
@@ -2589,10 +2646,7 @@ static void cmd_pause(struct agent_state *a, const char *cmd_id,
     pthread_mutex_unlock(&a->state_lock);
 
     /* Kill active perf subprocesses to stop collecting immediately */
-    for (int i = 0; i < g_child_count; i++) {
-        if (g_child_pids[i] > 0)
-            kill(g_child_pids[i], SIGTERM);
-    }
+    kill_tracked_children();
 
     char resp[256];
     snprintf(resp, sizeof(resp), "{\"id\":\"%s\",\"ok\":true}", cmd_id);
@@ -2651,6 +2705,7 @@ static void cmd_configure_metrics(struct agent_state *a, const char *cmd_id,
     const char *args = json_find_object(json, "args");
     int val;
 
+    pthread_mutex_lock(&a->state_lock);
     if (args) {
         if (json_get_bool(args, "enabled", &val) == 0)
             a->metrics_enabled = val;
@@ -2659,15 +2714,187 @@ static void cmd_configure_metrics(struct agent_state *a, const char *cmd_id,
         if (json_get_bool(args, "network", &val) == 0)
             a->metrics_network = val;
     }
+    int enabled  = a->metrics_enabled;
+    int interval = a->metrics_interval;
+    int network  = a->metrics_network;
+    pthread_mutex_unlock(&a->state_lock);
 
     char resp[256];
     snprintf(resp, sizeof(resp),
         "{\"id\":\"%s\",\"ok\":true,\"metrics_enabled\":%s,"
         "\"interval\":%d,\"network\":%s}",
         cmd_id,
-        a->metrics_enabled ? "true" : "false",
-        a->metrics_interval,
-        a->metrics_network ? "true" : "false");
+        enabled ? "true" : "false",
+        interval,
+        network ? "true" : "false");
+    agent_send_response(a, resp);
+}
+
+/* --------------------------------------------------------------------------
+ * Self-update
+ *
+ * Downloads the release asset matching this machine's arch, verifies the
+ * new binary runs, then atomically renames it over the running binary.
+ * Everything stays user-space (no sudo); the running process keeps its old
+ * inode until restarted.
+ * -------------------------------------------------------------------------- */
+
+static int detect_asset_arch(char *buf, size_t buflen)
+{
+    struct utsname u;
+    if (uname(&u) != 0)
+        return -1;
+    const char *m = u.machine;
+
+    union { uint16_t v; uint8_t b[2]; } probe;
+    probe.v = 1;
+    int little = (probe.b[0] == 1);
+
+    if (strcmp(m, "x86_64") == 0)
+        snprintf(buf, buflen, "x86_64");
+    else if (strncmp(m, "aarch64", 7) == 0)
+        snprintf(buf, buflen, "%s", little ? "aarch64" : "aarch64_be");
+    else if (strncmp(m, "armeb", 5) == 0 ||
+             (strncmp(m, "arm", 3) == 0 && !little))
+        snprintf(buf, buflen, "armeb");
+    else if (strncmp(m, "arm", 3) == 0)
+        snprintf(buf, buflen, "armv7");
+    else
+        return -1;
+    return 0;
+}
+
+/* Download url to dest via curl (preferred) or wget. exec failure = 127. */
+static int download_file(const char *url, const char *dest)
+{
+    struct buf err;
+    buf_init(&err);
+
+    char *curl_argv[] = { (char *)"curl", (char *)"-fsSL",
+                          (char *)"--connect-timeout", (char *)"20",
+                          (char *)"-o", (char *)dest, (char *)url, NULL };
+    int rc = run_cmd(curl_argv, NULL, &err, 300);
+    if (rc == 127) {
+        char *wget_argv[] = { (char *)"wget", (char *)"-q",
+                              (char *)"-T", (char *)"20",
+                              (char *)"-O", (char *)dest, (char *)url, NULL };
+        rc = run_cmd(wget_argv, NULL, &err, 300);
+        if (rc == 127) {
+            agent_warn("Neither curl nor wget found — cannot download");
+            buf_free(&err);
+            unlink(dest);
+            return -1;
+        }
+    }
+    if (rc != 0) {
+        agent_warn("Download failed (rc=%d): %.*s", rc,
+                   (int)(err.len < 200 ? err.len : 200),
+                   err.data ? err.data : "");
+        buf_free(&err);
+        unlink(dest);
+        return -1;
+    }
+    buf_free(&err);
+    return 0;
+}
+
+static int self_update(char *msg, size_t msglen)
+{
+    char self[PATH_MAX];
+    ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
+    if (n <= 0) {
+        snprintf(msg, msglen, "cannot resolve own binary path");
+        return -1;
+    }
+    self[n] = '\0';
+
+    char arch[32];
+    if (detect_asset_arch(arch, sizeof(arch)) != 0) {
+        snprintf(msg, msglen, "unsupported architecture");
+        return -1;
+    }
+
+    const char *base = getenv("PERFLENS_UPDATE_URL");
+    if (!base || !base[0])
+        base = UPDATE_URL_BASE;
+
+    char url[512];
+    snprintf(url, sizeof(url), "%s/perflens-agent-linux-%s", base, arch);
+
+    char tmp[PATH_MAX + 32];
+    snprintf(tmp, sizeof(tmp), "%s.update.%d", self, (int)getpid());
+
+    agent_log("Downloading %s ...", url);
+    if (download_file(url, tmp) != 0) {
+        snprintf(msg, msglen, "download failed: %.400s", url);
+        return -1;
+    }
+
+    if (chmod(tmp, 0755) != 0) {
+        snprintf(msg, msglen, "chmod failed: %s", strerror(errno));
+        unlink(tmp);
+        return -1;
+    }
+
+    /* Verify the downloaded binary actually runs before replacing self */
+    struct buf out;
+    buf_init(&out);
+    char *ver_argv[] = { tmp, (char *)"--version", NULL };
+    int rc = run_cmd(ver_argv, &out, NULL, 30);
+    if (rc != 0 || out.len == 0 ||
+        !str_contains_lower(out.data, out.len, "perflens-agent")) {
+        snprintf(msg, msglen, "downloaded binary failed verification (rc=%d)", rc);
+        buf_free(&out);
+        unlink(tmp);
+        return -1;
+    }
+
+    /* Extract "perflens-agent <version>" from the new binary's output */
+    char new_version[64] = "unknown";
+    if (out.data) {
+        out.data[out.len < out.cap ? out.len : out.cap - 1] = '\0';
+        const char *sp = strchr(out.data, ' ');
+        if (sp) {
+            snprintf(new_version, sizeof(new_version), "%s", sp + 1);
+            char *nl = strpbrk(new_version, "\r\n");
+            if (nl) *nl = '\0';
+        }
+    }
+    buf_free(&out);
+
+    if (strcmp(new_version, AGENT_VERSION) == 0) {
+        snprintf(msg, msglen, "already up to date (%s)", AGENT_VERSION);
+        unlink(tmp);
+        return 0;
+    }
+
+    if (rename(tmp, self) != 0) {
+        snprintf(msg, msglen, "rename failed: %s", strerror(errno));
+        unlink(tmp);
+        return -1;
+    }
+
+    snprintf(msg, msglen,
+             "updated %s -> %s (restart the agent to run the new version)",
+             AGENT_VERSION, new_version);
+    return 0;
+}
+
+static void cmd_update(struct agent_state *a, const char *cmd_id,
+                       const char *json)
+{
+    (void)json;
+    char msg[512];
+    int rc = self_update(msg, sizeof(msg));
+    agent_log("Self-update: %s", msg);
+
+    char esc[1024];
+    json_escape(esc, sizeof(esc), msg);
+    char resp[2048];
+    snprintf(resp, sizeof(resp),
+        "{\"id\":\"%s\",\"ok\":%s,\"message\":\"%s\","
+        "\"running_version\":\"%s\"}",
+        cmd_id, rc == 0 ? "true" : "false", esc, AGENT_VERSION);
     agent_send_response(a, resp);
 }
 
@@ -2695,6 +2922,7 @@ static const struct cmd_dispatch_entry CMD_TABLE[] = {
     { "resume",             cmd_resume },
     { "configure",          cmd_configure },
     { "configure_metrics",  cmd_configure_metrics },
+    { "update",             cmd_update },
     { NULL, NULL },
 };
 
@@ -2846,11 +3074,21 @@ static void run_interactive(struct agent_state *a)
     char esc_pv[256];
     json_escape(esc_pv, sizeof(esc_pv), a->platform.perf_version);
 
-    char hello[1024];
+    char token_field[300] = "";
+    if (a->token && a->token[0]) {
+        char esc_tok[256];
+        json_escape(esc_tok, sizeof(esc_tok), a->token);
+        snprintf(token_field, sizeof(token_field),
+                 ",\"token\":\"%s\"", esc_tok);
+    }
+
+    char hello[1536];
     snprintf(hello, sizeof(hello),
         "{\"type\":\"hello\",\"version\":1,\"agent\":\"perflens\","
+        "\"agent_version\":\"%s\"%s,"
         "\"platform\":{\"arch\":\"%s\",\"kernel\":\"%s\","
         "\"perf_version\":\"%s\",\"perf_event_paranoid\":%d}}",
+        AGENT_VERSION, token_field,
         a->platform.arch, a->platform.kernel,
         esc_pv, a->platform.perf_event_paranoid);
 
@@ -2886,10 +3124,7 @@ static void run_interactive(struct agent_state *a)
 
     /* Stop collection */
     a->collect_stop = 1;
-    for (int i = 0; i < g_child_count; i++) {
-        if (g_child_pids[i] > 0)
-            kill(g_child_pids[i], SIGTERM);
-    }
+    kill_tracked_children();
     if (a->collect_thread_active) {
         pthread_join(a->collect_thread, NULL);
         a->collect_thread_active = 0;
@@ -3038,37 +3273,54 @@ static void run_connect(struct agent_state *a, const char *host, int port)
         int sock = -1;
 
         while (!g_shutdown) {
-            sock = socket(AF_INET, SOCK_STREAM, 0);
-            if (sock < 0) {
-                agent_warn("socket() failed: %s", strerror(errno));
-                return;
-            }
+            /* Resolve every attempt — DNS may change between retries.
+             * Numeric addresses first: they need no NSS, which matters in
+             * glibc-static builds where DNS resolution may be unavailable. */
+            struct addrinfo hints, *res = NULL;
+            memset(&hints, 0, sizeof(hints));
+            hints.ai_family = AF_INET;
+            hints.ai_socktype = SOCK_STREAM;
+            hints.ai_flags = AI_NUMERICHOST;
+            char port_str[16];
+            snprintf(port_str, sizeof(port_str), "%d", port);
 
-            struct sockaddr_in addr;
-            memset(&addr, 0, sizeof(addr));
-            addr.sin_family = AF_INET;
-            addr.sin_port = htons((uint16_t)port);
-            if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
-                agent_warn("Invalid server address: %s", host);
+            int gai = getaddrinfo(host, port_str, &hints, &res);
+            if (gai != 0) {
+                hints.ai_flags = 0;
+                gai = getaddrinfo(host, port_str, &hints, &res);
+            }
+            if (gai != 0 || !res) {
+                agent_log("Cannot resolve %s (%s), retrying in %.0fs...",
+                          host, gai_strerror(gai), delay);
+            } else {
+                sock = socket(res->ai_family, res->ai_socktype,
+                              res->ai_protocol);
+                if (sock < 0) {
+                    agent_warn("socket() failed: %s", strerror(errno));
+                    freeaddrinfo(res);
+                    return;
+                }
+
+                /* Connect timeout */
+                struct timeval tv;
+                tv.tv_sec = 30;
+                tv.tv_usec = 0;
+                setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+                int crc = connect(sock, res->ai_addr,
+                                  (socklen_t)res->ai_addrlen);
+                freeaddrinfo(res);
+
+                if (crc == 0) {
+                    agent_log("Connected to %s:%d", host, port);
+                    break;
+                }
+
+                agent_log("Connection failed (%s), retrying in %.0fs...",
+                          strerror(errno), delay);
                 close(sock);
-                return;
+                sock = -1;
             }
-
-            /* Connect timeout */
-            struct timeval tv;
-            tv.tv_sec = 30;
-            tv.tv_usec = 0;
-            setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-
-            if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
-                agent_log("Connected to %s:%d", host, port);
-                break;
-            }
-
-            agent_log("Connection failed (%s), retrying in %.0fs...",
-                      strerror(errno), delay);
-            close(sock);
-            sock = -1;
 
             /* Sleep with shutdown check (200ms ticks) */
             {
@@ -3112,20 +3364,27 @@ static void print_usage(const char *prog)
         "       %s --server HOST [--port PORT]\n"
         "       %s --output FILE --pid PID [options]\n"
         "\n"
-        "PerfLens Device Agent (C)\n"
+        "PerfLens Device Agent %s\n"
         "\n"
         "Modes:\n"
         "  --listen          Listen for server connections (daemon)\n"
-        "  --server HOST     Connect to server (daemon)\n"
-        "  --output FILE     Headless: collect once, write to file ('-' for stdout)\n"
+        "  --server HOST     Connect to server (daemon; HOST may be a hostname)\n"
+        "  --output FILE     Headless: collect and write to file ('-' for stdout)\n"
         "\n"
         "Options:\n"
         "  --pid PID         Process to profile (required for --output)\n"
         "  --port PORT       TCP port (default: %d)\n"
         "  --frequency HZ    Sampling frequency in Hz (default: %d)\n"
         "  --duration SECS   Duration of each collection in seconds (default: %d)\n"
+        "  --rounds N        Collection rounds in --output mode (default: 1)\n"
+        "  --token SECRET    Shared secret sent to the server in the hello\n"
+        "                    (or set PERFLENS_TOKEN)\n"
+        "  --update          Self-update from the latest GitHub release and exit\n"
+        "                    (override base URL with PERFLENS_UPDATE_URL)\n"
+        "  --version         Print version and exit\n"
         "  --help            Show this help message\n",
-        prog, prog, prog, DEFAULT_PORT, DEFAULT_FREQ, DEFAULT_DURATION);
+        prog, prog, prog, AGENT_VERSION,
+        DEFAULT_PORT, DEFAULT_FREQ, DEFAULT_DURATION);
 }
 
 /* --------------------------------------------------------------------------
@@ -3139,9 +3398,13 @@ int main(int argc, char *argv[])
     int port = DEFAULT_PORT;
     int frequency = DEFAULT_FREQ;
     int duration = DEFAULT_DURATION;
+    int rounds = 1;
     int listen_mode = 0;
+    int do_update = 0;
     char *output = NULL;
+    const char *token = getenv("PERFLENS_TOKEN");
 
+    enum { OPT_ROUNDS = 1000, OPT_TOKEN, OPT_UPDATE, OPT_VERSION };
     static struct option long_opts[] = {
         {"pid",       required_argument, NULL, 'p'},
         {"server",    required_argument, NULL, 's'},
@@ -3150,6 +3413,10 @@ int main(int argc, char *argv[])
         {"duration",  required_argument, NULL, 'd'},
         {"listen",    no_argument,       NULL, 'l'},
         {"output",    required_argument, NULL, 'o'},
+        {"rounds",    required_argument, NULL, OPT_ROUNDS},
+        {"token",     required_argument, NULL, OPT_TOKEN},
+        {"update",    no_argument,       NULL, OPT_UPDATE},
+        {"version",   no_argument,       NULL, OPT_VERSION},
         {"help",      no_argument,       NULL, 'h'},
         {NULL, 0, NULL, 0}
     };
@@ -3165,12 +3432,27 @@ int main(int argc, char *argv[])
         case 'd': duration  = atoi(optarg); break;
         case 'l': listen_mode = 1;          break;
         case 'o': output    = optarg;       break;
+        case OPT_ROUNDS:  rounds = atoi(optarg); break;
+        case OPT_TOKEN:   token  = optarg;       break;
+        case OPT_UPDATE:  do_update = 1;         break;
+        case OPT_VERSION:
+            printf("perflens-agent %s\n", AGENT_VERSION);
+            return 0;
         case 'h': print_usage(argv[0]); return 0;
         default:  print_usage(argv[0]); return 1;
         }
     }
 
+    if (rounds < 1) rounds = 1;
+
     install_signal_handlers();
+
+    if (do_update) {
+        char msg[512];
+        int rc = self_update(msg, sizeof(msg));
+        agent_log("Self-update: %s", msg);
+        return rc == 0 ? 0 : 1;
+    }
 
     /* --- Headless mode: --output --- */
     if (output) {
@@ -3198,31 +3480,52 @@ int main(int argc, char *argv[])
             return 1;
         }
 
-        agent_log("Collecting perf data for PID %d (headless mode)", pid);
-        size_t out_len = 0;
-        char *data = collect_one_round(&caps, pid, frequency, duration, &out_len);
-        if (data && out_len > 0) {
-            if (strcmp(output, "-") == 0) {
-                fwrite(data, 1, out_len, stdout);
-                fflush(stdout);
-            } else {
-                FILE *f = fopen(output, "w");
-                if (f) {
-                    fwrite(data, 1, out_len, f);
-                    fclose(f);
-                    agent_log("Written %zu bytes to %s", out_len, output);
-                } else {
-                    agent_log("Error: cannot open %s: %s", output, strerror(errno));
-                }
-            }
-            agent_log("Done. Output %zu bytes.", out_len);
-            free(data);
+        agent_log("Collecting perf data for PID %d (headless mode, %d round%s)",
+                  pid, rounds, rounds == 1 ? "" : "s");
+
+        FILE *f = NULL;
+        if (strcmp(output, "-") == 0) {
+            f = stdout;
         } else {
+            f = fopen(output, "w");
+            if (!f) {
+                agent_log("Error: cannot open %s: %s", output, strerror(errno));
+                free_capabilities(&caps);
+                return 1;
+            }
+        }
+
+        size_t total_len = 0;
+        for (int r = 1; r <= rounds && !g_shutdown; r++) {
+            if (!process_exists(pid)) {
+                agent_log("Process %d exited", pid);
+                break;
+            }
+            if (rounds > 1)
+                agent_log("Round %d/%d...", r, rounds);
+            size_t out_len = 0;
+            char *data = collect_one_round(&caps, pid, frequency, duration,
+                                           &out_len);
+            if (data && out_len > 0) {
+                fwrite(data, 1, out_len, f);
+                fflush(f);
+                total_len += out_len;
+            } else {
+                agent_log("Round %d: no data", r);
+            }
+            free(data);
+        }
+
+        if (f != stdout)
+            fclose(f);
+        free_capabilities(&caps);
+
+        if (total_len == 0) {
             agent_log("No data collected.");
-            free_capabilities(&caps);
             return 1;
         }
-        free_capabilities(&caps);
+        agent_log("Done. Output %zu bytes to %s.", total_len,
+                  strcmp(output, "-") == 0 ? "stdout" : output);
         return 0;
     }
 
@@ -3238,6 +3541,7 @@ int main(int argc, char *argv[])
     agent_state_init(&agent);
     agent.frequency = frequency;
     agent.duration = duration;
+    agent.token = token;
     if (pid >= 0) agent.pid = pid;
 
     /* Register global pointer for signal handler */
