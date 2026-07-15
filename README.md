@@ -86,7 +86,7 @@ The pipeline in one sentence: **`perf record` → agent → TCP+zstd → server 
 Every message is a 5-byte header followed by a payload of exactly `LEN` bytes:
 
 ```python
-header = struct.pack('!IB', len(payload), compression_flag)
+header = struct.pack('!IB', len(payload), flag)
 sock.sendall(header + payload)
 ```
 

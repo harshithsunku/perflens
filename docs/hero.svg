@@ -79,7 +79,7 @@
     </g>
     <g transform="translate(472, 0)">
       <rect x="0" y="0" width="92" height="28" rx="6" fill="#161b22" stroke="#30363d"/>
-      <text x="46" y="19" text-anchor="middle" fill="#a5a5ff">py 3.5+</text>
+      <text x="46" y="19" text-anchor="middle" fill="#a5a5ff">C agent</text>
     </g>
   </g>
 
@@ -113,6 +113,6 @@
   <!-- Bottom ticker line -->
   <g transform="translate(88, 296)" font-family="ui-monospace, 'SF Mono', Menlo, monospace"
      font-size="11" fill="#6e7681">
-    <text x="0" y="0">$ ./perflens-server  <tspan fill="#3fb950">✓</tspan>  TCP 9999  ·  HTTP 8080  ·  addr2line · zstd · ready</text>
+    <text x="0" y="0">$ uvx perflens  <tspan fill="#3fb950">✓</tspan>  TCP 9999  ·  HTTP 8080  ·  addr2line · zstd · ready</text>
   </g>
 </svg>

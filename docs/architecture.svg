@@ -44,7 +44,7 @@
       <circle cx="24" cy="26" r="5" fill="#f85149"/>
       <circle cx="40" cy="26" r="5" fill="#d29922"/>
       <circle cx="56" cy="26" r="5" fill="#3fb950"/>
-      <text x="500" y="30" text-anchor="end" font-size="12" fill="#6e7681">target device · arm / x86 · python 3.5+</text>
+      <text x="500" y="30" text-anchor="end" font-size="12" fill="#6e7681">target device · arm / x86 · zero deps</text>
     </g>
     <line x1="0" y1="52" x2="500" y2="52" stroke="#30363d"/>
     <text x="24" y="80" font-family="system-ui, sans-serif" font-size="16" font-weight="600" fill="#c9d1d9">TARGET DEVICE</text>
@@ -74,10 +74,10 @@
     <!-- Agent -->
     <g transform="translate(60, 324)">
       <rect x="0" y="0" width="380" height="94" rx="10" fill="#0f1d14" stroke="#2a5a36"/>
-      <text x="20" y="26" font-family="ui-monospace, monospace" font-size="14" fill="#3fb950">perflens_agent.py</text>
+      <text x="20" y="26" font-family="ui-monospace, monospace" font-size="14" fill="#3fb950">perflens-agent · static C binary</text>
       <text x="20" y="48" font-family="ui-monospace, monospace" font-size="11" fill="#8b949e">• capability probing (events + call-graph)</text>
-      <text x="20" y="64" font-family="ui-monospace, monospace" font-size="11" fill="#8b949e">• zstd compress  ·  5-byte header frame</text>
-      <text x="20" y="80" font-family="ui-monospace, monospace" font-size="11" fill="#8b949e">• reconnect with exponential backoff</text>
+      <text x="20" y="64" font-family="ui-monospace, monospace" font-size="11" fill="#8b949e">• zstd compress · 5-byte frames · health metrics</text>
+      <text x="20" y="80" font-family="ui-monospace, monospace" font-size="11" fill="#8b949e">• commands in · self-update · auto-reconnect</text>
     </g>
 
     <!-- Arrow to edge (leaves panel) -->
@@ -87,14 +87,17 @@
   <!-- =============================================================== -->
   <!-- TCP LINK (middle)                                                 -->
   <!-- =============================================================== -->
-  <g transform="translate(540, 450)">
+  <g transform="translate(540, 444)">
     <rect x="0" y="0" width="120" height="46" rx="8" fill="#0b1f14" stroke="#2a5a36"/>
     <text x="60" y="20" text-anchor="middle" font-family="ui-monospace, monospace"
           font-size="11" fill="#3fb950">TCP 9999</text>
     <text x="60" y="36" text-anchor="middle" font-family="ui-monospace, monospace"
           font-size="10" fill="#6e7681">5-byte + zstd</text>
+    <text x="60" y="62" text-anchor="middle" font-family="ui-monospace, monospace"
+          font-size="10" fill="#3fb950">data · metrics →</text>
+    <text x="60" y="78" text-anchor="middle" font-family="ui-monospace, monospace"
+          font-size="10" fill="#d29922">← commands</text>
   </g>
-  <line x1="540" y1="470" x2="540" y2="470" stroke="#3fb950"/>
 
   <!-- Dotted connection between panels -->
   <path d="M 540 470 L 660 470" stroke="#3fb950" stroke-width="2" fill="none" stroke-dasharray="4 4"/>
@@ -110,7 +113,7 @@
       <circle cx="24" cy="26" r="5" fill="#f85149"/>
       <circle cx="40" cy="26" r="5" fill="#d29922"/>
       <circle cx="56" cy="26" r="5" fill="#3fb950"/>
-      <text x="500" y="30" text-anchor="end" font-size="12" fill="#6e7681">local machine · linux / macos / windows</text>
+      <text x="500" y="30" text-anchor="end" font-size="12" fill="#6e7681">local machine · uvx perflens · python 3.10+</text>
     </g>
     <line x1="0" y1="52" x2="500" y2="52" stroke="#30363d"/>
     <text x="24" y="80" font-family="system-ui, sans-serif" font-size="16" font-weight="600" fill="#c9d1d9">LOCAL MACHINE</text>
@@ -118,33 +121,33 @@
     <!-- TCP listener -->
     <g transform="translate(60, 108)">
       <rect x="0" y="0" width="380" height="58" rx="10" fill="#0f1d14" stroke="#2a5a36"/>
-      <text x="20" y="24" font-family="ui-monospace, monospace" font-size="14" fill="#3fb950">TCP listener · decompress</text>
-      <text x="20" y="44" font-family="ui-monospace, monospace" font-size="11" fill="#8b949e">recv 5-byte header  ·  zstd -d  ·  UTF-8</text>
+      <text x="20" y="24" font-family="ui-monospace, monospace" font-size="14" fill="#3fb950">server.py · agent link</text>
+      <text x="20" y="44" font-family="ui-monospace, monospace" font-size="11" fill="#8b949e">5-byte frames · in-process zstd · commands out</text>
     </g>
     <line x1="250" y1="166" x2="250" y2="194" stroke="#58a6ff" stroke-width="2" marker-end="url(#arrow)"/>
 
     <!-- Parser -->
     <g transform="translate(60, 202)">
       <rect x="0" y="0" width="380" height="58" rx="10" fill="#0d1b2e" stroke="#264773"/>
-      <text x="20" y="24" font-family="ui-monospace, monospace" font-size="14" fill="#58a6ff">parser.py</text>
-      <text x="20" y="44" font-family="ui-monospace, monospace" font-size="11" fill="#8b949e">parse perf script · per-event samples · perf stat</text>
+      <text x="20" y="24" font-family="ui-monospace, monospace" font-size="14" fill="#58a6ff">parser.py + aggregator.py</text>
+      <text x="20" y="44" font-family="ui-monospace, monospace" font-size="11" fill="#8b949e">perf script + stat · incremental per-event aggregation</text>
     </g>
     <line x1="250" y1="260" x2="250" y2="288" stroke="#58a6ff" stroke-width="2" marker-end="url(#arrow)"/>
 
     <!-- Source mapper -->
     <g transform="translate(60, 296)">
       <rect x="0" y="0" width="380" height="58" rx="10" fill="#201a0d" stroke="#5a4520"/>
-      <text x="20" y="24" font-family="ui-monospace, monospace" font-size="14" fill="#d29922">source_mapper.py</text>
-      <text x="20" y="44" font-family="ui-monospace, monospace" font-size="11" fill="#8b949e">addr2line batched · path-map · annotated source</text>
+      <text x="20" y="24" font-family="ui-monospace, monospace" font-size="14" fill="#d29922">source_mapper.py + symcache.py</text>
+      <text x="20" y="44" font-family="ui-monospace, monospace" font-size="11" fill="#8b949e">addr2line batched · path-map · persistent caches</text>
     </g>
     <line x1="250" y1="354" x2="250" y2="382" stroke="#58a6ff" stroke-width="2" marker-end="url(#arrow)"/>
 
     <!-- HTTP + SSE -->
     <g transform="translate(60, 390)">
       <rect x="0" y="0" width="380" height="70" rx="10" fill="#1a0d1f" stroke="#4b2155"/>
-      <text x="20" y="24" font-family="ui-monospace, monospace" font-size="14" fill="#c084fc">HTTP + SSE  ·  port 8080</text>
-      <text x="20" y="44" font-family="ui-monospace, monospace" font-size="11" fill="#8b949e">/api/status · /api/stream · /api/sessions</text>
-      <text x="20" y="60" font-family="ui-monospace, monospace" font-size="11" fill="#8b949e">static UI served from ui/</text>
+      <text x="20" y="24" font-family="ui-monospace, monospace" font-size="14" fill="#c084fc">web.py · FastAPI + SSE · port 8080</text>
+      <text x="20" y="44" font-family="ui-monospace, monospace" font-size="11" fill="#8b949e">/api/stream · /api/per-event · /api/sessions · ...</text>
+      <text x="20" y="60" font-family="ui-monospace, monospace" font-size="11" fill="#8b949e">web UI ships inside the wheel</text>
     </g>
   </g>
 
