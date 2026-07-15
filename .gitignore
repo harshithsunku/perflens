@@ -15,3 +15,4 @@ test/matrixlab/build/
 test/matrixlab/bin/
 .devices.conf
 node_modules/
+*.pid
