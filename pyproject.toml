@@ -36,6 +36,15 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=7", "httpx>=0.27", "build", "ruff"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = [
+    # test_parser_compat / test_aggregator_diff are dual-mode (plain
+    # `python tests/test_x.py` still works); their test functions return
+    # values for the standalone runner.
+    "ignore::pytest.PytestReturnNotNoneWarning",
+]
+
 [project.scripts]
 perflens = "perflens.cli:main"
 

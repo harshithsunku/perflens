@@ -23,12 +23,12 @@ Open four terminals (or run the first three in the background).
 
 ```bash
 # 1) CPU-busy test program
-./test/sample_workload
+./tests/sample_workload
 
 # 2) PerfLens server with --binary so source mapping works
 python3 server/perflens_server.py \
     --http-port 8089 --port 9899 \
-    --binary test/sample_workload --source-dir test
+    --binary tests/sample_workload --source-dir tests
 
 # 3) agent in --server mode against the workload PID
 PID=$(pgrep -f sample_workload | tail -1)

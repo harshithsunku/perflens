@@ -1,0 +1,74 @@
+name: test
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # -------------------------------------------------------------------------
+  # pytest suite: parser, aggregator (differential vs device fixtures),
+  # source mapper, HTTP API (TestClient + live SSE), provisioning against
+  # a fake release server, and the C-agent wire protocol (real binary
+  # against a fake framing server with a perf shim).
+  # -------------------------------------------------------------------------
+  pytest:
+    name: pytest (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.10', '3.11', '3.12', '3.13']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Build C agent (needed by the protocol tests)
+        run: make -C agent-c
+
+      - name: Install package + test deps
+        run: python -m pip install -e '.[dev]'
+
+      - name: Run pytest
+        run: python -m pytest tests/ -v -ra
+
+  # -------------------------------------------------------------------------
+  # Browser E2E: puppeteer drives the real UI against a real server
+  # replaying a device-captured fixture session (tests/e2e_ui.mjs is
+  # self-contained — it starts and stops its own server).
+  # -------------------------------------------------------------------------
+  e2e:
+    name: browser e2e
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install server
+        run: python -m pip install -e .
+
+      - name: Install puppeteer
+        run: npm ci
+
+      - name: Run browser E2E
+        run: node tests/e2e_ui.mjs

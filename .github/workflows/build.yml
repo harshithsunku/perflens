@@ -32,10 +32,13 @@ jobs:
       - name: Lint (ruff)
         run: ruff check src/
 
-      - name: Run test suites
+      - name: Build C agent (needed by the protocol tests)
+        run: make -C agent-c
+
+      - name: Run pytest
         run: |
-          python3 test/test_parser_compat.py
-          python3 test/test_aggregator_diff.py
+          python -m pip install -e '.[dev]'
+          python -m pytest tests/
 
       - name: Build wheel + sdist
         run: python -m build

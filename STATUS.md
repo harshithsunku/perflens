@@ -6,21 +6,22 @@ plan file; this is the executable summary.
 
 ## Current phase
 
-**Phases 0–3 complete** (0, 1, 2, 3a+3b, 3e, 3c+3d). Next up:
-**Phase 4 — pytest suite** (then Phase 5 device E2E + 0.6.0 release).
+**Phases 0–4 complete** (0, 1, 2, 3a+3b, 3e, 3c+3d, 4). Next up:
+**Phase 5 — device E2E matrix + 0.6.0 release prep**.
 
 ### Start-here for the next session
 
 - Run the packaged server: `uvx --from ./dist/perflens-0.6.0-py3-none-any.whl
   perflens serve ...` (build with `uv build`). Dev mode now needs the deps
-  (fastapi/uvicorn/orjson/zstandard): `uv venv .venv && uv pip install -e .`
-  then `.venv/bin/perflens serve ...`. Plain `PYTHONPATH=src python3 -m
-  perflens.cli serve` only works in an env with those deps installed; same
-  for the compat shim `server/perflens_server.py`.
-- Regression suites: `python3 test/test_parser_compat.py` and
-  `python3 test/test_aggregator_diff.py` (both green).
-- Build/CI/README are all current as of 3c+3d (PyInstaller gone, wheel is
-  the only server artifact, CI lint is strict). Remaining doc debt: the
+  (fastapi/uvicorn/orjson/zstandard): `uv venv .venv && uv pip install -e
+  '.[dev]'` then `.venv/bin/perflens serve ...`. Plain `PYTHONPATH=src
+  python3 -m perflens.cli serve` only works in an env with those deps
+  installed; same for the compat shim `server/perflens_server.py`.
+- Tests: `make -C agent-c && .venv/bin/python -m pytest tests/` (109 tests)
+  and `npm ci && npm run e2e` (22-assertion puppeteer run, self-contained).
+  CI runs both: `.github/workflows/test.yml` (pytest 3.10–3.13 matrix +
+  browser e2e on push/PR) and `build.yml` (pytest before the wheel build).
+- Build/CI/README are all current as of Phase 4. Remaining doc debt: the
   docs/ GitHub Pages site still describes the old tarball install —
   refresh it during Phase 5 release prep.
 - Sessions now default to `~/.perflens/sessions` (`--sessions-dir` to
@@ -161,9 +162,40 @@ plan file; this is the executable summary.
       All 15 pre-existing ruff findings fixed — `ruff check src/` is
       CLEAN and the CI lint job is strict. VERSION file synced 0.5.0 →
       0.6.0 (it drives agent version + asset names).
-- [ ] **Phase 4** — pytest suite: parser, differential aggregator,
-      source_mapper, HTTP API (httpx TestClient), C-agent protocol tests
-      (fake framing server + mocked `perf` shim).
+- [x] **Phase 4** — Done. `test/` renamed `tests/` (git mv, fixtures
+      intact); everything is pytest now (`[tool.pytest.ini_options]` in
+      pyproject, shared `tests/conftest.py` with fixture-session loaders
+      and an isolated `PERFLENS_HOME` fixture). 109 tests:
+      parser (30) + parser_compat (15) + aggregator (12) + aggregator_diff
+      (12, differential vs both device fixtures) + source_mapper (9) +
+      **test_http_api.py** (25: every endpoint's shape via FastAPI
+      TestClient, path/session-id traversal + browse confinement
+      regressions, replay + replay-cache, exports, gzip negotiation, SSE
+      initial frames + worker-thread broadcast against a real uvicorn) +
+      **test_provision.py** (17: fake release HTTP server — fresh
+      download, flat/hostile bundle members, checksum/sidecar/incomplete
+      refusals, offline degrade, resolve_tool precedence flag→PATH→cache→
+      download, CLI idempotence) + **test_agent_protocol.py** (13: the
+      real C binary against a fake framing server with a `perf` shim on
+      PATH — hello incl. --token/env token, ping/status/unknown-cmd,
+      full lifecycle with zstd data frames decompressed and verified
+      (probe results, PERF_STAT section), start-while-paused rejection,
+      metrics frames, reconnect-after-disconnect, --output multi-round
+      marker layout). Stale puppeteer e2e (3 files, pre-zoom-swap
+      semantics) replaced by ONE self-contained `tests/e2e_ui.mjs`
+      (22 assertions: starts its own server + isolated PERFLENS_HOME,
+      materializes the x86 fixture session, drives the real UI — landing
+      → replay → function table → flamegraph ancestry zoom/breadcrumbs/
+      reset/search/context menu → export menu + all 3 export endpoints;
+      zero JS errors). `npm run e2e`; package-lock.json committed for CI.
+      New CI `test.yml`: pytest matrix (3.10–3.13, agent built first) +
+      browser-e2e job; `build.yml` now runs pytest too. BONUS UI FIX
+      found by the e2e: after a session replay the Flame Graph tab
+      rendered empty (renderFlamegraph aborts at clientWidth 0 while the
+      tab is hidden; live mode repaints on the next SSE refresh, replay
+      never does) — the tab-click handler now re-renders when the
+      container has no SVG. Doc sweep: README/CLAUDE/CONTRIBUTING/
+      .gitignore/tools-README updated for tests/ + current stack.
 - [ ] **Phase 5** — Full device E2E matrix, 1h RSS-bounded scale test,
       synthetic 500k-file source-index test, clean-container `uvx` run,
       0.6.0 release prep.
@@ -235,14 +267,14 @@ reached via gateway). Local aarch64 cross-toolchain available:
 
 ```bash
 # 1. Local
-python3 test/test_parser_compat.py            # e2e parse tests must pass
+.venv/bin/python -m pytest tests/            # full suite must pass
 cd agent-c && make && cd ..                   # static x86_64 agent builds
 python3 server/perflens_server.py --http-port 8080 --port 9999 &
 curl -s localhost:8080/api/status
 
 # 2. Device (x86 shown; ARM identical with kali@10.10.3.249 + CROSS build)
 ssh root@192.168.0.111 'mkdir -p /root/perflens-test'
-scp agent-c/perflens-agent test/sample_workload.c test/Makefile \
+scp agent-c/perflens-agent tests/sample_workload.c tests/Makefile \
     root@192.168.0.111:/root/perflens-test/
 ssh root@192.168.0.111 'cd /root/perflens-test && make && \
     nohup ./sample_workload >/dev/null 2>&1 & \
@@ -270,9 +302,10 @@ stripped libm; expected, not a bug.
 
 ## Regression fixtures
 
-`test/fixtures/session-{x86,arm}-baseline/` — real captured sessions
-(chunks gzipped). Used by the Phase 2a differential aggregator test:
-old batch path vs new incremental path must produce identical snapshots.
+`tests/fixtures/session-{x86,arm}-baseline/` — real captured sessions
+(chunks gzipped). Used by the Phase 2a differential aggregator test
+(old batch path vs new incremental path must produce identical
+snapshots), the HTTP API replay tests, and the browser e2e.
 
 ## Session log
 
@@ -322,3 +355,15 @@ old batch path vs new incremental path must produce identical snapshots.
   the agent self-update tests used). The misleading "inline disabled
   (-i not supported)" log line when no --binary is set was reworded.
   All 15 ruff findings fixed; `ruff check src/` clean.
+- **2026-07-15 (cont.)** — Phase 4: pytest suite + browser e2e + CI (see
+  roadmap entry for full detail). 109 pytest tests + 22-assertion
+  puppeteer run, all green; `test.yml` added, `build.yml` runs pytest.
+  Notes for the future: the agent protocol tests need `make -C agent-c`
+  first (they skip, not fail, without the binary — CI builds it before
+  pytest); the `perf` shim technique (PATH shim + PERF_SHIM_LOG) makes
+  the full agent lifecycle testable in ~2s with no root and no real
+  perf. The e2e caught a real replay-mode bug (flamegraph tab rendered
+  empty — clientWidth 0 while hidden) — fixed in the tab-click handler.
+  e2e clicks on re-renderable lists must be dispatched inside the page
+  (`page.evaluate(... .click())`), not via element handles, or the
+  initial-load `loadSessions()` race detaches them.

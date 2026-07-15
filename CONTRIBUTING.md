@@ -4,9 +4,12 @@ Thanks for taking the time. PerfLens is small on purpose, so a short list covers
 
 ## Ground rules
 
-- **Stdlib only.** No `pip install` on the server, no `npm install` on the UI. If a dependency feels needed, open an issue first so we can talk about it.
-- **No framework.** The UI is plain HTML + vanilla JS + CSS. The server is plain `ThreadingHTTPServer`. The agent is plain `perf` + sockets.
-- **Defensive parsing.** `perf script` output drifts across kernel versions. Add tests under `test/` if your change touches `parser.py`.
+- **Small, deliberate dependency set.** The server depends on fastapi,
+  uvicorn, orjson, and zstandard — everything installs user-space via
+  `uvx`/`pipx`/`pip`. New dependencies need an issue first. The UI stays
+  plain HTML + vanilla JS + CSS (no bundler, no framework), and the agent
+  stays a zero-dependency static C binary.
+- **Defensive parsing.** `perf script` output drifts across kernel versions. Add tests under `tests/` if your change touches `parser.py`.
 - **No proprietary names** in code, docs, comments, or commit messages. The repo is meant to stay generic.
 
 ## Development setup
@@ -15,16 +18,25 @@ Thanks for taking the time. PerfLens is small on purpose, so a short list covers
 git clone https://github.com/harshithsunku/perflens.git
 cd perflens
 
-# Run the server (stdlib only — no virtualenv needed)
-python3 server/perflens_server.py --source-dir test --binary test/sample_workload
+# Install in a virtualenv with test deps, then run the server
+uv venv .venv && uv pip install -p .venv/bin/python -e '.[dev]'
+.venv/bin/perflens serve --source-dir tests --binary tests/sample_workload
 
 # In another shell, build the test workload and start the agent against it
-cd test && make
+cd tests && make
 (cd ../agent-c && make)
 ../agent-c/perflens-agent --server 127.0.0.1 --pid $(pgrep sample_workload)
 ```
 
 Then browse `http://localhost:8080`.
+
+## Tests
+
+```bash
+make -C agent-c                      # the protocol tests drive the real binary
+.venv/bin/python -m pytest tests/    # full suite
+npm ci && npm run e2e                # puppeteer browser E2E (self-contained)
+```
 
 For the C agent:
 
@@ -66,7 +78,7 @@ node tools/capture-demo-gif.js && tools/encode-demo-gif.sh
 
 ## Releasing
 
-Releases are tag-driven: pushing `v<x.y.z>` triggers `.github/workflows/build.yml`, which builds server tarballs for Linux x86_64, macOS arm64, and Windows x86_64, plus static C agent binaries for five architectures, then attaches them to a GitHub Release.
+Releases are tag-driven: pushing `v<x.y.z>` triggers `.github/workflows/build.yml`, which builds the Python wheel + sdist, static C agent binaries for five architectures, and static addr2line/readelf tools bundles, then attaches them to a GitHub Release.
 
 ## License
 

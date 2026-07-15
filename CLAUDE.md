@@ -111,10 +111,15 @@ perflens/
 │   ├── hero.svg
 │   ├── architecture.svg
 │   └── wire-protocol.svg
-├── test/
+├── tests/
+│   ├── conftest.py               # shared pytest fixtures
+│   ├── test_*.py                 # pytest suite (parser, aggregator, http, agent, ...)
+│   ├── e2e_ui.mjs                # puppeteer browser E2E (self-contained)
+│   ├── fixtures/                 # device-captured perf sessions (gzipped)
 │   ├── sample_workload.c
 │   └── Makefile
 ├── build_package.sh
+├── .github/workflows/test.yml    # pytest matrix + browser e2e
 ├── .github/workflows/build.yml
 ├── VERSION
 ├── LICENSE (MIT)

@@ -301,6 +301,13 @@ document.querySelectorAll('.tab').forEach(tab => {
         tab.classList.add('active');
         document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
         if (tab.dataset.tab === 'threads') renderThreadsTab();
+        // A flamegraph rendered while its tab was hidden is empty
+        // (clientWidth 0 aborts the layout) — e.g. right after a session
+        // replay. Re-render now that the container is visible.
+        if (tab.dataset.tab === 'flamegraph' &&
+            !document.querySelector('#flamegraph-container svg')) {
+            renderCurrentEvent();
+        }
     });
 });
 
