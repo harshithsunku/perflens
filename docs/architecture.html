@@ -88,8 +88,8 @@
             <em>N</em> seconds (default 8), then <code>perf script</code> flattens the trace.
             The result &mdash; perf script text optionally followed by a
             <code>### PERF_STAT ###</code> section &mdash; is compressed with
-            <code>zstd -1</code> (system or vendored) and pushed over TCP with a 5-byte
-            header. Typical compression: <strong>20&ndash;40&times;</strong>.
+            in-process zstd (level 1, vendored in the agent) and pushed over TCP
+            with a 5-byte header. Typical compression: <strong>20&ndash;40&times;</strong>.
         </p>
 
         <h3 id="health">Health metrics</h3>
@@ -103,15 +103,19 @@
 
         <h2 id="local">On the local machine</h2>
         <p>
-            One Python process owns everything on the local side. A
-            <code>ThreadingHTTPServer</code> serves the UI and the JSON API; a
-            separate thread owns the single TCP listener that accepts agent
-            connections.
+            One Python process (<code>perflens serve</code>) owns everything on
+            the local side. <code>web.py</code> runs a FastAPI/uvicorn HTTP layer
+            for the UI and JSON API; <code>server.py</code> owns the agent side
+            on plain threads &mdash; the TCP listener, the recv loops, and the
+            aggregation rebuild worker. One agent at a time, any number of SSE
+            browser clients.
         </p>
 
         <h3 id="parser">Parser</h3>
         <p>
-            <code>parser.py</code> turns <code>perf script</code> output into:
+            <code>parser.py</code> parses <code>perf script</code> output, and
+            <code>aggregator.py</code> folds each new chunk incrementally &mdash;
+            O(new samples) per chunk, not O(total) &mdash; into:
         </p>
         <ul>
             <li><strong>Per-event sample lists</strong> &mdash; one bucket per event type.</li>
@@ -132,7 +136,9 @@
             <code>source_mapper.py</code> pipelines sample addresses through
             <code>addr2line -f</code> (or <code>-fi</code> when <code>--inline</code> is
             on) in batches of 500. A single mapper is created at server startup and
-            shared across requests &mdash; no per-request forking.
+            shared across requests &mdash; no per-request forking. Resolutions and
+            source-file indexes persist under <code>~/.perflens/cache</code>
+            (<code>symcache.py</code>), so warm restarts skip the work.
         </p>
         <p>
             Lookups feed a heat map: each source line gets a sample count, and the UI
@@ -146,15 +152,16 @@
         <h3 id="sessions">Sessions</h3>
         <p>
             Every agent connection becomes a session. Raw chunks are written to
-            disk under <code>sessions/&lt;timestamp&gt;_&lt;agent&gt;/</code> as the
+            disk under <code>~/.perflens/sessions/&lt;id&gt;/</code> as the
             agent streams them; metadata (events, sample totals, perf stat values,
             platform) is written when the connection closes.
         </p>
         <p>
             Replay is lazy: the UI hits <code>/api/sessions/&lt;id&gt;</code> only when
             you click a session, and the server re-parses the raw chunks on demand.
-            A standalone <code>perf.data</code> file can also be imported at startup
-            with <code>--import</code> &mdash; the server runs <code>perf script</code>
+            A standalone <code>perf.data</code> file can also be imported &mdash;
+            with <code>--import</code> at startup or uploaded through
+            <code>/api/import</code> &mdash; the server runs <code>perf script</code>
             against it once and exposes the result as a session.
         </p>
 
@@ -168,7 +175,7 @@
             <img src="wire-protocol.svg" alt="Wire protocol: 4-byte length + 1-byte flag + payload">
         </div>
 
-<pre><code>header = struct.pack('!IB', len(payload), compression_flag)
+<pre><code>header = struct.pack('!IB', len(payload), flag)
 sock.sendall(header + payload)</code></pre>
 
         <table class="ref">
@@ -193,9 +200,11 @@ sock.sendall(header + payload)</code></pre>
         </table>
 
         <p>
-            Payloads with flag <code>1</code> are decompressed with <code>zstd -d -c</code>.
-            Perf data payloads carry plain <code>perf script</code> text, optionally
-            followed by a <code>### PERF_STAT ###</code> section the parser splits out.
+            Payloads with flag <code>1</code> are decompressed in-process via the
+            <code>zstandard</code> package (external <code>zstd</code> binary as a
+            fallback). Perf data payloads carry plain <code>perf script</code> text,
+            optionally followed by a <code>### PERF_STAT ###</code> section the
+            parser splits out.
         </p>
 
         <h3 id="connect-modes">Two connection modes</h3>
@@ -211,11 +220,13 @@ sock.sendall(header + payload)</code></pre>
 
         <h2 id="broadcast">Broadcast to the browser</h2>
         <p>
-            The server pushes parsed state to the UI through a Server-Sent Events
-            stream at <code>/api/stream</code>. Four event types:
-            <code>status</code>, <code>event_types</code>, <code>per_event</code>,
-            <code>perf_stat</code>. The browser holds the connection open and rerenders
-            whenever a new round lands. There is no polling.
+            The server pushes updates to the UI through a Server-Sent Events
+            stream at <code>/api/stream</code>: <code>status</code>,
+            <code>agent_connected</code>, <code>event_types</code>,
+            <code>data_version</code> (bumped per chunk), <code>perf_stat</code>,
+            and <code>metrics_&lt;type&gt;</code>. When <code>data_version</code>
+            bumps, the browser fetches the cached gzip snapshot from
+            <code>/api/per-event</code> and rerenders. There is no polling.
         </p>
         <p>
             Per-thread analysis, source views, and exports are pull-based: the UI hits

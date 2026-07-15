@@ -6,7 +6,7 @@
 <title>PerfLens — Real-time Linux Performance Profiler</title>
 <meta name="description" content="Remote Linux performance profiler with a real-time web UI. Flame graphs, function tables, perf stat metrics, and line-level annotated source — streamed live from any ARM or x86 Linux target.">
 <meta property="og:title" content="PerfLens — Real-time Linux Performance Profiler">
-<meta property="og:description" content="Drop the agent on any Linux device, point it at a PID, watch flame graphs and annotated source update live in your browser. Stdlib Python. No framework. No npm.">
+<meta property="og:description" content="Drop the agent on any Linux device, point it at a PID, watch flame graphs and annotated source update live in your browser. Static C agent. uvx-installable server. No framework. No npm.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://harshithsunku.github.io/perflens/">
 <meta property="og:image" content="https://harshithsunku.github.io/perflens/screenshots/07-overview.png">
@@ -56,8 +56,8 @@
             <p class="hero-lede">
                 Drop a tiny agent on any Linux box, point it at a PID, and watch flame
                 graphs, function tables, <code>perf stat</code> metrics, and line-level
-                annotated source update live &mdash; <strong>no frameworks, no Docker,
-                no pip dependencies.</strong>
+                annotated source update live &mdash; <strong>no frontend frameworks,
+                no Docker, no sudo.</strong>
             </p>
             <div class="hero-actions">
                 <a class="btn btn-primary" href="#quickstart">Get started &rarr;</a>
@@ -65,10 +65,10 @@
             </div>
             <div class="hero-badges">
                 <img alt="license" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square">
-                <img alt="python" src="https://img.shields.io/badge/python-3.5%2B_agent_%E2%80%A2_3.8%2B_server-58a6ff?style=flat-square">
+                <img alt="agent" src="https://img.shields.io/badge/agent-static_C_binary-58a6ff?style=flat-square">
                 <img alt="arch" src="https://img.shields.io/badge/arch-x86__64_%7C_aarch64_%7C_armv7-c084fc?style=flat-square">
                 <img alt="wire" src="https://img.shields.io/badge/wire-zstd_%7C_5--byte_header-d29922?style=flat-square">
-                <img alt="deps" src="https://img.shields.io/badge/deps-stdlib_only-f85149?style=flat-square">
+                <img alt="install" src="https://img.shields.io/badge/install-uvx_perflens-f85149?style=flat-square">
             </div>
         </div>
         <div class="hero-shot">
@@ -119,7 +119,7 @@
             </div>
             <div class="feature">
                 <div class="feature-icon">&#128737;</div>
-                <h3>Two agent flavors</h3>
+                <h3>Static C agent</h3>
                 <p>Single static C agent binary (~2 MB, vendored zstd, zero runtime deps) &mdash; runs on anything from bare-metal embedded boards to servers. One-line curl install, built-in self-update.</p>
             </div>
             <div class="feature">
@@ -207,13 +207,14 @@
         <span class="eyebrow">Quick start</span>
         <h2>Profiling in under a minute.</h2>
         <p class="section-sub">
-            Pre-built tarballs are published on every tagged release. Pick the
+            The server installs from PyPI with <code>uvx</code>/<code>pipx</code>/<code>pip</code>;
+            static agent binaries are attached to every release. Pick the
             install flavor and follow three steps.
         </p>
 
         <div data-tabs>
             <div class="tabs">
-                <button class="tab-btn active" data-tab="release">Release tarball</button>
+                <button class="tab-btn active" data-tab="release">uv / pip (recommended)</button>
                 <button class="tab-btn" data-tab="cagent">C agent (no Python)</button>
                 <button class="tab-btn" data-tab="source">From source</button>
             </div>
@@ -224,9 +225,8 @@
                         <div class="step-num">1</div>
                         <div class="step-body">
                             <h3>Install the server on the machine where you view profiles</h3>
-                            <p>Pre-built tarballs are available for Linux x86_64, macOS arm64, and Windows x86_64.</p>
-<pre><code>tar xf perflens-server-&lt;ver&gt;-linux-x86_64.tar.gz
-./perflens-server-&lt;ver&gt;/perflens-server \
+                            <p>Python 3.10+, no sudo, everything user-space. <code>pipx install perflens</code> or <code>pip install --user perflens</code> work too.</p>
+<pre><code>uvx perflens serve \
     --source-dir /path/to/sources \
     --binary     /path/to/unstripped-binary
 # UI: http://localhost:8080</code></pre>
@@ -236,12 +236,14 @@
                         <div class="step-num">2</div>
                         <div class="step-body">
                             <h3>Drop the agent on the Linux target</h3>
-                            <p>The agent is one static binary with zero dependencies. Two connect modes are supported.</p>
-<pre><code># Agent dials out to the server (with reconnect/backoff)
-./perflens-agent --server &lt;server-ip&gt;
+                            <p>The agent is one static binary with zero dependencies &mdash; one-line install, no sudo. Two connect modes are supported.</p>
+<pre><code>curl -fsSL https://raw.githubusercontent.com/harshithsunku/perflens/master/install-agent.sh | sh
+
+# Agent dials out to the server (with reconnect/backoff)
+~/.perflens/bin/perflens-agent --server &lt;server-ip&gt;
 
 # Or — agent listens, you connect from the UI's Live Debug wizard
-./perflens-agent --listen</code></pre>
+~/.perflens/bin/perflens-agent --listen</code></pre>
                         </div>
                     </div>
                     <div class="step">
@@ -273,7 +275,7 @@ make CROSS=armeb-linux-musleabihf-      # ARMv7 big-endian</code></pre>
                         <div class="step-num">2</div>
                         <div class="step-body">
                             <h3>Ship the single file</h3>
-                            <p>The output is one ~1.8 MB binary. No libc surprises, no Python needed.</p>
+                            <p>The output is one ~2 MB binary. No libc surprises, no Python needed.</p>
 <pre><code>scp perflens-agent user@device:/tmp/
 ssh user@device /tmp/perflens-agent --server &lt;server-ip&gt;</code></pre>
                         </div>
@@ -296,7 +298,8 @@ ssh user@device /tmp/perflens-agent --server &lt;server-ip&gt;</code></pre>
                             <h3>Clone &amp; run the server</h3>
 <pre><code>git clone https://github.com/harshithsunku/perflens.git
 cd perflens
-python3 server/perflens_server.py \
+uv venv && uv pip install -e .
+.venv/bin/perflens serve \
     --source-dir /path/to/source \
     --binary     /path/to/myprogram \
     --port       9999 \
@@ -324,10 +327,11 @@ python3 server/perflens_server.py \
 
         <div class="note" style="margin-top: 28px;">
             <strong>Prerequisites.</strong> Target needs Linux + <code>perf</code>;
-            local needs Python 3.8+ (or the frozen tarball), <code>addr2line</code>,
-            and <code>readelf</code> (bundled or on PATH). For source-level
-            annotation, your binary must be compiled with <code>-g</code> and not
-            stripped.
+            local needs Python 3.10+ and <code>uv</code>/<code>pip</code>.
+            <code>addr2line</code>/<code>readelf</code> come from binutils &mdash; if
+            missing, <code>perflens provision</code> downloads static builds into
+            <code>~/.perflens/bin</code> (no sudo). For source-level annotation,
+            your binary must be compiled with <code>-g</code> and not stripped.
         </div>
     </div>
 </section>
@@ -364,8 +368,8 @@ python3 server/perflens_server.py \
         <h2>Built to a short list.</h2>
         <div class="features" style="margin-top: 28px;">
             <div class="feature">
-                <h3>Stdlib only</h3>
-                <p>No Flask, no npm, no Docker. <code>ThreadingHTTPServer</code> on the server. Plain HTML + vanilla JS + CSS on the UI.</p>
+                <h3>Simplicity first</h3>
+                <p>A small, deliberate user-space stack &mdash; FastAPI/uvicorn/orjson/zstandard, installed with <code>uvx</code>. Plain HTML + vanilla JS + CSS on the UI. No bundler, no npm, no Docker.</p>
             </div>
             <div class="feature">
                 <h3>Defensive parsing</h3>
