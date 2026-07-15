@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 #
-# build_package.sh -- produce self-contained tarballs for the PerfLens server
-# and agent. No pre-installed dependencies needed on the target machines
-# (beyond Python 3.5+ on the agent side).
+# build_package.sh -- produce self-contained artifacts for the PerfLens
+# server and the static C agent. No pre-installed dependencies needed on
+# the target machines.
 #
 # Usage:
-#   ./build_package.sh              # build both, frozen with PyInstaller
+#   ./build_package.sh              # build server + C agent
 #   ./build_package.sh --server     # server package only
-#   ./build_package.sh --agent      # agent package only (Python)
 #   ./build_package.sh --agent-c    # C agent (native static binary)
 #   ./build_package.sh --no-freeze  # skip PyInstaller, package scripts only
 #
@@ -21,15 +20,13 @@ cd "$REPO_ROOT"
 # ---------------------------------------------------------------------------
 
 BUILD_SERVER=1
-BUILD_AGENT=1
-BUILD_AGENT_C=0
+BUILD_AGENT_C=1
 NO_FREEZE=0
 
 for arg in "$@"; do
     case "$arg" in
-        --server)    BUILD_SERVER=1; BUILD_AGENT=0 ;;
-        --agent)     BUILD_AGENT=1; BUILD_SERVER=0 ;;
-        --agent-c)   BUILD_AGENT_C=1; BUILD_SERVER=0; BUILD_AGENT=0 ;;
+        --server)    BUILD_SERVER=1; BUILD_AGENT_C=0 ;;
+        --agent-c)   BUILD_AGENT_C=1; BUILD_SERVER=0 ;;
         --no-freeze) NO_FREEZE=1 ;;
         -h|--help)
             sed -n '3,15p' "$0"
@@ -93,24 +90,6 @@ if [ -d "$SELF_DIR/lib" ] && [ "$(ls -A "$SELF_DIR/lib" 2>/dev/null)" ]; then
     export PYTHONPATH="$SELF_DIR/lib:${PYTHONPATH:-}"
 fi
 exec python3 "$SELF_DIR/server/perflens_server.py" "$@"
-LAUNCHER_EOF
-    chmod +x "$dest"
-}
-
-write_agent_launcher() {
-    local dest="$1"
-    cat > "$dest" <<'LAUNCHER_EOF'
-#!/usr/bin/env bash
-set -e
-SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
-ARCH=$(uname -m)
-if [ -d "$SELF_DIR/bin/$ARCH" ]; then
-    export PATH="$SELF_DIR/bin/$ARCH:$PATH"
-fi
-if [ "$ARCH" = "aarch64" ] && [ -d "$SELF_DIR/bin/aarch64_be" ]; then
-    export PATH="$SELF_DIR/bin/aarch64_be:$PATH"
-fi
-exec python3 "$SELF_DIR/perflens_agent.py" "$@"
 LAUNCHER_EOF
     chmod +x "$dest"
 }
@@ -329,43 +308,6 @@ copy_server_bins() {
 }
 
 # ---------------------------------------------------------------------------
-# Agent package
-# ---------------------------------------------------------------------------
-
-build_agent() {
-    local pkg_dir="$BUILD_DIR/perflens-agent-${VERSION}"
-    rm -rf "$pkg_dir"
-    mkdir -p "$pkg_dir/bin/aarch64" "$pkg_dir/bin/aarch64_be" "$pkg_dir/bin/armv7l"
-
-    cp agent/perflens_agent.py "$pkg_dir/perflens_agent.py"
-    write_agent_launcher "$pkg_dir/perflens-agent"
-    echo "$VERSION" > "$pkg_dir/VERSION"
-
-    # Opportunistically copy cross-compiled zstd binaries if they exist
-    local any=0
-    for arch in aarch64 aarch64_be armv7l; do
-        if [ -f "agent/bin/$arch/zstd" ]; then
-            cp "agent/bin/$arch/zstd" "$pkg_dir/bin/$arch/zstd"
-            chmod +x "$pkg_dir/bin/$arch/zstd"
-            any=1
-        fi
-    done
-    if [ "$any" -eq 0 ]; then
-        warn "No cross-compiled zstd binaries found in agent/bin/{aarch64,aarch64_be,armv7l}/ -- agent will fall back to system zstd"
-    fi
-
-    # Quick sanity: make sure the agent still parses
-    if ! python3 -c "import ast; ast.parse(open('$pkg_dir/perflens_agent.py').read())" 2>/dev/null; then
-        err "Staged agent failed AST parse -- aborting"
-        exit 1
-    fi
-
-    local tarball="$DIST_DIR/perflens-agent-${VERSION}.tar.gz"
-    ( cd "$BUILD_DIR" && tar -czf "$tarball" "perflens-agent-${VERSION}" )
-    ok "Wrote ${tarball}"
-}
-
-# ---------------------------------------------------------------------------
 # C Agent package (static binary)
 # ---------------------------------------------------------------------------
 
@@ -392,6 +334,13 @@ build_agent_c() {
     local tarball="$DIST_DIR/perflens-agent-c-${VERSION}.tar.gz"
     ( cd "$BUILD_DIR" && tar -czf "$tarball" "perflens-agent-c-${VERSION}" )
     ok "Wrote ${tarball}"
+
+    # Raw binary with the stable release-asset name (used by
+    # install-agent.sh and the agent's --update)
+    local arch
+    arch="$(uname -m)"
+    cp "$REPO_ROOT/agent-c/perflens-agent" "$DIST_DIR/perflens-agent-linux-${arch}"
+    ok "Wrote $DIST_DIR/perflens-agent-linux-${arch}"
 }
 
 # ---------------------------------------------------------------------------
@@ -404,10 +353,6 @@ if [ "$BUILD_SERVER" -eq 1 ]; then
     else
         build_server_frozen
     fi
-fi
-
-if [ "$BUILD_AGENT" -eq 1 ]; then
-    build_agent
 fi
 
 if [ "$BUILD_AGENT_C" -eq 1 ]; then
@@ -427,8 +372,8 @@ Deployment
     3. ssh host './perflens-server-${VERSION}/perflens-server --source-dir ... --binary ...'
     4. Browse to http://host:8080
 
-  Agent:
-    1. scp ${DIST_DIR}/perflens-agent-${VERSION}.tar.gz device:
-    2. ssh device 'tar xf perflens-agent-${VERSION}.tar.gz'
-    3. ssh device './perflens-agent-${VERSION}/perflens-agent --pid PID --server SERVER_IP'
+  Agent (static C binary, zero deps):
+    1. scp ${DIST_DIR}/perflens-agent-linux-\$(uname -m) device:perflens-agent
+    2. ssh device './perflens-agent --listen'        # or --server SERVER_IP
+    (or on the device:  curl -fsSL .../install-agent.sh | sh)
 DEPLOY_EOF

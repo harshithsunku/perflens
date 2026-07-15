@@ -20,7 +20,7 @@ history.
       |                                      |
    perf record + perf stat                   |
       |                                      |
-   Agent (Python or C)                       |
+   Agent (static C binary)                   |
       |                                      |
       +---- TCP (5-byte header + zstd) ----> recv + decompress
       |   (--server: agent connects out)     |
@@ -59,9 +59,9 @@ history.
   requests — no per-request forking.
 - The agent probes supported perf events and call-graph modes (`fp`, `dwarf`,
   `lbr`) on the target before collecting, and uses whichever works.
-- Two agent implementations: Python 3.5 compatible (no f-strings, no
-  dataclasses) and C static binary (~1.8 MB, vendored zstd, zero deps).
-  Both are wire-protocol-identical.
+- Single agent implementation: a static C binary (~2 MB, vendored zstd,
+  zero deps) that cross-compiles for five architectures, installs with one
+  curl command (install-agent.sh), and self-updates with --update.
 - Bidirectional interactive protocol: agent sends hello + data + metrics,
   server sends commands (start, stop, pause, resume, configure, etc.).
 - Two connection patterns: `--server` (agent connects out to server) and
@@ -81,8 +81,7 @@ history.
 
 ```
 perflens/
-├── agent/
-│   └── perflens_agent.py         # Python 3.5+ device agent
+├── install-agent.sh              # curl-able agent installer (no sudo)
 ├── agent-c/
 │   ├── perflens_agent.c          # C agent (~3200 lines, static binary)
 │   ├── Makefile                  # native + cross-compile targets
@@ -165,7 +164,10 @@ Options:
 --port PORT           TCP port                    (default 9999)
 --frequency HZ        perf record -F              (default 99)
 --duration SECS       Length of each round         (default 8)
---rounds N            Number of rounds (--output mode only, Python agent)
+--rounds N            Number of rounds (--output mode only)
+--token SECRET        Shared secret sent in hello (or PERFLENS_TOKEN env)
+--update              Self-update from latest GitHub release, then exit
+--version             Print version and exit
 ```
 
 ---

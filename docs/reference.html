@@ -93,7 +93,10 @@
                 <tr><td><code>--port PORT</code></td><td><code>9999</code></td><td>TCP port (listen or connect).</td></tr>
                 <tr><td><code>--frequency HZ</code></td><td><code>99</code></td><td><code>perf record -F</code> sampling frequency.</td></tr>
                 <tr><td><code>--duration SECS</code></td><td><code>8</code></td><td>Length of each collection round.</td></tr>
-                <tr><td><code>--rounds N</code></td><td><code>1</code></td><td>Number of rounds (<code>--output</code> mode, Python agent only).</td></tr>
+                <tr><td><code>--rounds N</code></td><td><code>1</code></td><td>Number of rounds (<code>--output</code> mode).</td></tr>
+                <tr><td><code>--token SECRET</code></td><td>&mdash;</td><td>Shared secret sent to the server in the hello (or <code>PERFLENS_TOKEN</code>).</td></tr>
+                <tr><td><code>--update</code></td><td>&mdash;</td><td>Self-update from the latest GitHub release, then exit.</td></tr>
+                <tr><td><code>--version</code></td><td>&mdash;</td><td>Print version and exit.</td></tr>
             </tbody>
         </table>
 
@@ -155,7 +158,7 @@
         <h2 id="ci">CI</h2>
         <p>
             <code>.github/workflows/build.yml</code> builds the server on three runners
-            (Linux, macOS arm64, Windows), the Python agent once on Linux, and the C
+            (Linux, macOS arm64, Windows) and the static C
             agent for five architectures (x86_64, aarch64, aarch64_be, armv7l, armeb).
             Big-endian targets use musl toolchains from <code>musl.cc</code> since
             Ubuntu only ships little-endian sysroots. Tagged pushes (<code>v*</code>)
@@ -185,8 +188,7 @@
 
         <h2 id="layout">Project layout</h2>
 <pre><code>perflens/
-├── agent/
-│   └── perflens_agent.py         # Python 3.5+ device agent
+├── install-agent.sh              # curl-able agent installer (no sudo)
 ├── agent-c/
 │   ├── perflens_agent.c          # C agent, static binary, zero deps
 │   ├── Makefile                  # native + cross-compile targets

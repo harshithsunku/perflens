@@ -120,7 +120,7 @@
             <div class="feature">
                 <div class="feature-icon">&#128737;</div>
                 <h3>Two agent flavors</h3>
-                <p>Python 3.5+ agent (~600 lines, stdlib only) for hosts with Python. Static C binary (~1.8 MB, vendored zstd) for bare-metal targets &mdash; both wire-protocol-identical.</p>
+                <p>Single static C agent binary (~2 MB, vendored zstd, zero runtime deps) &mdash; runs on anything from bare-metal embedded boards to servers. One-line curl install, built-in self-update.</p>
             </div>
             <div class="feature">
                 <div class="feature-icon">&#129518;</div>
@@ -236,7 +236,7 @@
                         <div class="step-num">2</div>
                         <div class="step-body">
                             <h3>Drop the agent on the Linux target</h3>
-                            <p>The Python agent is one file; runs on Python 3.5+. Two connect modes are supported.</p>
+                            <p>The agent is one static binary with zero dependencies. Two connect modes are supported.</p>
 <pre><code># Agent dials out to the server (with reconnect/backoff)
 ./perflens-agent --server &lt;server-ip&gt;
 
@@ -282,7 +282,7 @@ ssh user@device /tmp/perflens-agent --server &lt;server-ip&gt;</code></pre>
                         <div class="step-num">3</div>
                         <div class="step-body">
                             <h3>Open the UI</h3>
-                            <p>The C agent and Python agent speak the same wire protocol &mdash; the server can't tell them apart.</p>
+                            <p>Cross-compiles for five architectures; prebuilt binaries are attached to every release.</p>
                         </div>
                     </div>
                 </div>
@@ -307,8 +307,8 @@ python3 server/perflens_server.py \
                         <div class="step-num">2</div>
                         <div class="step-body">
                             <h3>Copy the agent to the target and run</h3>
-<pre><code>scp agent/perflens_agent.py user@device:/tmp/
-ssh user@device python3 /tmp/perflens_agent.py --server &lt;server-ip&gt;</code></pre>
+<pre><code>curl -fsSL https://raw.githubusercontent.com/harshithsunku/perflens/master/install-agent.sh | sh
+~/.perflens/bin/perflens-agent --server &lt;server-ip&gt;</code></pre>
                         </div>
                     </div>
                     <div class="step">

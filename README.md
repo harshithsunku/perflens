@@ -9,7 +9,7 @@
   <a href="https://github.com/harshithsunku/perflens/stargazers"><img alt="stars" src="https://img.shields.io/github/stars/harshithsunku/perflens?style=flat-square&color=fbbf24"/></a>
   <a href="#quick-start"><img alt="quick start" src="https://img.shields.io/badge/quick_start-60s-3fb950?style=flat-square"/></a>
   <img alt="license" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square"/>
-  <img alt="python" src="https://img.shields.io/badge/python-3.5%2B_agent_%E2%80%A2_3.8%2B_server-58a6ff?style=flat-square"/>
+  <img alt="agent" src="https://img.shields.io/badge/agent-static_C_binary-58a6ff?style=flat-square"/>
   <img alt="arch" src="https://img.shields.io/badge/arch-x86__64_%7C_aarch64-c084fc?style=flat-square"/>
   <img alt="wire" src="https://img.shields.io/badge/wire-zstd_%7C_5--byte_header-d29922?style=flat-square"/>
   <img alt="deps" src="https://img.shields.io/badge/deps-stdlib_only-f85149?style=flat-square"/>
@@ -29,7 +29,7 @@
 
 **PerfLens** is a remote Linux performance profiler with a real-time web UI. Drop the agent on any Linux device (ARM or x86), point it at a PID, and watch flame graphs, function tables, `perf stat` metrics, and line-level annotated source update live in your browser.
 
-No frontend frameworks. No pip dependencies. No Docker. Pure Python stdlib on the server, plain HTML/CSS/JS for the UI, and two agent options: a ~600-line Python 3.5-compatible agent for targets with Python, or a single static C binary (~1.8 MB) with zero runtime dependencies for bare-metal or minimal environments.
+No frontend frameworks. No Docker. Plain HTML/CSS/JS for the UI, and a single static C agent binary (~2 MB) with zero runtime dependencies — it runs on anything from bare-metal embedded boards to servers, installs with one curl command, and updates itself with `--update`.
 
 ---
 
@@ -43,8 +43,8 @@ No frontend frameworks. No pip dependencies. No Docker. Pure Python stdlib on th
 - **Cross-compilation toolchain support** — `--toolchain-prefix` derives addr2line and readelf from a single prefix; `--sysroot` resolves shared libraries and source files under a sysroot tree
 - **ARM + x86** — same agent code runs on aarch64, aarch64_be, armv7l, x86_64
 - **Session save / replay** — raw chunks saved to disk, replayed lazily on demand via the UI's session list
-- **C agent option** — single static binary with vendored zstd, no runtime dependencies; cross-compiles to aarch64, aarch64_be, armv7l, armeb, x86_64
-- **Portable release packages** — PyInstaller-frozen server for Linux/macOS/Windows, scripted agent for any Python 3.5+ host
+- **Static C agent** — single binary with vendored zstd, no runtime dependencies; cross-compiles to aarch64, aarch64_be, armv7l, armeb, x86_64; one-line curl install and built-in self-update
+- **Portable release packages** — PyInstaller-frozen server for Linux/macOS/Windows, prebuilt static agent binaries for five architectures
 - **Capability probing** — the agent discovers which perf events and call-graph modes (`fp` / `dwarf` / `lbr`) actually work on the target before collecting
 - **Zstd compression** — typical perf script payloads compress 20–40× before hitting the wire
 
@@ -60,11 +60,11 @@ The pipeline in one sentence: **`perf record` → agent → TCP+zstd → server 
 
 ### Target device
 
-- `perflens_agent.py` probes the kernel's `perf_event_paranoid`, enumerates candidate events (`cycles`, `instructions`, `cache-*`, `branch-*`, `page-faults`, `context-switches`, `cpu-migrations`), tries call-graph modes in order (`fp`, `dwarf`, `lbr`), and picks the first that produces non-empty stacks
+- The agent probes the kernel's `perf_event_paranoid`, enumerates candidate events (`cycles`, `instructions`, `cache-*`, `branch-*`, `page-faults`, `context-switches`, `cpu-migrations`), tries call-graph modes in order (`fp`, `dwarf`, `lbr`), and picks the first that produces non-empty stacks
 - Each collection round runs `perf record` and `perf stat` in parallel for N seconds, then `perf script` to flatten the output
-- The combined text is compressed with `zstd -1 -c` (system or bundled binary) and framed with a 5-byte header
+- The combined text is compressed with in-process zstd (level 1) and framed with a 5-byte header
 - Reconnects with exponential backoff if the server drops
-- Runs on **Python 3.5+** — no f-strings, no dataclasses, no `subprocess.run(capture_output=True)`, no `ProcessLookupError`. Suitable for older ARM or x86 Linux targets that don't ship a modern Python.
+- Single static binary — **no Python, no libc, no zstd needed on the target**. Suitable for old or minimal ARM/x86 Linux devices.
 
 ### Local machine
 
@@ -113,13 +113,18 @@ tar xf perflens-server-<ver>-linux-x86_64.tar.gz
 ```
 
 ```bash
-# On the target Linux device — Option 1: agent connects to server
-tar xf perflens-agent-<ver>.tar.gz
-./perflens-agent-<ver>/perflens-agent --server <server-ip>
+# On the target Linux device — one-line install (no sudo, ~/.perflens/bin):
+curl -fsSL https://raw.githubusercontent.com/harshithsunku/perflens/master/install-agent.sh | sh
+
+# Option 1: agent connects to server
+~/.perflens/bin/perflens-agent --server <server-ip>
 
 # Option 2: agent listens, server connects to agent
-./perflens-agent-<ver>/perflens-agent --listen
+~/.perflens/bin/perflens-agent --listen
 # Then use the Live Debug wizard in the UI to connect to <device-ip>:9999
+
+# Update later (downloads, verifies, atomically replaces itself):
+~/.perflens/bin/perflens-agent --update
 ```
 
 Pre-built server tarballs are published on every tagged release for:
@@ -129,16 +134,15 @@ Pre-built server tarballs are published on every tagged release for:
 | Linux x86_64 | `perflens-server-<ver>-linux-x86_64.tar.gz` |
 | macOS arm64 (Apple Silicon) | `perflens-server-<ver>-macos-arm64.tar.gz` |
 | Windows x86_64 | `perflens-server-<ver>-windows-x86_64.tar.gz` |
-| Agent (any Linux, Python 3.5+) | `perflens-agent-<ver>.tar.gz` |
-| C Agent — Linux x86_64 (static binary) | `perflens-agent-c-<ver>-linux-x86_64.tar.gz` |
-| C Agent — Linux aarch64 (static binary) | `perflens-agent-c-<ver>-linux-aarch64.tar.gz` |
-| C Agent — Linux aarch64 BE (static binary) | `perflens-agent-c-<ver>-linux-aarch64_be.tar.gz` |
-| C Agent — Linux armv7l (static binary) | `perflens-agent-c-<ver>-linux-armv7l.tar.gz` |
-| C Agent — Linux armv7 BE (static binary) | `perflens-agent-c-<ver>-linux-armeb.tar.gz` |
+| Agent — Linux x86_64 (static binary) | `perflens-agent-linux-x86_64` |
+| Agent — Linux aarch64 (static binary) | `perflens-agent-linux-aarch64` |
+| Agent — Linux aarch64 BE (static binary) | `perflens-agent-linux-aarch64_be` |
+| Agent — Linux armv7l (static binary) | `perflens-agent-linux-armv7l` |
+| Agent — Linux armv7 BE (static binary) | `perflens-agent-linux-armeb` |
 
 > **Intel Mac users:** GitHub retired the free `macos-13` runner, so there's no pre-built macOS x86_64 tarball. Either build from source (`./build_package.sh --no-freeze --server`) or run the Linux tarball under a VM/container.
 
-### Option B — C agent (recommended for targets without Python)
+### Option B — build the agent yourself
 
 ```bash
 # Build (on your build machine)
@@ -156,7 +160,7 @@ ssh user@device
 /tmp/perflens-agent --listen                     # or: wait for server to connect in
 ```
 
-The C agent is a single static binary (~1.8 MB) with zstd built in. It is wire-protocol-identical to the Python agent — the server cannot tell which agent connected.
+The agent is a single static binary (~2 MB) with zstd built in.
 
 ### Option C — from source (dev / contributors)
 
@@ -168,11 +172,11 @@ python3 server/perflens_server.py \
     --port       9999 \
     --http-port  8080
 
-# Agent (on the target device — Python or C)
-scp agent/perflens_agent.py user@device:/tmp/
+# Agent (on the target device — build once, copy the binary)
+cd agent-c && make && scp perflens-agent user@device:/tmp/
 ssh user@device
-python3 /tmp/perflens_agent.py --server <server-ip>   # connects to server
-python3 /tmp/perflens_agent.py --listen                # or: wait for server
+/tmp/perflens-agent --server <server-ip>   # connects to server
+/tmp/perflens-agent --listen                # or: wait for server
 ```
 
 Then browse to `http://<server-ip>:8080`.
@@ -181,7 +185,7 @@ Then browse to `http://<server-ip>:8080`.
 
 | Component | Needs |
 |-----------|-------|
-| **Target device** | Linux, `perf`; Python 3.5+ for Python agent **or** nothing extra for C agent; ideally `zstd` for Python agent (C agent has it built in) |
+| **Target device** | Linux and `perf` — nothing else (the static agent has zstd built in) |
 | **Local machine** | Python 3.8+ (or frozen tarball), `addr2line` and `readelf` from binutils (bundled in `bin/` or on PATH), ideally `zstd` for decompression. For cross-compiled targets: a matching toolchain with `<prefix>addr2line` and `<prefix>readelf` |
 | **Binary** | Compiled with `-g` (debug symbols), not stripped |
 | **Source** | A checkout of the source tree readable from the server machine |
@@ -226,7 +230,10 @@ Options:
 | `--port PORT` | `9999` | TCP port (listen or connect) |
 | `--frequency HZ` | `99` | `perf record -F` sampling frequency |
 | `--duration SECS` | `8` | Length of each collection round |
-| `--rounds N` | `1` | Number of collection rounds (`--output` mode only, Python agent) |
+| `--rounds N` | `1` | Number of collection rounds (`--output` mode only) |
+| `--token SECRET` | — | Shared secret sent to the server in the hello (or `PERFLENS_TOKEN`) |
+| `--update` | — | Self-update from the latest GitHub release, then exit |
+| `--version` | — | Print version and exit |
 
 ---
 
@@ -295,7 +302,7 @@ The agent launcher auto-prepends the correct arch directory to `$PATH` based on 
 
 ### CI
 
-[`.github/workflows/build.yml`](.github/workflows/build.yml) builds the server on three runners (`ubuntu-latest`, `macos-latest`, `windows-latest`), the Python agent once on Linux, and the C agent for five architectures (x86_64, aarch64, aarch64_be, armv7l, armeb). Big-endian targets use musl toolchains from musl.cc since Ubuntu only ships little-endian sysroots. Tagged pushes (`v*`) create a GitHub Release and attach all tarballs with a platform-keyed download table.
+[`.github/workflows/build.yml`](.github/workflows/build.yml) builds the server on three runners (`ubuntu-latest`, `macos-latest`, `windows-latest`) and the static C agent for five architectures (x86_64, aarch64, aarch64_be, armv7l, armeb). Big-endian targets use musl toolchains from musl.cc since Ubuntu only ships little-endian sysroots. Tagged pushes (`v*`) create a GitHub Release and attach all artifacts — including raw `perflens-agent-linux-<arch>` binaries with stable names that `install-agent.sh` and the agent's `--update` fetch from `releases/latest/download/`.
 
 ---
 
@@ -303,8 +310,7 @@ The agent launcher auto-prepends the correct arch directory to `$PATH` based on 
 
 ```
 perflens/
-├── agent/
-│   └── perflens_agent.py         # Python 3.5+ device agent
+├── install-agent.sh              # curl-able agent installer (arch detect, no sudo)
 ├── agent-c/
 │   ├── perflens_agent.c          # C agent (~3200 lines, static binary, zero deps)
 │   ├── Makefile                  # native + cross-compile targets

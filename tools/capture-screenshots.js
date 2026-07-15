@@ -11,7 +11,7 @@
 //   2. python3 server/perflens_server.py \
 //        --http-port 8089 --port 9899 \
 //        --binary test/sample_workload --source-dir test
-//   3. python3 agent/perflens_agent.py --server 127.0.0.1 --port 9899 \
+//   3. agent-c/perflens-agent --server 127.0.0.1 --port 9899 \
 //        --pid $(pgrep -f sample_workload | tail -1) \
 //        --duration 4 --frequency 199
 //   4. curl -X POST http://localhost:8089/api/agent/command \

@@ -6,20 +6,24 @@ plan file; this is the executable summary.
 
 ## Current phase
 
-**Phase 0 complete** (baseline verified). Next up: **Phase 1a — C agent fixes**.
+**Phases 0, 1a, 1b complete.** Next up: **Phase 1c+1d — server correctness +
+security fixes**.
 
 ## Overhaul roadmap
 
 - [x] **Phase 0** — STATUS.md + baseline verification on both devices
-- [ ] **Phase 1a** — C agent fixes: `g_child_pids` race, start-while-paused
-      thread leak, lock metrics/caps/pid mutations, add `--rounds`,
-      `--version` + `--update` self-update (curl/wget from GitHub releases,
-      verify + atomic rename), optional `--token` in hello.
-      Wire protocol stays byte-identical.
-- [ ] **Phase 1b** — Remove the Python agent entirely (C agent is the only
-      agent). Add curl-able `install-agent.sh` (arch detect → download static
-      binary from GitHub releases into `~/.perflens/bin`). Stable release
-      asset naming: `perflens-agent-<ver>-linux-<arch>`.
+- [x] **Phase 1a** — C agent fixes (commit 83b2bdc): CAS-slot child tracking,
+      start-while-paused rejection, reprobe-while-profiling rejection
+      (use-after-free), metrics config locking, `--rounds`, `--version` +
+      `--update` self-update, `--token`/`PERFLENS_TOKEN` in hello,
+      getaddrinfo hostname support in `--server`.
+- [x] **Phase 1b** — Python agent removed; C agent is the only agent.
+      `install-agent.sh` added (curl-able, arch+endian detect, verifies
+      binary, installs to `~/.perflens/bin`). Release assets: raw static
+      binaries with STABLE names `perflens-agent-linux-<arch>` (required by
+      `releases/latest/download/` for installer + `--update`) plus versioned
+      tarballs. CI `build-agent` (Python) job dropped; docs/README/UI docs
+      updated.
 - [ ] **Phase 1c+1d** — Server correctness + security: `_pending`/`_responses`
       cmd lock; `agent_session` global lock; `merge_perf_stat` accumulation
       (currently last-chunk-wins); static-file path-traversal fix; HTTP bind
@@ -62,15 +66,16 @@ uvx works; HTTP defaults to localhost bind.
 
 ## Known issues (baseline, 2026-07-15)
 
-### Agent (agent-c/perflens_agent.c)
-- `g_child_pids` track/untrack (c:190-204) races collection thread vs
-  cmd_stop/pause/signal handler — no lock.
-- `start` while PAUSED spawns a second collection thread, leaks the first
-  (c:2425/2507).
-- Metrics config + caps/pid mutations partially outside `state_lock`
-  (c:2648-2661, c:2469-2500, metrics loop c:2024-2042).
-- No `--rounds` in headless mode (Python agent had it).
-- No self-update, no `--version`, no auth token.
+### Agent (agent-c/perflens_agent.c) — ALL FIXED in 83b2bdc
+- ~~`g_child_pids` race~~ → lock-free CAS slots, signal-safe.
+- ~~start-while-PAUSED thread leak~~ → rejected; stale thread joined.
+- ~~reprobe while profiling freed caps under collection thread~~ → rejected.
+- ~~Metrics config unlocked~~ → under state_lock.
+- ~~No --rounds/--version/--update/--token~~ → all added.
+- NEW (latent, shared with old Python agent): multi-round `--output` files
+  concatenate `### PERF_STAT ###` sections; server's `split_perf_data`
+  splits on the FIRST marker only, so rounds 2..N are lost on `--import`.
+  Fix in parser.py during Phase 1c.
 
 ### Server (server/perflens_server.py)
 - `_raw_chunks` grows unbounded in RAM all session (line 532) — GBs over
@@ -166,3 +171,10 @@ old batch path vs new incremental path must produce identical snapshots.
 - **2026-07-15** — Full project analysis (agents/server/UI/CI). Plan approved
   and saved. Phase 0 executed: C agent built natively + aarch64 cross,
   baseline PASS on both devices, fixtures captured, STATUS.md created.
+- **2026-07-15 (cont.)** — Phase 1a: C agent race/state-machine fixes +
+  self-update/--rounds/--token/getaddrinfo, all verified live against the
+  running server (state machine incl. rejection paths, self-update against
+  a fake release HTTP server, --rounds 2 headless). Phase 1b: Python agent
+  and run_agent.sh deleted, install-agent.sh added (endianness detection
+  verified on x86_64 + aarch64 device), build_package.sh + CI reworked
+  (raw stable-name binaries as release assets), all docs updated.

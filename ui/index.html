@@ -445,11 +445,11 @@
                     <h4>2. Start the Agent</h4>
                     <p>On the target Linux device. Two connection patterns:</p>
                     <pre><code># Agent connects to server
-python3 perflens_agent.py --server &lt;server-ip&gt;
+./perflens-agent --server &lt;server-ip&gt;
 ./perflens-agent --server &lt;server-ip&gt;          # C agent
 
 # Agent listens, connect via UI wizard
-python3 perflens_agent.py --listen
+./perflens-agent --listen
 ./perflens-agent --listen                       # C agent</code></pre>
                     <p>With <code>--server</code>, the UI switches automatically when the agent connects. With <code>--listen</code>, use the <strong>Live Debug</strong> wizard.</p>
                 </section>
@@ -459,7 +459,7 @@ python3 perflens_agent.py --listen
                     <table class="docs-table">
                         <thead><tr><th>Component</th><th>Needs</th></tr></thead>
                         <tbody>
-                            <tr><td><strong>Target device</strong></td><td>Linux, <code>perf</code>; Python 3.5+ for Python agent <em>or</em> nothing extra for C agent</td></tr>
+                            <tr><td><strong>Target device</strong></td><td>Linux and <code>perf</code> — nothing else (static agent binary)</td></tr>
                             <tr><td><strong>Local machine</strong></td><td>Python 3.8+ (or frozen tarball); <code>addr2line</code> + <code>readelf</code> from binutils</td></tr>
                             <tr><td><strong>Binary</strong></td><td>Compiled with <code>-g</code> (debug symbols), not stripped</td></tr>
                             <tr><td><strong>Source</strong></td><td>A checkout of the source tree readable from the server machine</td></tr>
@@ -699,7 +699,7 @@ perflens-server --addr2line /opt/toolchain/bin/arm-linux-gnueabihf-addr2line \
                         <li>Session replay is lazy: raw chunks parsed on demand</li>
                         <li>Single <code>SourceMapper</code> shared across all requests</li>
                         <li>Agent probes events and call-graph modes before collecting</li>
-                        <li>Two agents (Python 3.5 + C static binary), wire-protocol-identical</li>
+                        <li>Single static C agent binary — zero runtime dependencies, self-updating</li>
                         <li>Per-thread profiling: parser extracts pid/tid/comm from perf script output</li>
                     </ul>
                 </section>

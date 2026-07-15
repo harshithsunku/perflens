@@ -61,11 +61,11 @@
 
         <h2 id="target">On the target device</h2>
         <p>
-            The agent is the only thing running on the target. Two flavors ship: a
-            <strong>~600-line Python 3.5+ script</strong> for hosts with Python, and a
-            <strong>single static C binary</strong> with vendored zstd for bare-metal
-            targets. Both speak the same wire protocol &mdash; the server cannot tell
-            which agent connected.
+            The agent is the only thing running on the target: a
+            <strong>single static C binary</strong> with vendored zstd and zero
+            runtime dependencies. Prebuilt binaries ship for five architectures,
+            install with one curl command, and self-update with
+            <code>--update</code>.
         </p>
         <h3 id="probing">Capability probing</h3>
         <p>

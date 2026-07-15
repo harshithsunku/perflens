@@ -30,9 +30,9 @@ python3 server/perflens_server.py \
     --http-port 8089 --port 9899 \
     --binary test/sample_workload --source-dir test
 
-# 3) Python agent in --server mode against the workload PID
+# 3) agent in --server mode against the workload PID
 PID=$(pgrep -f sample_workload | tail -1)
-python3 agent/perflens_agent.py --server 127.0.0.1 --port 9899 \
+agent-c/perflens-agent --server 127.0.0.1 --port 9899 \
     --pid "$PID" --duration 4 --frequency 199
 
 # 4) Tell the agent to start collecting

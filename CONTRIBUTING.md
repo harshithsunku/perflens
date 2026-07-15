@@ -20,7 +20,8 @@ python3 server/perflens_server.py --source-dir test --binary test/sample_workloa
 
 # In another shell, build the test workload and start the agent against it
 cd test && make
-python3 ../agent/perflens_agent.py --server 127.0.0.1 --pid $(pgrep sample_workload)
+(cd ../agent-c && make)
+../agent-c/perflens-agent --server 127.0.0.1 --pid $(pgrep sample_workload)
 ```
 
 Then browse `http://localhost:8080`.
@@ -65,7 +66,7 @@ node tools/capture-demo-gif.js && tools/encode-demo-gif.sh
 
 ## Releasing
 
-Releases are tag-driven: pushing `v<x.y.z>` triggers `.github/workflows/build.yml`, which builds tarballs for Linux x86_64, macOS arm64, Windows x86_64, the Python agent, and the C agent for five architectures, then attaches them to a GitHub Release.
+Releases are tag-driven: pushing `v<x.y.z>` triggers `.github/workflows/build.yml`, which builds server tarballs for Linux x86_64, macOS arm64, and Windows x86_64, plus static C agent binaries for five architectures, then attaches them to a GitHub Release.
 
 ## License
 
