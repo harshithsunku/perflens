@@ -118,12 +118,13 @@
                 <tr><td><code>/api/source?file=&amp;event=&amp;tid=</code></td><td>GET</td><td>Annotated source for a single file (optionally per-thread).</td></tr>
                 <tr><td><code>/api/thread-view?event=&amp;tid=</code></td><td>GET</td><td>Per-thread flame graph + function summary.</td></tr>
                 <tr><td><code>/api/thread-summary?event=</code></td><td>GET</td><td>Thread overview with sample counts and top functions.</td></tr>
+                <tr><td><code>/api/time-window?event=&amp;start=&amp;end=</code></td><td>GET</td><td>Flame graph + function summary for samples received in a time range (timeline scrubbing).</td></tr>
                 <tr><td><code>/api/index/status</code></td><td>GET</td><td>Source-index / DWARF file-list state (truncated preview).</td></tr>
                 <tr><td><code>/api/index/files?offset=&amp;limit=&amp;q=</code></td><td>GET</td><td>Paginated DWARF source-file list.</td></tr>
                 <tr><td><code>/api/metrics/current</code></td><td>GET</td><td>Latest device-health snapshot per type.</td></tr>
                 <tr><td><code>/api/metrics/history?type=&amp;start=</code></td><td>GET</td><td>Health metrics time series.</td></tr>
                 <tr><td><code>/api/connect</code></td><td>POST</td><td>Connect out to a <code>--listen</code> agent (<code>{"host": ..., "port": ...}</code>).</td></tr>
-                <tr><td><code>/api/agent/command</code></td><td>POST</td><td>Relay a command to the connected agent (<code>start</code>, <code>stop</code>, <code>pause</code>, <code>resume</code>, <code>configure</code>, <code>list_processes</code>, <code>reprobe</code>).</td></tr>
+                <tr><td><code>/api/agent/command</code></td><td>POST</td><td>Relay a command to the connected agent (<code>start</code>, <code>stop</code>, <code>pause</code>, <code>resume</code>, <code>configure</code>, <code>configure_metrics</code>, <code>list_processes</code>, <code>reprobe</code>).</td></tr>
                 <tr><td><code>/api/wizard/state</code></td><td>GET/POST</td><td>Persisted Live Debug wizard state.</td></tr>
                 <tr><td><code>/api/browse?path=</code></td><td>GET</td><td>File picker listing (confined to <code>--browse-root</code>).</td></tr>
                 <tr><td><code>/api/config/binary</code></td><td>POST</td><td>Set the unstripped binary at runtime.</td></tr>

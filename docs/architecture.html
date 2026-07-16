@@ -97,8 +97,13 @@
             Independent of the perf pipeline, the agent collects device health every
             2&nbsp;seconds &mdash; CPU per-core, memory, load, temperature, process
             stats, network bytes &mdash; and streams them as JSON frames with
-            flag&nbsp;<code>4</code>. The browser renders sparklines, gauges, and
-            per-core CPU bars without affecting the perf collection.
+            flag&nbsp;<code>4</code>. Disk I/O (per-device + per-process) and
+            per-thread CPU collectors are opt-in &mdash; off by default so embedded
+            targets pay nothing, enabled at runtime from the UI via the
+            <code>configure_metrics</code> command. The browser renders sparklines,
+            gauges, and per-core CPU bars without affecting the perf collection,
+            and dragging across a sparkline scopes the flame graph to that time
+            window.
         </p>
 
         <h2 id="local">On the local machine</h2>
@@ -195,7 +200,7 @@ sock.sendall(header + payload)</code></pre>
                 <tr><td><code>1</code></td><td>agent &rarr; server</td><td>Zstd-compressed perf script output</td></tr>
                 <tr><td><code>2</code></td><td>server &rarr; agent</td><td>Command request (JSON): <code>start</code>, <code>stop</code>, <code>pause</code>, <code>resume</code>, <code>configure</code>, <code>list_processes</code>, <code>reprobe</code>, &hellip;</td></tr>
                 <tr><td><code>3</code></td><td>agent &rarr; server</td><td>Command response (JSON)</td></tr>
-                <tr><td><code>4</code></td><td>agent &rarr; server</td><td>Health metrics (JSON, every 2&nbsp;s)</td></tr>
+                <tr><td><code>4</code></td><td>agent &rarr; server</td><td>Health metrics (JSON, default every 2&nbsp;s; interval + opt-in collectors set via <code>configure_metrics</code>)</td></tr>
             </tbody>
         </table>
 

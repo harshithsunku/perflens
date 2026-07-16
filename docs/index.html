@@ -113,9 +113,19 @@
                 <p><code>addr2line</code> pipelined in batches of 500. Hot lines are heat-colored red/amber/green so you spot the cost without leaving the file.</p>
             </div>
             <div class="feature">
+                <div class="feature-icon">&#128202;</div>
+                <h3>Differential profiling</h3>
+                <p>Snapshot a baseline or pick a saved session, and the flame graph recolors by change &mdash; red grew, blue shrank &mdash; while the function table shows per-function &Delta;. Did-my-fix-help in one glance.</p>
+            </div>
+            <div class="feature">
+                <div class="feature-icon">&#9201;</div>
+                <h3>Timeline scrubbing</h3>
+                <p>Drag across a Device Health sparkline &mdash; a CPU spike, say &mdash; and the flame graph and function table rebuild from only the samples collected in that window.</p>
+            </div>
+            <div class="feature">
                 <div class="feature-icon">&#129489;&#8205;&#128187;</div>
                 <h3>Per-thread analysis</h3>
-                <p>Filter flame graphs, function tables, and source annotations by thread. A dedicated Threads tab shows per-tid CPU breakdowns and top functions.</p>
+                <p>Filter flame graphs, function tables, and source annotations by thread. A dedicated Threads tab shows per-tid CPU breakdowns, top functions, and an optional real-time Live CPU column fed by the agent.</p>
             </div>
             <div class="feature">
                 <div class="feature-icon">&#128737;</div>

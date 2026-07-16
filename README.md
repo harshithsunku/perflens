@@ -39,8 +39,12 @@ No frontend frameworks. No Docker. Plain HTML/CSS/JS for the UI, and a single st
 - **Real-time streaming** — `perf record` runs in ~8s rounds; each round is compressed with zstd and streamed over a 5-byte framed TCP protocol
 - **Live web UI** — Server-Sent Events push parsed function tables, flame graphs, and `perf stat` panels to the browser as new data arrives
 - **Source-level annotation** — `addr2line` maps samples back to source lines; the UI heat-colors hot lines red/amber/green
-- **Per-thread profiling** — filter flame graphs, function tables, and source annotations by thread; dedicated thread analysis view with per-thread CPU breakdown
+- **Differential profiling** — snapshot a baseline (or pick a saved session) and the flame graph recolors by change (red grew, blue shrank) while the function table shows per-function Δ; did-my-fix-help in one glance
+- **Timeline scrubbing** — drag across a Device Health sparkline to rebuild the flame graph and function table from only the samples collected in that window (e.g. select a CPU spike)
+- **Per-thread profiling** — filter flame graphs, function tables, and source annotations by thread; dedicated thread analysis view with per-thread CPU breakdown, plus an optional real-time Live CPU column fed by the agent
+- **Device health strip** — live CPU, memory, temperature, load, and network sparklines; opt-in disk I/O and per-thread CPU collectors (off by default to stay light on embedded targets) toggled from the UI at runtime
 - **Interactive SVG flame graphs** — vanilla JS, no d3, no bundling; zoomable, hoverable
+- **Shareable URLs** — tab, event, thread filter, flame-graph zoom, and replayed session live in the URL hash; refresh or paste a link and land on the same view
 - **Cross-compilation toolchain support** — `--toolchain-prefix` derives addr2line and readelf from a single prefix; `--sysroot` resolves shared libraries and source files under a sysroot tree
 - **ARM + x86** — same agent code runs on aarch64, aarch64_be, armv7l, x86_64
 - **Session save / replay** — raw chunks saved to disk, replayed lazily on demand via the UI's session list
@@ -104,7 +108,7 @@ The protocol is bidirectional — data and health metrics flow agent → server,
 | `1` | agent → server | Same, zstd-compressed |
 | `2` | server → agent | Command request (JSON: `start`, `stop`, `pause`, `resume`, `configure`, ...) |
 | `3` | agent → server | Command response / `hello` handshake (JSON) |
-| `4` | agent → server | Device health metrics (JSON, every 2s: CPU, memory, temperature, per-process stats) |
+| `4` | agent → server | Device health metrics (JSON, every 2s: CPU, memory, temperature, network, per-process stats; opt-in disk I/O and per-thread CPU via `configure_metrics`) |
 
 The server reads the 5 header bytes first, then exactly `LEN` more. Compression is in-process zstd on both ends (vendored in the agent, the `zstandard` package on the server, external `zstd` binary as a fallback). Typical ratio on real `perf script` output is **20–40×**.
 
@@ -270,6 +274,7 @@ Options:
 | `/api/source?file=<path>&event=<evt>&tid=<tid>` | GET | Annotated source for a single file (optionally filtered by thread) |
 | `/api/thread-view?event=<evt>&tid=<tid>` | GET | Per-thread flamegraph and function summary |
 | `/api/thread-summary?event=<evt>` | GET | Thread overview: all threads with sample counts and top functions |
+| `/api/time-window?event=&start=&end=` | GET | Flame graph + function summary for samples received in a time range (timeline scrubbing) |
 | `/api/index/status` | GET | Source-index / DWARF file-list state (truncated preview) |
 | `/api/index/files?offset=&limit=&q=` | GET | Paginated DWARF source-file list |
 | `/api/metrics/current` | GET | Latest device health metrics per type |

@@ -27,13 +27,13 @@ without both, the publish job errors (the release itself still works).
   '.[dev]'` then `.venv/bin/perflens serve ...`. Plain `PYTHONPATH=src
   python3 -m perflens.cli serve` only works in an env with those deps
   installed; same for the compat shim `server/perflens_server.py`.
-- Tests: `make -C agent-c && .venv/bin/python -m pytest tests/` (109 tests)
+- Tests: `make -C agent-c && .venv/bin/python -m pytest tests/` (110 tests)
   and `npm ci && npm run e2e` (22-assertion puppeteer run, self-contained).
   CI runs both: `.github/workflows/test.yml` (pytest 3.10–3.13 matrix +
   browser e2e on push/PR) and `build.yml` (pytest before the wheel build).
-- Build/CI/README are all current as of Phase 4. Remaining doc debt: the
-  docs/ GitHub Pages site still describes the old tarball install —
-  refresh it during Phase 5 release prep.
+- Build/CI/README/docs-site/UI-docs are all current as of the post-0.6.0
+  feature work (2026-07-16); the docs/ GitHub Pages tarball-era debt was
+  cleared in 1bd2f12.
 - Sessions now default to `~/.perflens/sessions` (`--sessions-dir` to
   override; `PERFLENS_HOME` moves the whole root — tests use this).
   The old repo-root `sessions/` dir is no longer read.
@@ -208,7 +208,34 @@ without both, the publish job errors (the release itself still works).
       .gitignore/tools-README updated for tests/ + current stack.
 - [ ] **Phase 5** — Full device E2E matrix, 1h RSS-bounded scale test,
       synthetic 500k-file source-index test, clean-container `uvx` run,
-      0.6.0 release prep.
+      release prep (tag will now carry the post-0.6.0 features below —
+      consider calling it 0.7.0 rather than 0.6.0; bump VERSION first).
+- [x] **Post-0.6.0 hardening** (c7d7381) — agent: network-metrics snprintf
+      overflow (size_t underflow on many-interface hosts), 64 MB frame cap,
+      buf_ensure cap fix, TCP keepalive (dead peers unblock recv →
+      --server reconnects), shutdown-before-join recv teardown, socket()
+      retry, strdup guard. Server: agent-replacement no longer clobbers
+      the new session's state, AggregatorSet swapped on reset (rebuild
+      worker can't fold old chunks into a new session, and it survives
+      bad chunks instead of dying silently), 128 MB inbound frame cap.
+- [x] **Opt-in metrics + UI settings** (19701ee) — agent disk I/O collector
+      (/proc/diskstats whole-disk + /proc/<pid>/io, off by default) behind
+      `configure_metrics {"disk": true}`; UI gear popover on the Device
+      Health strip (network/disk/interval, live). Fixed the broken
+      per-thread source view (l.code vs l.source + dead CSS classes),
+      control-bar state on reload, sparkline hover readouts, docs drawer
+      brought to the 0.6.0 era.
+- [x] **Analysis features** (63163bb) — differential view (baseline from
+      live snapshot or saved session; Δ Self column + path-matched
+      red/blue flame graph recolor), timeline scrubbing (drag on health
+      sparklines → new GET /api/time-window over recv_ts-stamped samples),
+      opt-in per-thread CPU metrics (`configure_metrics {"threads":
+      true}` → Live CPU column in Threads tab), shareable URL hash
+      (tab/event/tid/zoom/session), metrics-settings read-back on open.
+      Fixed a stale-flamegraph bug (hidden-tab renders skipped, then tab
+      activation kept the old SVG). Tests: 110 pytest (+time-window),
+      e2e 22/22, plus an 11-assertion targeted puppeteer run for the new
+      features (scratchpad-only, not committed).
 
 Key decisions (user-confirmed): bugs → scalability → packaging order;
 **Python agent will be removed** (single static C agent, kept lightweight for
@@ -388,3 +415,16 @@ snapshots), the HTTP API replay tests, and the browser e2e.
   (fires on `v*` tags, `skip-existing: true` so the already-uploaded
   0.6.0 doesn't fail the first tag) — needs the one-time pypi.org
   publisher + GitHub `pypi` environment setup noted in Current phase.
+- **2026-07-16** — Post-0.6.0 review + feature session (three commits, no
+  tag yet — see the roadmap entries for detail): c7d7381 agent/server
+  hardening (memory-safety, dead-peer, session-replacement races),
+  19701ee opt-in disk I/O metrics + UI metrics settings + thread-source
+  fix, 63163bb differential view / timeline scrubbing / per-thread CPU
+  metrics / shareable URLs. Doc sweep: README, docs/ site, STATUS, UI
+  docs drawer, CLAUDE.md, CHANGELOG all current. Gotcha for future
+  sessions: JSON-escaped `\uXXXX` sequences in Edit-tool payloads become
+  literal bytes — a raw NUL landed in app.js twice and made grep treat
+  the file as binary; write `\\u0000` (or plain UTF-8 chars) instead.
+  Metrics opt-in contract: disk + threads collectors are OFF by default
+  (embedded targets), toggled live via `configure_metrics`; an argless
+  `configure_metrics` reads current settings without changing them.
