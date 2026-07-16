@@ -24,11 +24,18 @@ let state = {
     metricsPrevNetwork: null, // previous for rate calc
     metricsDisk: null,      // latest disk I/O snapshot (opt-in agent feature)
     metricsPrevDisk: null,  // previous for rate calc
+    metricsThreads: null,   // latest per-thread snapshot (opt-in agent feature)
+    metricsPrevThreads: null,
+    threadLiveCpu: {},      // tid -> {pct, state} computed from consecutive snapshots
     metricsCollapseLevel: 0, // 0=full, 1=compact, 2=minimal
+    baseline: null,         // {label, perEvent} — diff comparison target
+    diffEnabled: false,     // baseline set AND diff toggle on
+    timeWindow: null,       // {start, end} unix secs — timeline scrubbing
 };
 
 let evtSource = null;
 let flamegraphRects = [];   // parallel to SVG <g> elements for click handling
+let fgStale = false;        // fg changed while its tab was hidden — re-render on show
 let errorTimer = null;
 let fgClickTimer = null;    // single-click vs double-click disambiguation
 let fgContextMenu = null;   // persistent context menu element
@@ -223,6 +230,64 @@ function hashCode(str) {
     return Math.abs(hash);
 }
 
+// --- URL hash state: shareable, refresh-surviving views ---
+// #tab=flamegraph&event=cycles&tid=123&zoom=main;hot_fn&session=<id>
+var _hashApplying = false;
+
+function parseUrlHash() {
+    var out = {};
+    var h = location.hash.replace(/^#/, '');
+    if (!h) return out;
+    h.split('&').forEach(function (kv) {
+        var i = kv.indexOf('=');
+        if (i > 0) out[kv.slice(0, i)] = kv.slice(i + 1);  // raw; decode per key
+    });
+    return out;
+}
+
+function updateUrlHash() {
+    if (_hashApplying) return;
+    var parts = [];
+    var tab = document.querySelector('.tab.active');
+    if (tab && tab.dataset.tab !== 'functions') parts.push('tab=' + tab.dataset.tab);
+    if (state.selectedEvent && state.selectedEvent !== 'cycles')
+        parts.push('event=' + encodeURIComponent(state.selectedEvent));
+    if (state.selectedTid != null) parts.push('tid=' + state.selectedTid);
+    if (state.flamegraphZoomNames && state.flamegraphZoomNames.length)
+        parts.push('zoom=' + state.flamegraphZoomNames.map(encodeURIComponent).join(';'));
+    if (state.isReplayMode && state.replaySessionId)
+        parts.push('session=' + encodeURIComponent(state.replaySessionId));
+    var hash = parts.length ? '#' + parts.join('&') : '';
+    if (hash !== location.hash) {
+        history.replaceState(null, '', hash || location.pathname + location.search);
+    }
+}
+
+function applyUrlHash() {
+    var p = parseUrlHash();
+    if (Object.keys(p).length === 0) return;
+    _hashApplying = true;
+    try {
+        if (p.event) state.selectedEvent = decodeURIComponent(p.event);
+        if (p.tid) {
+            var t = parseInt(p.tid);
+            if (!isNaN(t)) state.selectedTid = t;
+        }
+        if (p.zoom) {
+            state.flamegraphZoomNames = p.zoom.split(';').map(decodeURIComponent);
+        }
+        if (p.tab || p.session) showProfilingView();
+        if (p.tab) {
+            switchToTab(p.tab);
+            if (p.tab === 'threads') renderThreadsTab();
+            if (p.tab === 'sessions') loadSessions();
+        }
+        if (p.session) replaySession(decodeURIComponent(p.session), !!p.tab);
+    } finally {
+        _hashApplying = false;
+    }
+}
+
 // --- Error banner ---
 function showError(msg) {
     const banner = document.getElementById('error-banner');
@@ -256,6 +321,7 @@ function hideReplayBanner() {
     fetchedVersion = -1;
     fetchPerEvent(state.selectedEvent, true);
     document.getElementById('replay-banner').classList.remove('visible');
+    updateUrlHash();
 }
 
 // --- Stop button ---
@@ -303,13 +369,14 @@ document.querySelectorAll('.tab').forEach(tab => {
         tab.classList.add('active');
         document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
         if (tab.dataset.tab === 'threads') renderThreadsTab();
-        // A flamegraph rendered while its tab was hidden is empty
-        // (clientWidth 0 aborts the layout) — e.g. right after a session
-        // replay. Re-render now that the container is visible.
+        // A flamegraph rendered (or restyled — diff toggle) while its tab
+        // was hidden is empty or stale: clientWidth 0 aborts the layout.
+        // Re-render now that the container is visible.
         if (tab.dataset.tab === 'flamegraph' &&
-            !document.querySelector('#flamegraph-container svg')) {
+            (fgStale || !document.querySelector('#flamegraph-container svg'))) {
             renderCurrentEvent();
         }
+        updateUrlHash();
     });
 });
 
@@ -320,6 +387,11 @@ function switchToTab(tabName) {
     const tabContent = document.getElementById('tab-' + tabName);
     if (tabBtn) tabBtn.classList.add('active');
     if (tabContent) tabContent.classList.add('active');
+    if (tabName === 'flamegraph' &&
+        (fgStale || !document.querySelector('#flamegraph-container svg'))) {
+        renderCurrentEvent();
+    }
+    updateUrlHash();
 }
 
 // --- Event selector ---
@@ -413,6 +485,13 @@ function connectSSE() {
         state.metricsPrevDisk = state.metricsDisk;
         state.metricsDisk = m;
         updateDiskPanel(m, state.metricsPrevDisk);
+    });
+
+    evtSource.addEventListener('metrics_threads', function(e) {
+        var m = JSON.parse(e.data);
+        state.metricsPrevThreads = state.metricsThreads;
+        state.metricsThreads = m;
+        updateThreadLiveCpu(m, state.metricsPrevThreads);
     });
 
     evtSource.addEventListener('agent_connected', (e) => {
@@ -555,7 +634,7 @@ function updateThreadFilter() {
     }
     select.classList.remove('hidden');
     label.classList.remove('hidden');
-    var current = select.value;
+    var current = state.selectedTid != null ? String(state.selectedTid) : select.value;
     select.innerHTML = '<option value="">All threads (' + evtData.threads.length + ')</option>';
     evtData.threads.forEach(function(t) {
         var opt = document.createElement('option');
@@ -567,12 +646,35 @@ function updateThreadFilter() {
 }
 
 var _threadViewPending = false;
+var _windowViewPending = false;
 function renderCurrentEvent() {
     var evtData = state.perEvent[state.selectedEvent];
     if (!evtData) return;
 
     updateThreadFilter();
     updateSourceBanner();
+    updateUrlHash();
+
+    // Time window (timeline scrubbing): server rebuilds from the raw
+    // sample deque restricted to [start, end]; tid filter still applies.
+    if (state.timeWindow && !state.isReplayMode) {
+        if (_windowViewPending) return;
+        _windowViewPending = true;
+        var wurl = '/api/time-window?event=' + encodeURIComponent(state.selectedEvent) +
+            '&start=' + state.timeWindow.start + '&end=' + state.timeWindow.end;
+        if (state.selectedTid !== null) wurl += '&tid=' + state.selectedTid;
+        fetch(wurl)
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                _windowViewPending = false;
+                if (data.error) { showError(data.error); return; }
+                renderFunctionTable(data.function_summary);
+                renderFlamegraph(data.flamegraph, data.function_summary.total_samples);
+                if (data.window) updateTimeWindowChip(data.window.samples);
+            })
+            .catch(function () { _windowViewPending = false; });
+        return;
+    }
 
     if (state.selectedTid !== null) {
         // Fetch per-thread view from server
@@ -642,6 +744,7 @@ function applyZoomFromNames(tree) {
         return { name: n.name, node: n };
     });
     state.flamegraphZoom = { name: node.name, node: node };
+    updateUrlHash();  // hash carries the zoom even if the render is deferred
     return node;
 }
 
@@ -672,17 +775,113 @@ function zoomToRectNode(node) {
     if (zoomed) renderFlamegraph(zoomed, zoomed.value);
 }
 
+// --- Differential view: compare against a baseline ---
+// The baseline is a per-event snapshot (function summary + flamegraph),
+// captured from the live view ("Set Baseline") or loaded from a saved
+// session ("Baseline" in the Sessions tab). Diff applies to the full,
+// unfiltered view — thread/time-window filters use their own totals and
+// a percentage diff against a whole-session baseline would mislead.
+
+function setBaseline(perEvent, label) {
+    state.baseline = { label: label, perEvent: Object.assign({}, perEvent) };
+    state.diffEnabled = true;
+    document.getElementById('diff-toggle').checked = true;
+    document.getElementById('diff-label').textContent = label;
+    document.getElementById('diff-toggle-wrap').classList.remove('hidden');
+    document.getElementById('diff-clear-btn').classList.remove('hidden');
+    document.getElementById('diff-set-btn').textContent = 'Re-baseline';
+    renderCurrentEvent();
+}
+
+function clearBaseline() {
+    state.baseline = null;
+    state.diffEnabled = false;
+    document.getElementById('diff-toggle-wrap').classList.add('hidden');
+    document.getElementById('diff-clear-btn').classList.add('hidden');
+    document.getElementById('diff-set-btn').textContent = 'Set Baseline';
+    renderCurrentEvent();
+}
+
+function diffIsActive() {
+    return state.diffEnabled && state.baseline &&
+        state.selectedTid === null && !state.timeWindow &&
+        !!state.baseline.perEvent[state.selectedEvent];
+}
+
+// "name\u0000module" -> baseline function entry, memoized per event data
+function baselineFuncMap(evt) {
+    var base = state.baseline && state.baseline.perEvent[evt];
+    if (!base || !base.function_summary) return null;
+    if (!base._fnMap) {
+        var map = {};
+        (base.function_summary.functions || []).forEach(function (f) {
+            map[f.name + '\u0000' + (f.module || '')] = f;
+        });
+        base._fnMap = map;
+    }
+    return base._fnMap;
+}
+
+// Diverging diff color: red = grew vs baseline (regression for cost
+// metrics), blue = shrank, grey = unchanged. 8pp change = full intensity.
+function fgDiffColor(deltaPP) {
+    var dark = isDark();
+    if (Math.abs(deltaPP) < 0.1) return dark ? 'hsl(220, 6%, 30%)' : 'hsl(220, 8%, 82%)';
+    var mag = Math.min(Math.abs(deltaPP) / 8, 1);
+    var hue = deltaPP > 0 ? 4 : 214;
+    var sat = 55 + Math.round(mag * 35);
+    var light = dark ? 50 - Math.round(mag * 16) : 82 - Math.round(mag * 30);
+    return 'hsl(' + hue + ', ' + sat + '%, ' + light + '%)';
+}
+
+document.getElementById('diff-set-btn').addEventListener('click', function () {
+    if (Object.keys(state.perEvent).length === 0) {
+        showError('No profile data to baseline yet');
+        return;
+    }
+    var label = state.isReplayMode && state.replaySessionId
+        ? state.replaySessionId
+        : 'snapshot ' + new Date().toLocaleTimeString();
+    setBaseline(state.perEvent, label);
+});
+
+document.getElementById('diff-clear-btn').addEventListener('click', clearBaseline);
+
+document.getElementById('diff-toggle').addEventListener('change', function (e) {
+    state.diffEnabled = e.target.checked;
+    renderCurrentEvent();
+});
+
 // --- Function Table ---
 let functionSortKey = 'self';  // 'self' or 'total'
 let functionFilter = '';       // search filter string
 let functionShowCount = 200;   // progressive display count
 let _lastFunctionData = null;  // cached for re-filter/re-sort
 
-function _buildFunctionRow(f, i, maxSelfPct, maxTotalPct) {
+function _buildFunctionRow(f, i, maxSelfPct, maxTotalPct, baseMap) {
     const selfPct = f.self_percent !== undefined ? f.self_percent : (f.percent || 0);
     const totalPct = f.total_percent || 0;
     const selfSamples = f.self_samples !== undefined ? f.self_samples : (f.samples || 0);
     const totalSamples = f.total_samples || 0;
+
+    // Δ vs baseline (diff mode only; column hidden otherwise)
+    let diffCell = '<td class="diff-col"></td>';
+    if (baseMap) {
+        const bf = baseMap[f.name + '\u0000' + (f.module || '')];
+        if (!bf) {
+            diffCell = '<td class="diff-col"><span class="diff-new">new</span></td>';
+        } else {
+            const basePct = bf.self_percent !== undefined ? bf.self_percent : (bf.percent || 0);
+            const d = selfPct - basePct;
+            if (Math.abs(d) < 0.05) {
+                diffCell = '<td class="diff-col"><span class="diff-flat">&plusmn;0.0</span></td>';
+            } else {
+                const cls = d > 0 ? 'diff-up' : 'diff-down';
+                diffCell = '<td class="diff-col"><span class="' + cls + '">' +
+                    (d > 0 ? '+' : '') + d.toFixed(1) + 'pp</span></td>';
+            }
+        }
+    }
 
     const selfBarW = Math.max(2, (selfPct / Math.max(maxSelfPct, 1)) * 100);
     const selfHue = Math.max(0, 120 - (selfPct / Math.max(maxSelfPct, 1)) * 120);
@@ -706,6 +905,7 @@ function _buildFunctionRow(f, i, maxSelfPct, maxTotalPct) {
             '<div class="cpu-bar-fill" style="width:' + totalBarW + '%;background:' + totalColor + '"></div>' +
             '<span class="cpu-bar-text">' + totalPct.toFixed(1) + '%</span>' +
         '</div></td>' +
+        diffCell +
         '<td title="self: ' + selfSamples + ' / total: ' + totalSamples + '">' + selfSamples + '</td></tr>';
 }
 
@@ -714,8 +914,14 @@ function renderFunctionTable(data) {
     const tbody = document.getElementById('function-tbody');
     const scrollY = window.scrollY;
 
+    // Diff mode: only in the full, unfiltered view (a baseline percentage
+    // diff against a thread/time-window subset would mislead)
+    var baseMap = diffIsActive() ? baselineFuncMap(state.selectedEvent) : null;
+    document.getElementById('function-table')
+        .classList.toggle('diff-mode', !!baseMap);
+
     if (!data.functions || data.functions.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="6" class="empty">No data yet</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" class="empty">No data yet</td></tr>';
         _updateFunctionStatus(0, 0);
         return;
     }
@@ -746,13 +952,13 @@ function renderFunctionTable(data) {
     const maxTotalPct = sorted.reduce((m, f) => Math.max(m, f.total_percent || 0), 0);
 
     var html = visible.map(function(f, i) {
-        return _buildFunctionRow(f, i, maxSelfPct, maxTotalPct);
+        return _buildFunctionRow(f, i, maxSelfPct, maxTotalPct, baseMap);
     }).join('');
 
     // "Show more" row
     var remaining = sorted.length - showCount;
     if (remaining > 0) {
-        html += '<tr class="fn-show-more-row"><td colspan="6">' +
+        html += '<tr class="fn-show-more-row"><td colspan="7">' +
             '<button class="fn-show-more-btn" id="fn-show-more">' +
             'Show ' + Math.min(remaining, 200) + ' more (' + remaining + ' remaining)' +
             '</button></td></tr>';
@@ -1043,14 +1249,41 @@ function renderFlamegraph(data, totalSamples) {
     }
 
     const width = container.clientWidth - 32;
-    if (width < 10) return;
+    if (width < 10) {
+        // Hidden container (tab not visible) — mark stale so activating
+        // the tab re-renders with current data/colors
+        fgStale = true;
+        return;
+    }
     const rowHeight = 18;
     const fontSize = 11;
     const charWidth = 6.5;
     totalSamples = totalSamples || data.value;
 
+    // Diff mode: locate the baseline subtree matching the current zoom
+    let baseTree = null;
+    let baseTotal = 0;
+    if (diffIsActive()) {
+        const b = state.baseline.perEvent[state.selectedEvent];
+        if (b && b.flamegraph) {
+            baseTree = b.flamegraph;
+            baseTotal = b.function_summary
+                ? b.function_summary.total_samples : b.flamegraph.value;
+            const names = state.flamegraphZoomNames || [];
+            for (let zi = 0; zi < names.length && baseTree; zi++) {
+                let nxt = null;
+                const kids = baseTree.children || [];
+                for (let zj = 0; zj < kids.length; zj++) {
+                    if (kids[zj].name === names[zi]) { nxt = kids[zj]; break; }
+                }
+                baseTree = nxt;  // null → whole zoomed subtree is "new"
+            }
+        }
+    }
+
     flamegraphRects = [];
-    const maxDepth = flattenTree(data, 0, 0, width, flamegraphRects, totalSamples);
+    const maxDepth = flattenTree(data, 0, 0, width, flamegraphRects, totalSamples,
+                                 baseTree, baseTotal);
     const height = (maxDepth + 1) * rowHeight + 4;
 
     let html = '';
@@ -1076,7 +1309,9 @@ function renderFlamegraph(data, totalSamples) {
     for (let idx = 0; idx < flamegraphRects.length; idx++) {
         const r = flamegraphRects[idx];
         const inlined = r.inlined;
-        const color = fgModuleColor(r.name, r.module || '', inlined);
+        const color = (r.basePct !== null && r.basePct !== undefined)
+            ? fgDiffColor(r.percent - r.basePct)
+            : fgModuleColor(r.name, r.module || '', inlined);
         const y = height - (r.depth + 1) * rowHeight;
         const inlinedAttr = inlined ? ' data-inlined="1"' : '';
 
@@ -1113,8 +1348,14 @@ function renderFlamegraph(data, totalSamples) {
             if (!rect) return;
             var mod = rect.module || '';
             var inlinedTag = rect.inlined ? ' [inlined]' : '';
+            var diffTag = '';
+            if (rect.basePct !== null && rect.basePct !== undefined) {
+                var dd = rect.percent - rect.basePct;
+                diffTag = '  \u0394 ' + (dd >= 0 ? '+' : '') + dd.toFixed(2) +
+                    'pp vs baseline (was ' + rect.basePct.toFixed(2) + '%)';
+            }
             infoBar.textContent = rect.name + inlinedTag + '  (' + rect.value + ' samples, ' +
-                rect.percent.toFixed(2) + '%)' + (mod ? '  \u2014 ' + mod : '');
+                rect.percent.toFixed(2) + '%)' + diffTag + (mod ? '  \u2014 ' + mod : '');
             infoBar.classList.add('fg-info-active');
         });
         svgEl.addEventListener('mouseleave', function() {
@@ -1187,20 +1428,39 @@ function renderFlamegraph(data, totalSamples) {
     if (searchInput && searchInput.value.trim()) {
         applyFlamegraphSearch(searchInput.value.trim());
     }
+
+    fgStale = false;
+    updateUrlHash();  // zoom path is part of the shareable URL
 }
 
-function flattenTree(node, depth, x, width, rects, totalSamples) {
+// baseNode/baseTotal: optional baseline tree walked in parallel (diff
+// mode). Rects get basePct — the same stack path's share of the baseline
+// (0 when the path is new; null when diff is off).
+function flattenTree(node, depth, x, width, rects, totalSamples, baseNode, baseTotal) {
     const percent = totalSamples > 0 ? (node.value / totalSamples * 100) : 0;
+    let basePct = null;
+    if (baseTotal > 0) basePct = baseNode ? (baseNode.value / baseTotal * 100) : 0;
     rects.push({ name: node.name, value: node.value, percent, depth, x, w: width,
-                 node, inlined: !!node.inlined, module: node.module || '' });
+                 node, inlined: !!node.inlined, module: node.module || '', basePct });
 
     let maxDepth = depth;
     let childX = x;
     if (node.children) {
+        // One-time child index on the baseline node keeps matching O(1)
+        let bmap = null;
+        if (baseTotal > 0 && baseNode && baseNode.children) {
+            if (!baseNode._dmap) {
+                baseNode._dmap = {};
+                baseNode.children.forEach(bc => { baseNode._dmap[bc.name] = bc; });
+            }
+            bmap = baseNode._dmap;
+        }
         node.children.forEach(child => {
             const childWidth = (child.value / node.value) * width;
             if (childWidth >= 1) {
-                const d = flattenTree(child, depth + 1, childX, childWidth, rects, totalSamples);
+                const baseChild = bmap ? (bmap[child.name] || null) : null;
+                const d = flattenTree(child, depth + 1, childX, childWidth, rects,
+                                      totalSamples, baseChild, baseTotal);
                 maxDepth = Math.max(maxDepth, d);
             }
             childX += childWidth;
@@ -1312,18 +1572,37 @@ function renderSessionsList(sessions) {
             '<td>' + s.total_samples + '</td>' +
             '<td>' + escapeHtml((s.event_types || []).join(', ')) + '</td>' +
             '<td>' + escapeHtml(s.timestamp || '') + '</td>' +
-            '<td><button class="replay-btn" data-session="' + escapeAttr(s.session_id) + '">Replay</button></td>' +
+            '<td><button class="replay-btn" data-session="' + escapeAttr(s.session_id) + '">Replay</button> ' +
+            '<button class="replay-btn session-baseline-btn" data-session="' + escapeAttr(s.session_id) +
+            '" title="Compare the live profile against this session">Baseline</button></td>' +
             '</tr>';
     });
     html += '</tbody></table>';
     container.innerHTML = html;
 
-    container.querySelectorAll('.replay-btn').forEach(btn => {
+    container.querySelectorAll('.replay-btn:not(.session-baseline-btn)').forEach(btn => {
         btn.addEventListener('click', () => replaySession(btn.dataset.session));
+    });
+    container.querySelectorAll('.session-baseline-btn').forEach(btn => {
+        btn.addEventListener('click', () => baselineFromSession(btn.dataset.session));
     });
 }
 
-function replaySession(sessionId) {
+function baselineFromSession(sessionId) {
+    fetch('/api/sessions/' + encodeURIComponent(sessionId))
+        .then(r => r.json())
+        .then(data => {
+            if (data.error) {
+                showError('Baseline error: ' + data.error);
+                return;
+            }
+            setBaseline(data.per_event, sessionId);
+            switchToTab('functions');
+        })
+        .catch(err => showError('Failed to load baseline session: ' + err));
+}
+
+function replaySession(sessionId, keepTab) {
     fetch('/api/sessions/' + encodeURIComponent(sessionId))
         .then(r => r.json())
         .then(data => {
@@ -1334,7 +1613,12 @@ function replaySession(sessionId) {
             state.perEvent = data.per_event;
             state.eventTypes = data.metadata.event_types || [];
             state.perfStat = data.metadata.perf_stat || {};
-            state.selectedEvent = state.eventTypes[0] || 'cycles';
+            if (!state.eventTypes.includes(state.selectedEvent)) {
+                state.selectedEvent = state.eventTypes[0] || 'cycles';
+            }
+            // Time windows apply to the live sample buffer only
+            state.timeWindow = null;
+            document.getElementById('time-window-chip').classList.add('hidden');
             state.totalSamples = data.metadata.total_samples;
             state.flamegraphZoom = null;
             state.flamegraphZoomPath = [];
@@ -1347,7 +1631,8 @@ function replaySession(sessionId) {
             updateEventSelector();
             updateStatBar();
             renderCurrentEvent();
-            switchToTab('functions');
+            // keepTab: a URL deep link already picked the tab
+            if (!keepTab) switchToTab('functions');
         })
         .catch(err => showError('Failed to load session: ' + err));
 }
@@ -2349,24 +2634,26 @@ function updateMetricsSparklines() {
 
     var warnBg = themeColor('--spark-warn-bg');
     var critBg = themeColor('--spark-crit-bg');
+    var sysTs = state.metricsSystem.map(function(s) { return s.ts; });
+    var procTs = state.metricsProcess.map(function(p) { return p.ts; });
     var charts = [
-        { id: 'sp-cpu', label: 'CPU %', data: state.metricsSystem.map(function(s) { return s.cpu ? s.cpu.overall_pct : 0; }),
+        { id: 'sp-cpu', label: 'CPU %', ts: sysTs, data: state.metricsSystem.map(function(s) { return s.cpu ? s.cpu.overall_pct : 0; }),
           color: themeColor('--spark-cpu'), min: 0, max: 100, thresholds: [{value:80,color:warnBg},{value:95,color:critBg}] },
-        { id: 'sp-mem', label: 'Memory %', data: state.metricsSystem.map(function(s) { return s.mem ? s.mem.used_pct : 0; }),
+        { id: 'sp-mem', label: 'Memory %', ts: sysTs, data: state.metricsSystem.map(function(s) { return s.mem ? s.mem.used_pct : 0; }),
           color: themeColor('--spark-mem'), min: 0, max: 100, thresholds: [{value:85,color:warnBg},{value:95,color:critBg}] },
-        { id: 'sp-temp', label: 'Temperature', data: state.metricsSystem.map(function(s) { return s.temp_c != null ? s.temp_c : 0; }),
+        { id: 'sp-temp', label: 'Temperature', ts: sysTs, data: state.metricsSystem.map(function(s) { return s.temp_c != null ? s.temp_c : 0; }),
           color: themeColor('--spark-temp'), min: 20, max: 110, thresholds: [{value:80,color:warnBg},{value:95,color:critBg}] },
     ];
 
     // Add process charts if we have process data
     if (state.metricsProcess.length > 1) {
         charts.push({
-            id: 'sp-proc-cpu', label: 'Process CPU %',
+            id: 'sp-proc-cpu', label: 'Process CPU %', ts: procTs,
             data: state.metricsProcess.map(function(p) { return p.cpu_pct || 0; }),
             color: themeColor('--spark-proc-cpu'), min: 0, max: 100, thresholds: [{value:80,color:warnBg}]
         });
         charts.push({
-            id: 'sp-proc-rss', label: 'Process RSS (MB)',
+            id: 'sp-proc-rss', label: 'Process RSS (MB)', ts: procTs,
             data: state.metricsProcess.map(function(p) { return (p.rss_kb || 0) / 1024; }),
             color: themeColor('--spark-proc-rss'), min: 0, max: null
         });
@@ -2383,39 +2670,159 @@ function updateMetricsSparklines() {
                 '<div class="sp-chart"></div><div class="sp-hover"></div>';
             panel.appendChild(div);
             el = div;
-            _wireSparklineHover(el);
+            _wireSparklinePanel(el);
         }
-        el._sparkData = c.data.filter(function(v) { return v != null; });
+        // Filter nulls, keeping values and timestamps aligned
+        var vals = [];
+        var tss = [];
+        c.data.forEach(function(v, i) {
+            if (v != null) {
+                vals.push(v);
+                tss.push(c.ts ? c.ts[i] : null);
+            }
+        });
+        el._sparkData = vals;
+        el._sparkTs = tss;
         var chartEl = el.querySelector('.sp-chart');
-        renderSparkline(chartEl, el._sparkData, {
+        renderSparkline(chartEl, vals, {
             width: 300, height: 50, color: c.color,
             min: c.min, max: c.max, thresholds: c.thresholds || []
         });
+        _drawWindowOverlay(el, chartEl);
     });
 }
 
-// Hover readout: show the value under the cursor in the panel's .sp-hover.
-// Samples arrive on the agent's metrics interval (default 2s), newest last.
-function _wireSparklineHover(panelEl) {
+// Hover readout + drag-to-select time window. All panels share the same
+// wall-clock axis, so a drag on any of them defines the same window.
+function _wireSparklinePanel(panelEl) {
     var chartEl = panelEl.querySelector('.sp-chart');
     var hoverEl = panelEl.querySelector('.sp-hover');
     if (!chartEl || !hoverEl) return;
+    var dragStartX = null;
+
+    function idxAtX(clientX, rect, len) {
+        var idx = Math.round((clientX - rect.left) / rect.width * (len - 1));
+        return Math.max(0, Math.min(len - 1, idx));
+    }
+
     chartEl.addEventListener('mousemove', function(ev) {
         var data = panelEl._sparkData || [];
         if (data.length < 2) return;
         var r = chartEl.getBoundingClientRect();
         if (r.width <= 0) return;
-        var idx = Math.round((ev.clientX - r.left) / r.width * (data.length - 1));
-        idx = Math.max(0, Math.min(data.length - 1, idx));
+        var idx = idxAtX(ev.clientX, r, data.length);
         var v = data[idx];
-        var agoSec = (data.length - 1 - idx) * 2;
-        hoverEl.textContent = (typeof v === 'number' ? v.toFixed(1) : v) +
-            (agoSec > 0 ? '  (' + agoSec + 's ago)' : '  (now)');
+        var ts = panelEl._sparkTs || [];
+        var ago = '';
+        if (ts[idx] != null && ts[ts.length - 1] != null) {
+            var agoSec = Math.round(ts[ts.length - 1] - ts[idx]);
+            ago = agoSec > 0 ? '  (' + agoSec + 's ago)' : '  (now)';
+        }
+        hoverEl.textContent = (typeof v === 'number' ? v.toFixed(1) : v) + ago;
+
+        if (dragStartX !== null) _drawTempOverlay(chartEl, dragStartX, ev.clientX);
     });
+
+    chartEl.addEventListener('mousedown', function(ev) {
+        if (state.isReplayMode) return;
+        dragStartX = ev.clientX;
+        ev.preventDefault();
+    });
+
+    chartEl.addEventListener('mouseup', function(ev) {
+        if (dragStartX === null) return;
+        var x0 = Math.min(dragStartX, ev.clientX);
+        var x1 = Math.max(dragStartX, ev.clientX);
+        dragStartX = null;
+        _removeTempOverlay(chartEl);
+        if (x1 - x0 < 8) return;  // click, not a drag
+
+        var ts = panelEl._sparkTs || [];
+        if (ts.length < 2 || ts[0] == null) return;
+        var r = chartEl.getBoundingClientRect();
+        var t0 = ts[idxAtX(x0, r, ts.length)];
+        var t1 = ts[idxAtX(x1, r, ts.length)];
+        if (t0 != null && t1 != null && t1 > t0) setTimeWindow(t0, t1);
+    });
+
     chartEl.addEventListener('mouseleave', function() {
         hoverEl.textContent = '';
+        dragStartX = null;
+        _removeTempOverlay(chartEl);
     });
 }
+
+function _drawTempOverlay(chartEl, xa, xb) {
+    var el = chartEl.querySelector('.sp-select-temp');
+    if (!el) {
+        el = document.createElement('div');
+        el.className = 'sp-select sp-select-temp';
+        chartEl.appendChild(el);
+    }
+    var r = chartEl.getBoundingClientRect();
+    el.style.left = Math.max(0, Math.min(xa, xb) - r.left) + 'px';
+    el.style.width = Math.abs(xb - xa) + 'px';
+}
+
+function _removeTempOverlay(chartEl) {
+    var el = chartEl.querySelector('.sp-select-temp');
+    if (el) el.remove();
+}
+
+// Persistent highlight of the active time window on each sparkline
+function _drawWindowOverlay(panelEl, chartEl) {
+    var old = chartEl.querySelector('.sp-select:not(.sp-select-temp)');
+    if (old) old.remove();
+    if (!state.timeWindow) return;
+    var ts = panelEl._sparkTs || [];
+    if (ts.length < 2 || ts[0] == null) return;
+    var t0 = ts[0];
+    var t1 = ts[ts.length - 1];
+    if (t1 <= t0) return;
+    var a = Math.max(0, (state.timeWindow.start - t0) / (t1 - t0));
+    var b = Math.min(1, (state.timeWindow.end - t0) / (t1 - t0));
+    if (b <= 0 || a >= 1 || b <= a) return;
+    var div = document.createElement('div');
+    div.className = 'sp-select';
+    div.style.left = (a * 100) + '%';
+    div.style.width = ((b - a) * 100) + '%';
+    chartEl.appendChild(div);
+}
+
+// --- Time window (timeline scrubbing) ---
+
+function _fmtClock(t) {
+    var d = new Date(t * 1000);
+    function pad(n) { return ('0' + n).slice(-2); }
+    return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+}
+
+function updateTimeWindowChip(sampleCount) {
+    if (!state.timeWindow) return;
+    var txt = _fmtClock(state.timeWindow.start) + '-' + _fmtClock(state.timeWindow.end);
+    if (sampleCount !== undefined) txt += ' · ' + sampleCount + ' samples';
+    document.getElementById('time-window-text').textContent = txt;
+    document.getElementById('time-window-chip').classList.remove('hidden');
+}
+
+function setTimeWindow(start, end) {
+    state.timeWindow = { start: start, end: end };
+    state.flamegraphZoom = null;
+    state.flamegraphZoomPath = [];
+    state.flamegraphZoomNames = [];
+    updateTimeWindowChip();
+    renderCurrentEvent();
+    updateMetricsSparklines();
+}
+
+function clearTimeWindow() {
+    state.timeWindow = null;
+    document.getElementById('time-window-chip').classList.add('hidden');
+    renderCurrentEvent();
+    updateMetricsSparklines();
+}
+
+document.getElementById('time-window-clear').addEventListener('click', clearTimeWindow);
 
 function updateNetworkPanel(current, previous) {
     var panel = document.getElementById('metrics-network');
@@ -2511,6 +2918,28 @@ function updateDiskPanel(current, previous) {
     btn.addEventListener('click', function(e) {
         e.stopPropagation();
         pop.classList.toggle('hidden');
+        if (!pop.classList.contains('hidden')) {
+            // An argless configure_metrics reads the agent's current
+            // settings without changing them — sync the checkboxes
+            fetch('/api/agent/command', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ cmd: 'configure_metrics' }),
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (!data.ok) return;
+                if (data.network !== undefined)
+                    document.getElementById('msp-network').checked = !!data.network;
+                if (data.disk !== undefined)
+                    document.getElementById('msp-disk').checked = !!data.disk;
+                if (data.threads !== undefined)
+                    document.getElementById('msp-threads').checked = !!data.threads;
+                if (data.interval)
+                    document.getElementById('msp-interval').value = String(data.interval);
+            })
+            .catch(function() {});
+        }
     });
     pop.addEventListener('click', function(e) { e.stopPropagation(); });
     document.addEventListener('click', function() { pop.classList.add('hidden'); });
@@ -2530,6 +2959,7 @@ function updateDiskPanel(current, previous) {
                 args: {
                     network: document.getElementById('msp-network').checked,
                     disk: document.getElementById('msp-disk').checked,
+                    threads: document.getElementById('msp-threads').checked,
                     interval: parseInt(document.getElementById('msp-interval').value) || 2,
                 },
             }),
@@ -2551,6 +2981,12 @@ function updateDiskPanel(current, previous) {
                     state.metricsPrevNetwork = null;
                     var np = document.getElementById('metrics-network');
                     if (np) np.innerHTML = '';
+                }
+                if (data.threads === false || data.threads === undefined) {
+                    state.metricsThreads = null;
+                    state.metricsPrevThreads = null;
+                    state.threadLiveCpu = {};
+                    applyThreadLiveCpuCells();
                 }
             } else {
                 status.textContent = data.error || 'No agent connected';
@@ -2788,6 +3224,45 @@ function loadReplayMetrics(metrics) {
 
 var _threadDetailState = { tid: null, comm: '', data: null };
 
+// --- Live per-thread CPU (opt-in agent metric) ---
+// The agent sends cumulative ticks per thread; CPU% comes from the delta
+// between consecutive snapshots divided by wall time × clk_tck.
+function updateThreadLiveCpu(cur, prev) {
+    var map = {};
+    if (prev && cur.ts > prev.ts) {
+        var dt = cur.ts - prev.ts;
+        var clk = cur.clk_tck || 100;
+        var prevByTid = {};
+        (prev.threads || []).forEach(function(t) { prevByTid[t.tid] = t; });
+        (cur.threads || []).forEach(function(t) {
+            var p = prevByTid[t.tid];
+            if (p && t.ticks >= p.ticks) {
+                map[t.tid] = {
+                    pct: (t.ticks - p.ticks) / (dt * clk) * 100,
+                    state: t.state || '',
+                };
+            }
+        });
+    }
+    state.threadLiveCpu = map;
+    applyThreadLiveCpuCells();
+}
+
+function applyThreadLiveCpuCells() {
+    var cells = document.querySelectorAll('#threads-overview .live-cpu[data-live-tid]');
+    cells.forEach(function(cell) {
+        var info = state.threadLiveCpu[parseInt(cell.dataset.liveTid)];
+        if (info) {
+            cell.textContent = info.pct.toFixed(1) + '%' +
+                (info.state ? ' ' + info.state : '');
+            cell.classList.toggle('live-hot', info.pct >= 80);
+        } else {
+            cell.textContent = '--';
+            cell.classList.remove('live-hot');
+        }
+    });
+}
+
 function renderThreadsTab() {
     var overview = document.getElementById('threads-overview');
     var detail = document.getElementById('thread-detail');
@@ -2818,8 +3293,10 @@ function renderThreadOverview(data) {
     detail.classList.add('hidden');
     _threadDetailState.tid = null;
 
+    var haveLive = Object.keys(state.threadLiveCpu).length > 0;
     var html = '<table class="threads-table"><thead><tr>' +
         '<th>Thread</th><th>TID</th><th>Samples</th><th>CPU %</th>' +
+        (haveLive ? '<th>Live CPU</th>' : '') +
         '<th>Top Function</th><th>Top Functions</th></tr></thead><tbody>';
 
     data.threads.forEach(function(t) {
@@ -2835,6 +3312,7 @@ function renderThreadOverview(data) {
             '<td>' + t.tid + '</td>' +
             '<td>' + t.samples.toLocaleString() + '</td>' +
             '<td><span class="thread-cpu-bar" style="width:' + barW + 'px"></span>' + t.percent + '%</td>' +
+            (haveLive ? '<td class="live-cpu" data-live-tid="' + t.tid + '">--</td>' : '') +
             '<td><code>' + escapeHtml(t.top_function || '-') + '</code></td>' +
             '<td class="thread-top-funcs">' + topFuncsHtml + '</td>' +
             '</tr>';
@@ -2845,6 +3323,7 @@ function renderThreadOverview(data) {
         data.threads.length + ' threads</p>';
 
     overview.innerHTML = html;
+    applyThreadLiveCpuCells();
 
     // Click handlers
     overview.querySelectorAll('.thread-row').forEach(function(row) {
@@ -3138,6 +3617,9 @@ function renderThreadSourceView(container, filePath, lines) {
 
 // =====================================================================
 
+// Restore any shared/bookmarked view first (tab/event/tid/zoom/session)
+applyUrlHash();
+
 fetch('/api/status')
     .then(function(r) { return r.json(); })
     .then(function(data) {
@@ -3147,7 +3629,8 @@ fetch('/api/status')
             showProfilingView();
             refreshControlBar();
         }
-        // Else: stay on landing page
+        // Else: stay on landing page (unless the URL hash already
+        // navigated somewhere)
     })
     .catch(function() {});
 

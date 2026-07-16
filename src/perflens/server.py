@@ -81,6 +81,10 @@ class ProfilingState:
 
     def add_samples(self, new_samples, perf_stat=None):
         """Add samples and return (total_count, event_types_copy)."""
+        # Stamp arrival time — /api/time-window filters the raw deque by it
+        now = time.time()
+        for s in new_samples:
+            s['recv_ts'] = now
         with self.lock:
             self.all_samples.extend(new_samples)
             self.chunk_count += 1
@@ -130,6 +134,7 @@ class MetricsState:
         self.process_history = []
         self.network_history = []
         self.disk_history = []
+        self.threads_history = []
         self._max = max_entries
 
     def add(self, metrics_type, metrics):
@@ -142,6 +147,8 @@ class MetricsState:
                 self._append(self.network_history, metrics)
             elif metrics_type == 'disk':
                 self._append(self.disk_history, metrics)
+            elif metrics_type == 'threads':
+                self._append(self.threads_history, metrics)
 
     def _append(self, history, entry):
         history.append(entry)
@@ -159,6 +166,8 @@ class MetricsState:
                 source = self.network_history
             elif metrics_type == 'disk':
                 source = self.disk_history
+            elif metrics_type == 'threads':
+                source = self.threads_history
             else:
                 return []
             if start_ts is None and end_ts is None:
@@ -178,6 +187,8 @@ class MetricsState:
                 result['network'] = self.network_history[-1]
             if self.disk_history:
                 result['disk'] = self.disk_history[-1]
+            if self.threads_history:
+                result['threads'] = self.threads_history[-1]
             return result
 
     def get_summary(self):
@@ -218,6 +229,8 @@ class MetricsState:
             }
             if self.disk_history:
                 snap['disk'] = list(self.disk_history)
+            if self.threads_history:
+                snap['threads'] = list(self.threads_history)
             return snap
 
     def reset(self):
@@ -226,6 +239,7 @@ class MetricsState:
             self.process_history.clear()
             self.network_history.clear()
             self.disk_history.clear()
+            self.threads_history.clear()
 
 
 # Wire protocol flags (must match agent)

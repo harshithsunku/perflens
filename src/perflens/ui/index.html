@@ -254,6 +254,7 @@
                     <div class="msp-title">Agent metrics collection</div>
                     <label class="msp-row"><input type="checkbox" id="msp-network" checked> Network stats</label>
                     <label class="msp-row"><input type="checkbox" id="msp-disk"> Disk I/O <span class="msp-hint">(off by default)</span></label>
+                    <label class="msp-row"><input type="checkbox" id="msp-threads"> Per-thread CPU <span class="msp-hint">(off by default)</span></label>
                     <label class="msp-row">Interval
                         <select id="msp-interval">
                             <option value="1">1s</option>
@@ -315,6 +316,17 @@
                 <select id="thread-filter" class="hidden">
                     <option value="">All threads</option>
                 </select>
+                <span id="time-window-chip" class="tw-chip hidden">
+                    <span id="time-window-text"></span>
+                    <button id="time-window-clear" title="Back to full session">&times;</button>
+                </span>
+                <span class="diff-controls">
+                    <button id="diff-set-btn" class="diff-btn" title="Snapshot the current profile as a comparison baseline">Set Baseline</button>
+                    <label id="diff-toggle-wrap" class="diff-toggle-wrap hidden">
+                        <input type="checkbox" id="diff-toggle"> Diff vs <span id="diff-label"></span>
+                    </label>
+                    <button id="diff-clear-btn" class="diff-btn hidden" title="Clear baseline">&times;</button>
+                </span>
             </div>
 
             <div id="source-banner">
@@ -342,11 +354,12 @@
                             <th>Module</th>
                             <th class="sortable active" data-sort="self">Self %</th>
                             <th class="sortable" data-sort="total">Total %</th>
+                            <th class="diff-col">&Delta; Self</th>
                             <th>Samples</th>
                         </tr>
                     </thead>
                     <tbody id="function-tbody">
-                        <tr><td colspan="6" class="empty">Waiting for data...</td></tr>
+                        <tr><td colspan="7" class="empty">Waiting for data...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -604,6 +617,26 @@ perflens-server --addr2line /opt/toolchain/bin/arm-linux-gnueabihf-addr2line \
                 </section>
 
                 <section class="docs-section">
+                    <h3>Differential View</h3>
+                    <p>Click <strong>Set Baseline</strong> (next to the event selector) to snapshot the current profile, or use <strong>Baseline</strong> on any saved session to compare the live profile against a previous run. With the diff toggle on:</p>
+                    <ul class="docs-list">
+                        <li>The function table gains a <strong>&Delta; Self</strong> column: percentage-point change vs the baseline (red = grew, green = shrank, <em>new</em> = not in baseline).</li>
+                        <li>The flame graph recolors by change: red frames grew vs the baseline, blue shrank, grey unchanged. Hover shows the exact delta.</li>
+                    </ul>
+                    <p>Diff applies to the full view; it pauses while a thread filter or time window is active.</p>
+                </section>
+
+                <section class="docs-section">
+                    <h3>Timeline Scrubbing</h3>
+                    <p>Drag across any Device Health sparkline to select a time range — the Functions table and Flame Graph rebuild from only the samples received in that window (e.g. click-drag over a CPU spike to see exactly what ran during it). A chip next to the event selector shows the active window and its sample count; click &times; to return to the full session. Limited to the raw-sample ring buffer (<code>--max-samples</code>) and live sessions.</p>
+                </section>
+
+                <section class="docs-section">
+                    <h3>Shareable URLs</h3>
+                    <p>The active tab, event, thread filter, flame-graph zoom path, and replayed session are reflected in the URL hash — refresh keeps your place, and the link can be pasted to a teammate looking at the same server.</p>
+                </section>
+
+                <section class="docs-section">
                     <h3>Thread Filtering</h3>
                     <p>When profiling multi-threaded programs, use the <strong>Thread</strong> dropdown next to the event selector to filter all views by a specific thread. The dropdown shows thread names (from <code>pthread_setname_np</code> / <code>prctl</code>) and TIDs.</p>
                     <p>The dedicated <strong>Threads tab</strong> provides a full overview: every thread listed with its sample count, CPU share, and hottest function. Click any row to see that thread's complete flamegraph, function breakdown, and line-level source annotation.</p>
@@ -612,7 +645,7 @@ perflens-server --addr2line /opt/toolchain/bin/arm-linux-gnueabihf-addr2line \
                 <section class="docs-section">
                     <h3>Device Health Strip</h3>
                     <p>When the agent sends system metrics, a collapsible strip shows live CPU, memory, temperature, load, network, and per-process stats with sparkline charts. Hover a sparkline to read the value at that point in time.</p>
-                    <p>The gear button opens <strong>metrics settings</strong>: toggle network stats, enable the opt-in <strong>disk I/O</strong> collector (off by default to keep the agent light on embedded devices), and change the collection interval — all applied to the live agent without restarting it.</p>
+                    <p>The gear button opens <strong>metrics settings</strong>: toggle network stats, enable the opt-in <strong>disk I/O</strong> and <strong>per-thread CPU</strong> collectors (both off by default to keep the agent light on embedded devices), and change the collection interval — all applied to the live agent without restarting it. With per-thread CPU enabled, the Threads tab gains a <strong>Live CPU</strong> column updated in real time.</p>
                 </section>
 
                 <section class="docs-section">
@@ -707,6 +740,7 @@ perflens-server --addr2line /opt/toolchain/bin/arm-linux-gnueabihf-addr2line \
                             <tr><td><code>/api/source</code></td><td>GET</td><td>Annotated source (<code>?file=&amp;event=&amp;tid=</code>)</td></tr>
                             <tr><td><code>/api/thread-view</code></td><td>GET</td><td>Per-thread flamegraph + functions (<code>?event=&amp;tid=</code>)</td></tr>
                             <tr><td><code>/api/thread-summary</code></td><td>GET</td><td>All threads overview (<code>?event=</code>)</td></tr>
+                            <tr><td><code>/api/time-window</code></td><td>GET</td><td>Flamegraph + functions for a time range (<code>?event=&amp;start=&amp;end=</code>)</td></tr>
                             <tr><td><code>/api/config/toolchain</code></td><td>POST</td><td>Set toolchain prefix and sysroot</td></tr>
                             <tr><td><code>/api/config/binary</code></td><td>POST</td><td>Set binary path</td></tr>
                             <tr><td><code>/api/config/source</code></td><td>POST</td><td>Set source directory</td></tr>

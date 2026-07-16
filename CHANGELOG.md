@@ -9,6 +9,23 @@ releases may break APIs between minor versions when needed.
 
 ### Added
 
+- **Differential view** — snapshot the live profile ("Set Baseline") or
+  pick any saved session as the baseline; the function table gains a
+  Δ Self column and the flame graph recolors by change (red = grew,
+  blue = shrank, grey = unchanged), with exact deltas on hover.
+- **Timeline scrubbing** — drag across any Device Health sparkline to
+  restrict the Functions table and Flame Graph to samples received in
+  that window (new `GET /api/time-window`); samples are stamped with
+  arrival time on receipt.
+- **Opt-in per-thread CPU metrics** — the agent reports tid/comm/state/
+  cumulative ticks for every thread of the profiled process
+  (`configure_metrics {"threads": true}`, off by default); the Threads
+  tab shows a real-time Live CPU column.
+- **Shareable URLs** — tab, event, thread filter, flame-graph zoom path,
+  and replayed session live in the URL hash and survive refresh.
+- **Metrics settings sync** — opening the gear popover reads the
+  agent's current collection settings instead of guessing.
+
 - **Opt-in disk I/O metrics** — the agent can now report per-device
   throughput/IOPS (`/proc/diskstats`, partitions folded into their
   disk) and per-process read/write bytes (`/proc/<pid>/io`). Off by

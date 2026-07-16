@@ -1557,6 +1557,7 @@ struct agent_state {
     int metrics_interval;       /* seconds */
     int metrics_network;        /* include network stats */
     int metrics_disk;           /* include disk I/O stats (off by default) */
+    int metrics_threads;        /* include per-thread stats (off by default) */
 
     /* Command queue */
     struct cmd_queue cmdq;
@@ -1581,7 +1582,8 @@ static void agent_state_init(struct agent_state *a)
     a->metrics_enabled = 1;
     a->metrics_interval = 2;
     a->metrics_network = 1;
-    a->metrics_disk = 0;   /* extra cost on embedded targets — opt-in */
+    a->metrics_disk = 0;    /* extra cost on embedded targets — opt-in */
+    a->metrics_threads = 0; /* opt-in, same reasoning */
     cmdq_init(&a->cmdq);
 }
 
@@ -2175,6 +2177,86 @@ static int collect_disk_metrics(metrics_collector_t *mc, char *buf, size_t bufsz
     return off;
 }
 
+/* Per-thread stats (opt-in via configure_metrics {"threads": true}):
+ * tid, comm, state, and cumulative CPU ticks for every thread of the
+ * profiled process. The UI computes per-thread CPU%% from consecutive
+ * snapshots using the included clk_tck. Capped at 64 threads. */
+static int collect_thread_metrics(metrics_collector_t *mc, char *buf, size_t bufsz)
+{
+    if (mc->pid <= 0) return -1;
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/task", mc->pid);
+    DIR *d = opendir(path);
+    if (!d) return -1;
+
+    int off = snprintf(buf, bufsz,
+        "{\"ts\":%.3f,\"type\":\"threads\",\"pid\":%d,\"clk_tck\":%ld,"
+        "\"threads\":[", get_timestamp(), mc->pid, mc->clk_tck);
+    int count = 0;
+    struct dirent *ent;
+
+    while ((ent = readdir(d)) != NULL && count < 64) {
+        char *end;
+        int tid = (int)strtol(ent->d_name, &end, 10);
+        if (*end != '\0' || tid <= 0) continue;
+
+        char tpath[96];
+        snprintf(tpath, sizeof(tpath), "/proc/%d/task/%d/stat", mc->pid, tid);
+        FILE *f = fopen(tpath, "r");
+        if (!f) continue;
+        char line[1024];
+        char *got = fgets(line, sizeof(line), f);
+        fclose(f);
+        if (!got) continue;
+
+        /* comm between parens (may contain spaces); fields after ')' */
+        char *pstart = strchr(line, '(');
+        char *pend = strrchr(line, ')');
+        if (!pstart || !pend || pend <= pstart) continue;
+        char comm[64];
+        size_t clen = (size_t)(pend - pstart - 1);
+        if (clen >= sizeof(comm)) clen = sizeof(comm) - 1;
+        memcpy(comm, pstart + 1, clen);
+        comm[clen] = '\0';
+
+        char *p = pend + 2;
+        char tstate = (*p >= 'A' && *p <= 'z') ? *p : '?';
+        unsigned long utime = 0, stime = 0;
+        int field = 3;
+        while (*p && field <= 15) {
+            while (*p == ' ') p++;
+            if (*p == '\0') break;
+            if (field == 14) {
+                utime = strtoul(p, NULL, 10);
+            } else if (field == 15) {
+                stime = strtoul(p, NULL, 10);
+                break;
+            }
+            while (*p && *p != ' ') p++;
+            field++;
+        }
+
+        char esc_comm[128];
+        json_escape(esc_comm, sizeof(esc_comm), comm);
+
+        char entry[224];
+        int elen = snprintf(entry, sizeof(entry),
+            "%s{\"tid\":%d,\"comm\":\"%s\",\"state\":\"%c\",\"ticks\":%lu}",
+            count > 0 ? "," : "", tid, esc_comm, tstate, utime + stime);
+        if (elen < 0 || (size_t)elen >= sizeof(entry)) continue;
+        if ((size_t)off + (size_t)elen + 4 > bufsz) break;
+        memcpy(buf + off, entry, (size_t)elen);
+        off += elen;
+        count++;
+    }
+    closedir(d);
+    if (count == 0) return -1;
+
+    memcpy(buf + off, "]}", 3);
+    off += 2;
+    return off;
+}
+
 static void *metrics_thread_fn(void *arg)
 {
     struct agent_state *a = (struct agent_state *)arg;
@@ -2186,12 +2268,13 @@ static void *metrics_thread_fn(void *arg)
 
     while (!g_shutdown && !a->session_done) {
         /* Snapshot config + pid under the lock once per tick */
-        int enabled, interval, network, disk, pid = 0;
+        int enabled, interval, network, disk, threads, pid = 0;
         pthread_mutex_lock(&a->state_lock);
         enabled  = a->metrics_enabled;
         interval = a->metrics_interval;
         network  = a->metrics_network;
         disk     = a->metrics_disk;
+        threads  = a->metrics_threads;
         if (a->state == AGENT_PROFILING || a->state == AGENT_PAUSED)
             pid = a->pid;
         pthread_mutex_unlock(&a->state_lock);
@@ -2235,6 +2318,14 @@ static void *metrics_thread_fn(void *arg)
         /* Disk I/O metrics (opt-in) */
         if (disk) {
             len = collect_disk_metrics(&mc, buf, sizeof(buf));
+            if (len > 0) {
+                if (agent_send_metrics(a, buf, len) < 0) break;
+            }
+        }
+
+        /* Per-thread metrics (opt-in, needs a profiled pid) */
+        if (threads && mc.pid > 0) {
+            len = collect_thread_metrics(&mc, buf, sizeof(buf));
             if (len > 0) {
                 if (agent_send_metrics(a, buf, len) < 0) break;
             }
@@ -2861,22 +2952,26 @@ static void cmd_configure_metrics(struct agent_state *a, const char *cmd_id,
             a->metrics_network = val;
         if (json_get_bool(args, "disk", &val) == 0)
             a->metrics_disk = val;
+        if (json_get_bool(args, "threads", &val) == 0)
+            a->metrics_threads = val;
     }
     int enabled  = a->metrics_enabled;
     int interval = a->metrics_interval;
     int network  = a->metrics_network;
     int disk     = a->metrics_disk;
+    int threads  = a->metrics_threads;
     pthread_mutex_unlock(&a->state_lock);
 
     char resp[256];
     snprintf(resp, sizeof(resp),
         "{\"id\":\"%s\",\"ok\":true,\"metrics_enabled\":%s,"
-        "\"interval\":%d,\"network\":%s,\"disk\":%s}",
+        "\"interval\":%d,\"network\":%s,\"disk\":%s,\"threads\":%s}",
         cmd_id,
         enabled ? "true" : "false",
         interval,
         network ? "true" : "false",
-        disk ? "true" : "false");
+        disk ? "true" : "false",
+        threads ? "true" : "false");
     agent_send_response(a, resp);
 }
 

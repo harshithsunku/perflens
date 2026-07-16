@@ -404,6 +404,54 @@ def api_thread_view(request: Request):
     return _json(result, request=request, allow_gzip=True)
 
 
+@router.get('/api/time-window')
+def api_time_window(request: Request):
+    """Flamegraph + function summary restricted to samples received inside
+    [start, end] (unix seconds). Backs the UI's timeline scrubbing: samples
+    are stamped with arrival time, so a window on the Device Health
+    timeline maps to the profile chunks collected in that window. Bounded
+    by the raw-sample ring buffer (--max-samples)."""
+    params = request.query_params
+    event_type = params.get('event', 'cycles')
+    try:
+        start = float(params.get('start', ''))
+        end = float(params.get('end', ''))
+    except ValueError:
+        return _json({'error': 'start/end required (unix seconds)'}, 400)
+    tid = None
+    if params.get('tid'):
+        try:
+            tid = int(params.get('tid'))
+        except ValueError:
+            return _json({'error': 'invalid tid'}, 400)
+
+    with core.state.lock:
+        all_samples = list(core.state.all_samples)
+
+    filtered = filter_samples_by_event(all_samples, event_type)
+    filtered = [s for s in filtered
+                if start <= s.get('recv_ts', 0) <= end]
+    if tid is not None:
+        filtered = [s for s in filtered
+                    if s.get('tid', s.get('pid', 0)) == tid]
+
+    window = {'start': start, 'end': end, 'samples': len(filtered)}
+    if not filtered:
+        return _json({'flamegraph': {'name': 'root', 'value': 0,
+                                     'children': []},
+                      'function_summary': {'total_samples': 0,
+                                           'functions': []},
+                      'window': window})
+
+    mapper = core.state.source_mapper
+    expanded = mapper.expand_inline_frames(filtered) if mapper else filtered
+    return _json({
+        'flamegraph': build_flamegraph_data(expanded),
+        'function_summary': build_function_summary(expanded),
+        'window': window,
+    }, request=request, allow_gzip=True)
+
+
 @router.get('/api/thread-summary')
 def api_thread_summary(request: Request):
     """Overview of all threads with CPU breakdown."""

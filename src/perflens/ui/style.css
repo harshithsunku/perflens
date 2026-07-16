@@ -485,6 +485,92 @@ main {
 }
 #event-select:focus { outline: none; border-color: var(--input-focus); box-shadow: 0 0 0 3px var(--accent-muted); }
 
+/* --- Diff-vs-baseline controls --- */
+.diff-controls {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.diff-btn {
+    background: var(--input-bg);
+    color: var(--text-secondary);
+    border: 1px solid var(--input-border);
+    border-radius: var(--radius-sm);
+    padding: 6px 10px;
+    font-family: inherit;
+    font-size: 12px;
+    cursor: pointer;
+    transition: border-color var(--transition), color var(--transition);
+}
+.diff-btn:hover { color: var(--accent-text); border-color: var(--input-focus); }
+.diff-toggle-wrap {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 12px;
+    cursor: pointer;
+}
+.diff-toggle-wrap #diff-label {
+    color: var(--accent-text);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    max-width: 260px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.diff-toggle-wrap.hidden, #diff-clear-btn.hidden, .tw-chip.hidden { display: none; }
+
+/* Δ column hidden unless the table is in diff mode */
+#function-table th.diff-col, #function-table td.diff-col { display: none; }
+#function-table.diff-mode th.diff-col,
+#function-table.diff-mode td.diff-col { display: table-cell; }
+.diff-up   { color: var(--error); font-family: var(--font-mono); font-size: 12px; }
+.diff-down { color: var(--success); font-family: var(--font-mono); font-size: 12px; }
+.diff-flat { color: var(--text-tertiary); font-family: var(--font-mono); font-size: 12px; }
+.diff-new  { color: var(--warning); font-family: var(--font-mono); font-size: 11px; }
+
+/* --- Time window chip (timeline scrubbing) --- */
+.tw-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--accent-muted);
+    color: var(--accent-text);
+    border: 1px solid var(--input-focus);
+    border-radius: 999px;
+    padding: 4px 6px 4px 12px;
+    font-size: 12px;
+    font-family: var(--font-mono);
+}
+.tw-chip button {
+    background: none;
+    border: none;
+    color: var(--accent-text);
+    font-size: 14px;
+    cursor: pointer;
+    padding: 0 4px;
+    line-height: 1;
+}
+.tw-chip button:hover { color: var(--error); }
+
+/* Drag-selection overlay on sparklines */
+.spark-panel .sp-chart { position: relative; cursor: crosshair; }
+.sp-select {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    background: var(--accent-muted);
+    border-left: 1px solid var(--accent-text);
+    border-right: 1px solid var(--accent-text);
+    pointer-events: none;
+}
+
+/* Live CPU column in the threads overview */
+.live-cpu { font-family: var(--font-mono); }
+.live-cpu.live-hot { color: var(--error); }
+
 /* --- Source banner --- */
 #source-banner {
     background: var(--warning-muted);

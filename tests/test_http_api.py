@@ -284,6 +284,46 @@ def test_thread_summary_and_view(client, core):
                       params={'event': evt, 'tid': 'zz'}).status_code == 400
 
 
+def test_time_window(client, core):
+    """Samples are stamped with arrival time; the window endpoint filters
+    the raw deque by it (timeline scrubbing)."""
+    import time as time_mod
+    samples = _seed_live_state(core)
+    evt = samples[0]['event_type']
+    now = time_mod.time()
+
+    # A window covering "now" holds everything just seeded
+    r = client.get('/api/time-window', params={
+        'event': evt, 'start': now - 60, 'end': now + 60})
+    assert r.status_code == 200
+    body = r.json()
+    assert body['window']['samples'] > 0
+    assert body['function_summary']['total_samples'] == body['window']['samples']
+    assert body['flamegraph']['value'] > 0
+
+    # A window in the past is empty but well-formed
+    r = client.get('/api/time-window', params={
+        'event': evt, 'start': now - 120, 'end': now - 60})
+    body = r.json()
+    assert body['window']['samples'] == 0
+    assert body['function_summary']['total_samples'] == 0
+
+    # Validation
+    assert client.get('/api/time-window',
+                      params={'event': evt}).status_code == 400
+    assert client.get('/api/time-window',
+                      params={'event': evt, 'start': now - 60, 'end': now + 60,
+                              'tid': 'zz'}).status_code == 400
+
+    # tid filter composes with the window
+    tids = {s.get('tid', s.get('pid', 0)) for s in samples
+            if s['event_type'] == evt}
+    tid = next(iter(tids))
+    r = client.get('/api/time-window', params={
+        'event': evt, 'start': now - 60, 'end': now + 60, 'tid': tid})
+    assert r.json()['window']['samples'] > 0
+
+
 def test_source_endpoint_no_mapper(client, core):
     _seed_live_state(core)
     r = client.get('/api/source', params={'file': 'x.c'})
