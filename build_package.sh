@@ -117,8 +117,8 @@ EOF
 # ---------------------------------------------------------------------------
 
 build_agent_c() {
-    if [ ! -f "$REPO_ROOT/agent-c/perflens_agent.c" ]; then
-        err "agent-c/perflens_agent.c not found"
+    if [ ! -f "$REPO_ROOT/agent-c/src/main.c" ]; then
+        err "agent-c/src/main.c not found"
         return 1
     fi
 

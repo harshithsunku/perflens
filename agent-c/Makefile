@@ -14,12 +14,12 @@ CC      = $(CROSS)gcc
 VERSION := $(shell cat ../VERSION 2>/dev/null || echo dev)
 CFLAGS  = -std=c99 -O2 -Wall -Wextra -Wno-unused-parameter \
           -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE \
-          -DAGENT_VERSION=\"$(VERSION)\"
+          -DAGENT_VERSION=\"$(VERSION)\" -I.
 LDFLAGS = -static -lpthread -lm
 
 TARGET  = perflens-agent
-SRCS    = perflens_agent.c vendor/zstd/zstd.c
-OBJS    = perflens_agent.o vendor/zstd/zstd.o
+SRCS    = $(wildcard src/*.c)
+OBJS    = $(SRCS:.c=.o) vendor/zstd/zstd.o
 
 .PHONY: all clean all-cross
 
@@ -29,7 +29,7 @@ $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LDFLAGS)
 	@echo "Built: $@ ($(shell file $@ 2>/dev/null | grep -o 'statically linked' || echo 'check linking'))"
 
-perflens_agent.o: perflens_agent.c
+src/%.o: src/%.c src/agent.h vendor/zstd/zstd.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 vendor/zstd/zstd.o: vendor/zstd/zstd.c vendor/zstd/zstd.h

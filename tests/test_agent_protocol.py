@@ -96,6 +96,25 @@ if sub == 'record':
             sys.stderr.write('invalid event: %%s\n' %% ev)
             sys.exit(1)
     out = opt('-o')
+    if out == '-':
+        if os.environ.get('PERF_SHIM_NO_PIPE'):
+            sys.stderr.write('pipe output not supported\n')
+            sys.exit(1)
+        try:
+            if 'sleep' in args:
+                # probe: bounded run
+                sys.stdout.write('FAKEPERFDATA\n')
+                sys.stdout.flush()
+                time.sleep(0.2)
+            else:
+                # continuous: emit until killed
+                while True:
+                    sys.stdout.write('FAKEPERFDATA\n')
+                    sys.stdout.flush()
+                    time.sleep(0.2)
+        except (BrokenPipeError, IOError):
+            pass
+        sys.exit(0)
     if out:
         with open(out, 'w') as f:
             f.write('FAKEPERFDATA')
@@ -103,6 +122,17 @@ if sub == 'record':
     sys.exit(0)
 
 if sub == 'script':
+    if opt('-i') == '-':
+        if os.environ.get('PERF_SHIM_NO_PIPE'):
+            sys.stderr.write('cannot read from pipe\n')
+            sys.exit(1)
+        try:
+            for _line in sys.stdin:
+                sys.stdout.write(SCRIPT_OUTPUT)
+                sys.stdout.flush()
+        except (BrokenPipeError, IOError):
+            pass
+        sys.exit(0)
     sys.stdout.write(SCRIPT_OUTPUT)
     sys.exit(0)
 
@@ -317,6 +347,8 @@ def test_lifecycle_and_data_frames(harness, target_pid):
     # Probe found exactly what the shim supports
     assert resp['events'] == ['cycles', 'instructions']
     assert resp['callgraph'] == 'fp'
+    # Shim supports pipe mode, so continuous collection is used
+    assert resp['mode'] == 'continuous'
 
     # Data frames flow; zstd payload decompresses to the shim's script
     # output plus the appended PERF_STAT section
@@ -336,6 +368,7 @@ def test_lifecycle_and_data_frames(harness, target_pid):
     assert status['capabilities']['record_events'] == [
         'cycles', 'instructions']
     assert status['capabilities']['stat_only_events'] == ['page-faults']
+    assert status['capabilities']['pipe_mode'] is True
 
     # Double-start rejected
     resp = harness.command('start', args={'pid': target_pid})
@@ -365,6 +398,60 @@ def test_pause_resume_require_profiling(harness):
     harness.read_hello()
     assert harness.command('pause')['ok'] is False
     assert harness.command('resume')['ok'] is False
+
+
+def test_start_with_event_subset(harness, target_pid):
+    """start accepts args.events to record a subset of probed events;
+    unknown names are dropped, and status reports the selection."""
+    harness.read_hello()
+    resp = harness.command('start',
+                           args={'pid': target_pid, 'duration': 1,
+                                 'events': ['cycles', 'bogus-event']},
+                           timeout=60)
+    assert resp['ok'] is True, resp
+    assert resp['events'] == ['cycles']
+
+    status = harness.command('status')
+    assert status['events'] == ['cycles']
+    assert status['capabilities']['record_events'] == [
+        'cycles', 'instructions']
+
+    assert harness.command('stop')['ok'] is True
+
+    # A start without events resets to all probed events
+    resp = harness.command('start', args={'pid': target_pid, 'duration': 1},
+                           timeout=60)
+    assert resp['ok'] is True, resp
+    assert resp['events'] == ['cycles', 'instructions']
+    assert harness.command('stop')['ok'] is True
+
+
+def test_round_mode_fallback(shim_dir, tmp_path, target_pid):
+    """When pipe mode is unavailable (old perf), the agent falls back to
+    per-round collection and still produces valid data frames."""
+    h = AgentHarness(shim_dir, tmp_path, env={'PERF_SHIM_NO_PIPE': '1'})
+    try:
+        h.read_hello()
+        resp = h.command('start',
+                         args={'pid': target_pid, 'frequency': 99,
+                               'duration': 1},
+                         timeout=60)
+        assert resp['ok'] is True, resp
+        assert resp['mode'] == 'rounds'
+
+        flag, payload = h.wait_frame({FLAG_DATA_RAW, FLAG_DATA_ZSTD},
+                                     timeout=30)
+        if flag == FLAG_DATA_ZSTD:
+            payload = zstandard.ZstdDecompressor().decompress(
+                payload, max_output_size=1 << 20)
+        text = payload.decode()
+        assert 'hot_function' in text
+        assert '### PERF_STAT ###' in text
+
+        assert h.command('status')['capabilities']['pipe_mode'] is False
+        assert h.command('stop')['ok'] is True
+    finally:
+        h.close()
 
 
 # ---------------------------------------------------------------------------
