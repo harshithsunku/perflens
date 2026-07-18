@@ -19,30 +19,29 @@ FIXTURE = fixture_session_names()[0]
 
 @pytest.fixture()
 def core(tmp_path, perflens_home):
-    """Initialize perflens.server module state without running main()."""
+    """Build a fresh AppContext (no workers, no source mapper)."""
     from importlib.resources import files as pkg_files
-    from perflens import server as core
+    from perflens.app import AppContext
+    from perflens.config import ServerConfig
+    from perflens.state import MetricsState, ProfilingState
 
     sessions_dir = str(tmp_path / 'sessions')
     os.makedirs(sessions_dir)
-    core.config = core.ServerConfig(
+    cfg = ServerConfig(
         source_dir=str(tmp_path),
         sessions_dir=sessions_dir,
         browse_root=str(tmp_path),
         ui_dir=os.fspath(pkg_files('perflens') / 'ui'),
     )
-    core.state = core.ProfilingState(max_samples=100000)
-    core.metrics_state = core.MetricsState()
-    core.wizard_state = None
-    core.agent_session = None
-    core._sse_sinks.clear()
-    yield core
+    yield AppContext(config=cfg,
+                     state=ProfilingState(max_samples=100000),
+                     metrics=MetricsState())
 
 
 @pytest.fixture()
 def client(core):
     from perflens import web
-    with TestClient(web.create_app()) as c:
+    with TestClient(web.create_app(core)) as c:
         yield c
 
 
@@ -64,12 +63,37 @@ def test_status(client):
     assert body['total_samples'] == 0
 
 
+def _ui_built():
+    from importlib.resources import files as pkg_files
+    return (pkg_files('perflens') / 'ui' / 'index.html').is_file()
+
+
+@pytest.mark.skipif(not _ui_built(),
+                    reason='frontend not built (npm --prefix frontend run build)')
 def test_static_ui_served(client):
     r = client.get('/')
     assert r.status_code == 200
     assert '<title>PerfLens</title>' in r.text
-    assert client.get('/app.js').status_code == 200
-    assert client.get('/style.css').headers['content-type'].startswith('text/css')
+    # Vite emits hashed bundles under /assets/ — find them via the index
+    import re
+    js = re.search(r'src="(/assets/[^"]+\.js)"', r.text)
+    css = re.search(r'href="(/assets/[^"]+\.css)"', r.text)
+    assert js, 'index.html references no JS bundle'
+    assert css, 'index.html references no CSS bundle'
+    assert client.get(js.group(1)).status_code == 200
+    assert client.get(css.group(1)).headers['content-type'].startswith('text/css')
+
+
+def test_ui_missing_fallback(client, core, tmp_path):
+    """A source checkout without built frontend assets serves a friendly
+    503 page instead of 404ing, and the API stays functional."""
+    from perflens import web
+    core.config.ui_dir = str(tmp_path / 'no-ui')
+    with TestClient(web.create_app(core)) as c:
+        r = c.get('/')
+        assert r.status_code == 503
+        assert 'UI not built' in r.text
+        assert c.get('/api/status').status_code == 200
 
 
 def test_per_event_empty_and_404(client):
@@ -95,9 +119,10 @@ def test_agent_command_without_agent(client):
 
 def test_connect_validation(client):
     assert client.post('/api/connect', json={'host': ''}).status_code == 400
-    r = client.post('/api/connect', content=b'not json')
-    assert r.status_code == 400
-    assert r.json() == {'error': 'invalid JSON'}
+    # Malformed JSON is rejected by request-model validation (Pydantic)
+    r = client.post('/api/connect', content=b'not json',
+                    headers={'content-type': 'application/json'})
+    assert r.status_code == 422
 
 
 def test_import_empty_body(client):
@@ -116,7 +141,7 @@ def test_wizard_roundtrip(client):
 
 def test_metrics_endpoints(client, core):
     assert client.get('/api/metrics/current').json() == {}
-    core.metrics_state.add('system', {'ts': 1.0, 'cpu': {'overall_pct': 5}})
+    core.metrics.add('system', {'ts': 1.0, 'cpu': {'overall_pct': 5}})
     assert client.get('/api/metrics/current').json()['system']['ts'] == 1.0
     hist = client.get('/api/metrics/history', params={'type': 'system'}).json()
     assert len(hist) == 1
@@ -372,7 +397,7 @@ def live_server(core):
     s.close()
 
     server = uvicorn.Server(uvicorn.Config(
-        web.create_app(), host='127.0.0.1', port=port, log_level='error'))
+        web.create_app(core), host='127.0.0.1', port=port, log_level='error'))
     t = threading.Thread(target=server.run, daemon=True)
     t.start()
     deadline = time.time() + 10
@@ -427,6 +452,6 @@ def test_sse_broadcast_reaches_client(core, live_server):
     client's queue is registered."""
     got = _read_sse(
         live_server, {'status'},
-        on_first_line=lambda: core.broadcast_sse(
+        on_first_line=lambda: core.broadcast(
             'status', {'connected': True, 'agent': 'x:1'}))
     assert got['status'] == {'connected': True, 'agent': 'x:1'}

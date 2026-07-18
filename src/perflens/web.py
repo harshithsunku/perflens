@@ -1,11 +1,9 @@
 """PerfLens HTTP layer — FastAPI + uvicorn (ASGI).
 
-Every URL path and JSON shape here matches the previous stdlib
-``http.server`` implementation exactly; the web UI is unchanged.
-
 Division of labor:
-- ``perflens.server`` owns the agent TCP protocol, profiling state,
-  aggregation, and session persistence — all on plain threads.
+- ``perflens.app`` owns the AppContext (config, state, metrics, agent slot).
+- ``perflens.agentlink``/``perflens.state`` own the agent TCP protocol and
+  aggregation — all on plain threads.
 - This module owns HTTP: routing, SSE fan-out, static UI serving.
 
 Threading model: uvicorn's event loop serves HTTP. Handlers that touch
@@ -13,6 +11,9 @@ disk, subprocesses, or block on the agent are plain ``def`` routes (or
 explicitly pushed to the threadpool) so they never stall the loop. The
 agent recv threads and the rebuild worker publish SSE events through
 ``_SSEHub.publish`` which hops onto the loop via ``call_soon_threadsafe``.
+
+Routes receive the AppContext through the ``Ctx`` dependency
+(``request.app.state.ctx``) — no module globals.
 """
 
 import asyncio
@@ -24,50 +25,34 @@ import sys
 import tempfile
 import threading
 from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING
 
-import orjson
 import uvicorn
-from fastapi import APIRouter, FastAPI, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi import APIRouter, Depends, FastAPI, Request
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from perflens import server as core
+from perflens import agentlink, export, sessions
+from perflens.api import models
+from perflens.api.responses import dumps as _dumps
+from perflens.api.responses import json_response as _json
+from perflens.config import create_source_mapper
 from perflens.parser import (build_flamegraph_data, build_function_summary,
                              filter_samples_by_event, get_event_types)
+
+if TYPE_CHECKING:
+    from perflens.app import AppContext
 
 router = APIRouter()
 
 
-# ---------------------------------------------------------------------------
-# Response helpers
-# ---------------------------------------------------------------------------
-
-def _dumps(data):
-    # OPT_NON_STR_KEYS matches json.dumps behavior (int dict keys become
-    # strings) — line-number keyed maps rely on it.
-    return orjson.dumps(data, option=orjson.OPT_NON_STR_KEYS)
+def get_ctx(request: Request) -> 'AppContext':
+    return request.app.state.ctx
 
 
-def _json(data, status=200, request=None, allow_gzip=False):
-    body = _dumps(data)
-    headers = {'Access-Control-Allow-Origin': '*'}
-    # Compress big payloads when the client accepts it — the per-event
-    # snapshot can be multi-MB on large profiles, gzips ~10x
-    if (allow_gzip and request is not None and len(body) > 8192 and
-            'gzip' in request.headers.get('accept-encoding', '')):
-        body = gzip.compress(body, compresslevel=1)
-        headers['Content-Encoding'] = 'gzip'
-    return Response(content=body, status_code=status,
-                    media_type='application/json', headers=headers)
-
-
-async def _read_json_body(request):
-    """Read and parse a JSON POST body (empty body -> {})."""
-    body = await request.body()
-    if not body:
-        return {}
-    return json.loads(body.decode('utf-8', errors='replace'))
+# FastAPI dependency used by every route
+Ctx = Depends(get_ctx)
 
 
 # ---------------------------------------------------------------------------
@@ -94,8 +79,7 @@ class _SSEHub:
             loop = self.loop
         if loop is None or loop.is_closed():
             return
-        msg = (b'event: ' + event_type.encode('utf-8') +
-               b'\ndata: ' + _dumps(data) + b'\n\n')
+        msg = _sse_frame(event_type, data)
         try:
             loop.call_soon_threadsafe(self._fanout, msg)
         except RuntimeError:
@@ -111,9 +95,6 @@ class _SSEHub:
             q.put_nowait(msg)
 
 
-_hub = _SSEHub()
-
-
 def _sse_frame(event_type, data):
     return (b'event: ' + event_type.encode('utf-8') +
             b'\ndata: ' + _dumps(data) + b'\n\n')
@@ -123,9 +104,9 @@ def _sse_frame(event_type, data):
 # Core API — status / data / stream / stop
 # ---------------------------------------------------------------------------
 
-@router.get('/api/status')
-def api_status():
-    st = core.state
+@router.get('/api/status', response_model=models.Status)
+def api_status(ctx=Ctx):
+    st = ctx.state
     return _json({
         'status': 'ok',
         'agent_connected': st.agent_connected,
@@ -135,13 +116,14 @@ def api_status():
     })
 
 
-@router.get('/api/per-event')
-def api_per_event(request: Request):
+@router.get('/api/per-event', response_model=models.PerEventResponse,
+            responses={404: {'model': models.ErrorResponse}})
+def api_per_event(request: Request, ctx=Ctx):
     """Pull the cached per-event snapshot (one event, or all). Pairs with
     the 'data_version' SSE notify: browsers fetch only the event they're
     viewing."""
     event = request.query_params.get('event')
-    st = core.state
+    st = ctx.state
     with st.lock:
         per_event = st._cached_per_event
         version = {
@@ -159,24 +141,25 @@ def api_per_event(request: Request):
                  request=request, allow_gzip=True)
 
 
-@router.get('/api/stop')
-def api_stop():
+@router.get('/api/stop', response_model=models.StopResponse)
+def api_stop(ctx=Ctx):
     """Close the agent connection, triggering normal disconnect flow."""
-    return _json(core.stop_agent())
+    return _json(agentlink.stop_agent(ctx))
 
 
 @router.get('/api/stream')
-async def api_stream():
+async def api_stream(request: Request, ctx=Ctx):
     """Server-Sent Events endpoint for real-time updates."""
+    hub = request.app.state.sse_hub
 
     async def gen():
         q = asyncio.Queue(maxsize=256)
-        _hub.queues.add(q)
+        hub.queues.add(q)
         try:
             # Send current state (small events only — the browser pulls
             # the heavy per-event snapshot from /api/per-event when it
             # sees the version stamp)
-            st = core.state
+            st = ctx.state
             with st.lock:
                 event_types = list(st.event_types)
                 perf_stat = dict(st.perf_stat)
@@ -198,7 +181,7 @@ async def api_stream():
                 except asyncio.TimeoutError:
                     yield b': keepalive\n\n'
         finally:
-            _hub.queues.discard(q)
+            hub.queues.discard(q)
 
     return StreamingResponse(gen(), media_type='text/event-stream', headers={
         'Cache-Control': 'no-cache',
@@ -211,28 +194,29 @@ async def api_stream():
 # Sessions — list / replay / export
 # ---------------------------------------------------------------------------
 
-@router.get('/api/sessions')
-def api_sessions_list():
-    sessions = []
-    if os.path.isdir(core.config.sessions_dir):
-        for name in sorted(os.listdir(core.config.sessions_dir), reverse=True):
-            meta_path = os.path.join(core.config.sessions_dir, name,
+@router.get('/api/sessions', response_model=list[models.SessionMetadata])
+def api_sessions_list(ctx=Ctx):
+    result = []
+    if os.path.isdir(ctx.config.sessions_dir):
+        for name in sorted(os.listdir(ctx.config.sessions_dir), reverse=True):
+            meta_path = os.path.join(ctx.config.sessions_dir, name,
                                      'metadata.json')
             if os.path.isfile(meta_path):
                 try:
                     with open(meta_path) as f:
                         meta = json.load(f)
-                    sessions.append(meta)
+                    result.append(meta)
                 except (json.JSONDecodeError, IOError):
                     pass
-    return _json(sessions)
+    return _json(result)
 
 
-@router.get('/api/sessions/{session_id}')
-def api_session_replay(session_id: str, request: Request):
+@router.get('/api/sessions/{session_id}',
+            response_model=models.SessionReplayResponse)
+def api_session_replay(session_id: str, request: Request, ctx=Ctx):
     """Rebuild session data on the fly from raw chunks (cached on disk —
     sessions are immutable once saved)."""
-    session_dir = core._safe_session_dir(session_id)
+    session_dir = sessions.safe_session_dir(ctx.config, session_id)
     meta_path = (os.path.join(session_dir, 'metadata.json')
                  if session_dir else '')
 
@@ -245,11 +229,11 @@ def api_session_replay(session_id: str, request: Request):
     # Replay cache key guards against config changes that alter annotation
     cache_path = os.path.join(session_dir, 'replay_cache.json.gz')
     cache_key = {
-        'chunks': len(core._session_chunk_files(session_dir)),
-        'binary': core.config.binary_path,
-        'source_dir': core.config.source_dir,
-        'sysroot': core.config.sysroot,
-        'inline': core.config.inline,
+        'chunks': len(sessions.session_chunk_files(session_dir)),
+        'binary': ctx.config.binary_path,
+        'source_dir': ctx.config.source_dir,
+        'sysroot': ctx.config.sysroot,
+        'inline': ctx.config.inline,
     }
     per_event = None
     if os.path.isfile(cache_path):
@@ -262,11 +246,11 @@ def api_session_replay(session_id: str, request: Request):
             pass
 
     if per_event is None:
-        all_samples = core._load_session_chunks(session_dir)
+        all_samples = sessions.load_session_chunks(ctx.config, session_dir)
         event_types = get_event_types(all_samples)
-        mapper = core.state.source_mapper
-        per_event = core.build_per_event_data(all_samples, event_types,
-                                              mapper, source=True)
+        mapper = ctx.state.source_mapper
+        per_event = sessions.build_per_event_data(all_samples, event_types,
+                                                  mapper, source=True)
         try:
             with gzip.open(cache_path, 'wt') as f:
                 json.dump({'key': cache_key, 'per_event': per_event}, f)
@@ -287,30 +271,30 @@ def api_session_replay(session_id: str, request: Request):
 
 
 @router.get('/api/export/flamegraph')
-def api_export_flamegraph(request: Request):
+def api_export_flamegraph(request: Request, ctx=Ctx):
     """Export flamegraph as standalone SVG. Uses session data if provided."""
     event_type = request.query_params.get('event', 'cycles')
     session_id = request.query_params.get('session')
     all_samples = None
 
     if session_id and session_id != 'live':
-        all_samples, _ = core._load_session_samples(session_id)
+        all_samples, _ = sessions.load_session_samples(ctx.config, session_id)
 
     if not all_samples:
-        with core.state.lock:
-            all_samples = list(core.state.all_samples)
+        with ctx.state.lock:
+            all_samples = list(ctx.state.all_samples)
 
     if not all_samples:
         return _json({'error': 'no data available'})
 
-    mapper = core.state.source_mapper
+    mapper = ctx.state.source_mapper
     expanded = mapper.expand_inline_frames(all_samples) if mapper else all_samples
     evt_samples = filter_samples_by_event(expanded, event_type)
     if not evt_samples:
         return _json({'error': f'no samples for event {event_type}'})
 
     fg = build_flamegraph_data(evt_samples)
-    svg = core._render_flamegraph_svg(fg, len(evt_samples), event_type)
+    svg = export.render_flamegraph_svg(fg, len(evt_samples), event_type)
 
     fname = f'perflens-flamegraph-{event_type}.svg'
     return Response(content=svg.encode('utf-8'), media_type='image/svg+xml',
@@ -319,15 +303,16 @@ def api_export_flamegraph(request: Request):
 
 
 @router.get('/api/export/session/{session_id}')
-def api_export_session(session_id: str, request: Request):
+def api_export_session(session_id: str, request: Request, ctx=Ctx):
     """Export session in collapsed or JSON format."""
     fmt = request.query_params.get('format', 'collapsed')
-    all_samples, metadata = core._load_session_samples(session_id)
+    all_samples, metadata = sessions.load_session_samples(ctx.config,
+                                                          session_id)
     if all_samples is None:
         if session_id == 'live':
-            with core.state.lock:
-                all_samples = list(core.state.all_samples)
-                perf_stat = dict(core.state.perf_stat)
+            with ctx.state.lock:
+                all_samples = list(ctx.state.all_samples)
+                perf_stat = dict(ctx.state.perf_stat)
             if not all_samples:
                 return _json({'error': 'no live data'})
             event_types = get_event_types(all_samples)
@@ -341,7 +326,7 @@ def api_export_session(session_id: str, request: Request):
             return _json({'error': 'session not found'})
 
     if fmt == 'collapsed':
-        text = core._export_collapsed(all_samples)
+        text = export.export_collapsed(all_samples)
         fname = f'perflens-{session_id}.collapsed'
         return Response(content=text.encode('utf-8'), media_type='text/plain',
                         headers={'Content-Disposition':
@@ -349,8 +334,9 @@ def api_export_session(session_id: str, request: Request):
 
     if fmt == 'json':
         event_types = get_event_types(all_samples)
-        mapper = core.state.source_mapper
-        per_event = core.build_per_event_data(all_samples, event_types, mapper)
+        mapper = ctx.state.source_mapper
+        per_event = sessions.build_per_event_data(all_samples, event_types,
+                                                  mapper)
         body = json.dumps({'metadata': metadata, 'per_event': per_event},
                           indent=2).encode('utf-8')
         fname = f'perflens-{session_id}.json'
@@ -365,8 +351,8 @@ def api_export_session(session_id: str, request: Request):
 # Threads / source
 # ---------------------------------------------------------------------------
 
-@router.get('/api/thread-view')
-def api_thread_view(request: Request):
+@router.get('/api/thread-view', response_model=models.ThreadViewResponse)
+def api_thread_view(request: Request, ctx=Ctx):
     """Per-thread flamegraph + summary + source_files."""
     event_type = request.query_params.get('event', 'cycles')
     tid_str = request.query_params.get('tid')
@@ -377,8 +363,8 @@ def api_thread_view(request: Request):
     except ValueError:
         return _json({'error': 'invalid tid'}, 400)
 
-    with core.state.lock:
-        all_samples = list(core.state.all_samples)
+    with ctx.state.lock:
+        all_samples = list(ctx.state.all_samples)
 
     filtered = filter_samples_by_event(all_samples, event_type)
     filtered = [s for s in filtered
@@ -391,7 +377,7 @@ def api_thread_view(request: Request):
                                            'functions': []},
                       'source_files': []})
 
-    mapper = core.state.source_mapper
+    mapper = ctx.state.source_mapper
     expanded = mapper.expand_inline_frames(filtered) if mapper else filtered
     result = {
         'flamegraph': build_flamegraph_data(expanded),
@@ -404,8 +390,8 @@ def api_thread_view(request: Request):
     return _json(result, request=request, allow_gzip=True)
 
 
-@router.get('/api/time-window')
-def api_time_window(request: Request):
+@router.get('/api/time-window', response_model=models.TimeWindowResponse)
+def api_time_window(request: Request, ctx=Ctx):
     """Flamegraph + function summary restricted to samples received inside
     [start, end] (unix seconds). Backs the UI's timeline scrubbing: samples
     are stamped with arrival time, so a window on the Device Health
@@ -425,8 +411,8 @@ def api_time_window(request: Request):
         except ValueError:
             return _json({'error': 'invalid tid'}, 400)
 
-    with core.state.lock:
-        all_samples = list(core.state.all_samples)
+    with ctx.state.lock:
+        all_samples = list(ctx.state.all_samples)
 
     filtered = filter_samples_by_event(all_samples, event_type)
     filtered = [s for s in filtered
@@ -443,7 +429,7 @@ def api_time_window(request: Request):
                                            'functions': []},
                       'window': window})
 
-    mapper = core.state.source_mapper
+    mapper = ctx.state.source_mapper
     expanded = mapper.expand_inline_frames(filtered) if mapper else filtered
     return _json({
         'flamegraph': build_flamegraph_data(expanded),
@@ -452,12 +438,12 @@ def api_time_window(request: Request):
     }, request=request, allow_gzip=True)
 
 
-@router.get('/api/thread-summary')
-def api_thread_summary(request: Request):
+@router.get('/api/thread-summary', response_model=models.ThreadSummaryResponse)
+def api_thread_summary(request: Request, ctx=Ctx):
     """Overview of all threads with CPU breakdown."""
     event_type = request.query_params.get('event', 'cycles')
-    with core.state.lock:
-        all_samples = list(core.state.all_samples)
+    with ctx.state.lock:
+        all_samples = list(ctx.state.all_samples)
 
     filtered = filter_samples_by_event(all_samples, event_type)
     total = len(filtered)
@@ -471,7 +457,7 @@ def api_thread_summary(request: Request):
             by_tid[tid] = {'comm': s.get('comm', ''), 'samples': []}
         by_tid[tid]['samples'].append(s)
 
-    mapper = core.state.source_mapper
+    mapper = ctx.state.source_mapper
     threads = []
     for tid, info in sorted(by_tid.items(),
                             key=lambda x: len(x[1]['samples']), reverse=True):
@@ -508,8 +494,8 @@ def api_thread_summary(request: Request):
     return _json({'total_samples': total, 'threads': threads})
 
 
-@router.get('/api/source')
-def api_source(request: Request):
+@router.get('/api/source', response_model=models.SourceResponse)
+def api_source(request: Request, ctx=Ctx):
     """Return annotated source for a specific file. Optional tid filter."""
     file_path = request.query_params.get('file')
     if not file_path:
@@ -518,13 +504,13 @@ def api_source(request: Request):
     event_type = request.query_params.get('event')
     tid_str = request.query_params.get('tid')
 
-    mapper = core.state.source_mapper
+    mapper = ctx.state.source_mapper
     if not mapper:
         return _json({'file': file_path, 'lines': [],
                       'error': 'source mapper not available'})
 
-    with core.state.lock:
-        all_samples = list(core.state.all_samples)
+    with ctx.state.lock:
+        all_samples = list(ctx.state.all_samples)
 
     if event_type:
         all_samples = filter_samples_by_event(all_samples, event_type)
@@ -551,18 +537,18 @@ def api_source(request: Request):
 # Index / metrics / browse / wizard state
 # ---------------------------------------------------------------------------
 
-@router.get('/api/index/status')
-def api_index_status():
-    mapper = core.state.source_mapper
+@router.get('/api/index/status', response_model=models.IndexStatus)
+def api_index_status(ctx=Ctx):
+    mapper = ctx.state.source_mapper
     if mapper:
         return _json(mapper.get_index_status())
     return _json({'indexing': False, 'symbols_loaded': 0,
                   'source_files_found': 0})
 
 
-@router.get('/api/index/files')
-def api_index_files(request: Request):
-    mapper = core.state.source_mapper
+@router.get('/api/index/files', response_model=models.IndexFilesResponse)
+def api_index_files(request: Request, ctx=Ctx):
+    mapper = ctx.state.source_mapper
     params = request.query_params
     try:
         offset = int(params.get('offset', '0'))
@@ -576,13 +562,15 @@ def api_index_files(request: Request):
     return _json({'total': 0, 'offset': 0, 'limit': limit, 'files': []})
 
 
-@router.get('/api/metrics/current')
-def api_metrics_current():
-    return _json(core.metrics_state.get_latest())
+@router.get('/api/metrics/current',
+            response_model=dict[str, models.MetricsFrame])
+def api_metrics_current(ctx=Ctx):
+    return _json(ctx.metrics.get_latest())
 
 
-@router.get('/api/metrics/history')
-def api_metrics_history(request: Request):
+@router.get('/api/metrics/history',
+            response_model=list[models.MetricsFrame])
+def api_metrics_history(request: Request, ctx=Ctx):
     params = request.query_params
     mtype = params.get('type', 'system')
     start = params.get('start')
@@ -592,15 +580,15 @@ def api_metrics_history(request: Request):
         end_ts = float(end) if end else None
     except ValueError:
         return _json({'error': 'bad start/end'}, 400)
-    return _json(core.metrics_state.get_history(mtype, start_ts, end_ts))
+    return _json(ctx.metrics.get_history(mtype, start_ts, end_ts))
 
 
-@router.get('/api/browse')
-def api_browse(request: Request):
+@router.get('/api/browse', response_model=models.BrowseResponse)
+def api_browse(request: Request, ctx=Ctx):
     """Browse the server filesystem for the wizard's binary/source pickers.
     Confined to config.browse_root."""
     browse_path = request.query_params.get('path', '/')
-    root = os.path.realpath(core.config.browse_root or os.path.expanduser('~'))
+    root = os.path.realpath(ctx.config.browse_root or os.path.expanduser('~'))
     browse_path = os.path.realpath(browse_path or root)
     if browse_path != root and not browse_path.startswith(root + os.sep):
         # Outside the allowed root — start the picker at the root
@@ -631,46 +619,33 @@ def api_browse(request: Request):
     })
 
 
-@router.get('/api/wizard/state')
-def api_wizard_state():
-    return _json(core.get_wizard_state())
+@router.get('/api/wizard/state', response_model=models.WizardState)
+def api_wizard_state(ctx=Ctx):
+    return _json(ctx.wizard)
 
 
-@router.post('/api/wizard/state')
-async def api_wizard_state_update(request: Request):
-    try:
-        body = await _read_json_body(request)
-    except (ValueError, KeyError):
-        return _json({'error': 'invalid JSON'}, 400)
-    return _json(core.update_wizard_state(body))
+@router.post('/api/wizard/state', response_model=models.WizardState)
+async def api_wizard_state_update(body: dict, ctx=Ctx):
+    return _json(ctx.update_wizard(body))
 
 
 # ---------------------------------------------------------------------------
 # Agent control
 # ---------------------------------------------------------------------------
 
-@router.post('/api/connect')
-async def api_connect(request: Request):
+@router.post('/api/connect', response_model=models.ConnectResponse)
+async def api_connect(body: models.ConnectRequest, ctx=Ctx):
     """Connect to a listen-mode agent."""
-    try:
-        body = await _read_json_body(request)
-    except (ValueError, KeyError):
-        return _json({'error': 'invalid JSON'}, 400)
-
-    host = str(body.get('host', '')).strip()
-    try:
-        port = int(body.get('port', 9999))
-    except (TypeError, ValueError):
-        return _json({'error': 'invalid port'}, 400)
-
+    host = body.host.strip()
     if not host:
         return _json({'error': 'host required'}, 400)
 
     try:
-        session = await run_in_threadpool(core.connect_to_agent, host, port)
-        core.update_wizard_state({
+        session = await run_in_threadpool(agentlink.connect_to_agent,
+                                          ctx, host, body.port)
+        ctx.update_wizard({
             'agent_host': host,
-            'agent_port': port,
+            'agent_port': body.port,
             'connected': True,
         })
         return _json({
@@ -682,34 +657,24 @@ async def api_connect(request: Request):
         return _json({'ok': False, 'error': str(e)}, 500)
 
 
-@router.post('/api/agent/command')
-async def api_agent_command(request: Request):
+@router.post('/api/agent/command',
+             response_model=models.AgentCommandResponse)
+async def api_agent_command(body: models.AgentCommandRequest, ctx=Ctx):
     """Relay a command to the managed agent."""
-    session = core.current_agent_session()
+    session = ctx.agent.current()
     if not session or not session.connected:
         return _json({'error': 'no managed agent connected'}, 400)
 
-    try:
-        body = await _read_json_body(request)
-    except (ValueError, KeyError):
-        return _json({'error': 'invalid JSON'}, 400)
-
-    cmd = body.get('cmd', '')
-    args = body.get('args') or {}
-    try:
-        timeout = int(body.get('timeout', 60))
-    except (TypeError, ValueError):
-        timeout = 60
-
-    if not cmd:
+    if not body.cmd:
         return _json({'error': 'cmd required'}, 400)
 
     # list_processes and reprobe can take longer
-    if cmd in ('list_processes', 'reprobe', 'start'):
+    timeout = body.timeout
+    if body.cmd in ('list_processes', 'reprobe', 'start'):
         timeout = max(timeout, 120)
 
-    resp = await run_in_threadpool(session.send_command, cmd, args,
-                                   timeout=timeout)
+    resp = await run_in_threadpool(session.send_command, body.cmd,
+                                   body.args, timeout=timeout)
     return _json(resp)
 
 
@@ -717,27 +682,34 @@ async def api_agent_command(request: Request):
 # Config endpoints
 # ---------------------------------------------------------------------------
 
-def _config_binary_impl(body):
-    path = str(body.get('path', '')).strip()
+def _reload_mapper(ctx, pre_index=False):
+    """Swap in a fresh SourceMapper built from the (mutated) config."""
+    mapper = create_source_mapper(ctx.config)
+    ctx.state.source_mapper = mapper
+    if pre_index:
+        # Pre-index symbols and DWARF source files in background
+        threading.Thread(target=mapper.pre_index, daemon=True).start()
+    return mapper
+
+
+def _config_binary_impl(ctx, body: models.PathConfigRequest):
+    path = body.path.strip()
     if not path:
-        core.config.binary_path = None
+        ctx.config.binary_path = None
         return _json({'ok': True, 'path': None})
 
     path = os.path.abspath(path)
     if not os.path.isfile(path):
         return _json({'ok': False, 'error': f'file not found: {path}'}, 400)
 
-    core.config.binary_path = path
-    mapper = core._create_source_mapper()
-    core.state.source_mapper = mapper
-    # Pre-index symbols and DWARF source files in background
-    threading.Thread(target=mapper.pre_index, daemon=True).start()
-    core.update_wizard_state({'binary_path': path})
+    ctx.config.binary_path = path
+    _reload_mapper(ctx, pre_index=True)
+    ctx.update_wizard({'binary_path': path})
     return _json({'ok': True, 'path': path})
 
 
-def _config_source_impl(body):
-    path = str(body.get('path', '')).strip()
+def _config_source_impl(ctx, body: models.PathConfigRequest):
+    path = body.path.strip()
     if not path:
         return _json({'ok': False, 'error': 'path required'}, 400)
 
@@ -746,25 +718,22 @@ def _config_source_impl(body):
         return _json({'ok': False,
                       'error': f'directory not found: {path}'}, 400)
 
-    core.config.source_dir = path
-    mapper = core._create_source_mapper()
-    core.state.source_mapper = mapper
-    threading.Thread(target=mapper.pre_index, daemon=True).start()
-    core.update_wizard_state({'source_dir': path})
+    ctx.config.source_dir = path
+    _reload_mapper(ctx, pre_index=True)
+    ctx.update_wizard({'source_dir': path})
     return _json({'ok': True, 'path': path})
 
 
-def _config_pathmap_impl(body):
-    path_map = body.get('path_map', {})
-    core.config.path_map = path_map if path_map else None
-    mapper = core._create_source_mapper()
-    core.state.source_mapper = mapper
+def _config_pathmap_impl(ctx, body: models.PathMapConfigRequest):
+    path_map = body.path_map
+    ctx.config.path_map = path_map if path_map else None
+    _reload_mapper(ctx)
     return _json({'ok': True, 'path_map': path_map})
 
 
-def _config_toolchain_impl(body):
-    prefix = str(body.get('prefix', '')).strip()
-    sysroot = str(body.get('sysroot', '')).strip()
+def _config_toolchain_impl(ctx, body: models.ToolchainConfigRequest):
+    prefix = body.prefix.strip()
+    sysroot = (body.sysroot or '').strip()
 
     result = {'ok': True}
 
@@ -782,8 +751,8 @@ def _config_toolchain_impl(body):
         if not found:
             return _json({'ok': False,
                           'error': f'addr2line not found: {a2l}'}, 400)
-        core.config.addr2line_bin = a2l
-        core.config.readelf_bin = rel
+        ctx.config.addr2line_bin = a2l
+        ctx.config.readelf_bin = rel
         result['addr2line'] = a2l
         result['readelf'] = rel
 
@@ -792,41 +761,39 @@ def _config_toolchain_impl(body):
         if not os.path.isdir(sysroot):
             return _json({'ok': False,
                           'error': f'sysroot not found: {sysroot}'}, 400)
-        core.config.sysroot = sysroot
+        ctx.config.sysroot = sysroot
         result['sysroot'] = sysroot
-    elif 'sysroot' in body:
-        core.config.sysroot = None
+    elif body.sysroot is not None:
+        # Explicit empty sysroot clears it; absent leaves it unchanged
+        ctx.config.sysroot = None
 
-    mapper = core._create_source_mapper()
-    core.state.source_mapper = mapper
-    if core.config.binary_path:
-        threading.Thread(target=mapper.pre_index, daemon=True).start()
+    _reload_mapper(ctx, pre_index=bool(ctx.config.binary_path))
     return _json(result)
 
 
-def _make_config_route(path, impl):
-    @router.post(path)
-    async def config_route(request: Request):
-        try:
-            body = await _read_json_body(request)
-        except (ValueError, KeyError):
-            return _json({'error': 'invalid JSON'}, 400)
+def _make_config_route(path, impl, body_model):
+    @router.post(path, response_model=models.ConfigResult)
+    async def config_route(body: body_model, ctx=Ctx):
         # Mapper recreation touches disk (persisted index) — threadpool
-        return await run_in_threadpool(impl, body)
+        return await run_in_threadpool(impl, ctx, body)
 
 
-_make_config_route('/api/config/binary', _config_binary_impl)
-_make_config_route('/api/config/source', _config_source_impl)
-_make_config_route('/api/config/pathmap', _config_pathmap_impl)
-_make_config_route('/api/config/toolchain', _config_toolchain_impl)
+_make_config_route('/api/config/binary', _config_binary_impl,
+                   models.PathConfigRequest)
+_make_config_route('/api/config/source', _config_source_impl,
+                   models.PathConfigRequest)
+_make_config_route('/api/config/pathmap', _config_pathmap_impl,
+                   models.PathMapConfigRequest)
+_make_config_route('/api/config/toolchain', _config_toolchain_impl,
+                   models.ToolchainConfigRequest)
 
 
 # ---------------------------------------------------------------------------
 # perf.data import
 # ---------------------------------------------------------------------------
 
-@router.post('/api/import')
-async def api_import(request: Request):
+@router.post('/api/import', response_model=models.ImportResponse)
+async def api_import(request: Request, ctx=Ctx):
     """Import an uploaded perf.data file."""
     try:
         content_length = int(request.headers.get('content-length', 0))
@@ -834,12 +801,12 @@ async def api_import(request: Request):
         content_length = 0
     if content_length <= 0:
         return _json({'error': 'empty request body'}, 400)
-    if content_length > core.MAX_IMPORT_SIZE:
+    if content_length > sessions.MAX_IMPORT_SIZE:
         return _json({
             'error': f'file too large ({content_length} bytes, '
-                     f'max {core.MAX_IMPORT_SIZE // 1024 // 1024} MB)'
+                     f'max {sessions.MAX_IMPORT_SIZE // 1024 // 1024} MB)'
         }, 413)
-    if not core.config.perf_bin:
+    if not ctx.config.perf_bin:
         return _json({
             'error': 'perf not found on server — cannot import perf.data'
         }, 500)
@@ -849,13 +816,13 @@ async def api_import(request: Request):
         received = 0
         async for chunk in request.stream():
             received += len(chunk)
-            if received > core.MAX_IMPORT_SIZE:
+            if received > sessions.MAX_IMPORT_SIZE:
                 return _json({'error': 'file too large'}, 413)
             tmp.write(chunk)
         tmp.close()
 
         session_id, samples, metadata = await run_in_threadpool(
-            core.import_perf_data, tmp.name)
+            sessions.import_perf_data, ctx.config, tmp.name)
         return _json({
             'session_id': session_id,
             'total_samples': len(samples),
@@ -878,28 +845,57 @@ async def api_import(request: Request):
 # App factory + runner
 # ---------------------------------------------------------------------------
 
+_UI_MISSING_PAGE = """<!DOCTYPE html>
+<html><head><title>PerfLens — UI not built</title></head>
+<body style="font-family: system-ui; max-width: 40em; margin: 4em auto;">
+<h1>PerfLens server is running</h1>
+<p>The web UI assets were not found. If you are running from a source
+checkout, build them first:</p>
+<pre>npm --prefix frontend ci
+npm --prefix frontend run build</pre>
+<p>Installed wheels ship the UI prebuilt — <code>pip install perflens</code>
+or <code>uvx perflens</code> need no extra step.</p>
+<p>The HTTP API is fully functional: try <a href="/api/status">/api/status</a>.</p>
+</body></html>"""
+
+
 @asynccontextmanager
 async def _lifespan(app):
-    _hub.attach(asyncio.get_running_loop())
-    core.register_sse_sink(_hub.publish)
+    app.state.sse_hub.attach(asyncio.get_running_loop())
+    app.state.ctx.register_sse_sink(app.state.sse_hub.publish)
     yield
 
 
-def create_app():
-    """Build the ASGI app. Call after core.config is initialized."""
-    app = FastAPI(title='PerfLens', lifespan=_lifespan,
-                  docs_url=None, redoc_url=None, openapi_url=None)
+def create_app(ctx):
+    """Build the ASGI app around an AppContext."""
+    from perflens import __version__
+    app = FastAPI(title='PerfLens', version=__version__, lifespan=_lifespan,
+                  docs_url=None, redoc_url=None,
+                  openapi_url='/api/openapi.json')
+    app.state.ctx = ctx
+    app.state.sse_hub = _SSEHub()
     app.include_router(router)
+
     # Static UI last — API routes take precedence. StaticFiles owns path
     # normalization/traversal safety.
-    app.mount('/', StaticFiles(directory=core.config.ui_dir, html=True),
-              name='ui')
+    ui_dir = ctx.config.ui_dir
+    if ui_dir and os.path.isfile(os.path.join(ui_dir, 'index.html')):
+        app.mount('/', StaticFiles(directory=ui_dir, html=True), name='ui')
+    else:
+        # Source checkout without built frontend assets — keep the API
+        # usable and say what's missing instead of 404ing everything.
+        @app.get('/{path:path}')
+        def ui_missing(path: str):
+            return HTMLResponse(_UI_MISSING_PAGE, status_code=503)
+
     return app
 
 
-def run_http_server(port, bind='127.0.0.1'):
+def run_http_server(ctx):
     """Run the HTTP server for the web UI (blocks until shutdown)."""
-    app = create_app()
+    app = create_app(ctx)
+    bind = ctx.config.http_bind
+    port = ctx.config.http_port
     print(f"[server] HTTP server on http://{bind}:{port}", file=sys.stderr)
     if bind not in ('127.0.0.1', 'localhost', '::1'):
         print("[server] WARNING: web UI is exposed beyond localhost "

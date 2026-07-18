@@ -1,8 +1,0 @@
-{
-  "scripts": {
-    "e2e": "node tests/e2e_ui.mjs"
-  },
-  "devDependencies": {
-    "puppeteer": "^24.40.0"
-  }
-}

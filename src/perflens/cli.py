@@ -48,7 +48,7 @@ _ARCH_MAP = {
 
 
 def _run_serve(argv):
-    from perflens.server import main as serve_main
+    from perflens.app import main as serve_main
     serve_main(argv)
 
 
