@@ -343,7 +343,7 @@ dist/
 perflens/
 ├── install-agent.sh              # curl-able agent installer (arch detect, no sudo)
 ├── agent-c/
-│   ├── perflens_agent.c          # C agent (~3200 lines, static binary, zero deps)
+│   ├── src/                      # C agent modules (agent.h + 10 .c files, static binary, zero deps)
 │   ├── Makefile                  # native + cross-compile targets
 │   └── vendor/zstd/              # vendored zstd amalgamation
 ├── pyproject.toml                # pip/uv package (console script: perflens)

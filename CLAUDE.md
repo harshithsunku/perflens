@@ -68,11 +68,21 @@ history.
   requests — no per-request forking.
 - The agent probes supported perf events and call-graph modes (`fp`, `dwarf`,
   `lbr`) on the target before collecting, and uses whichever works.
+- Collection prefers continuous pipe mode (`perf record -o - | perf script
+  -i -`, probed at startup): one long-lived pipeline with no sampling dead
+  time, symbol tables parsed once, output cut into chunks every `duration`
+  seconds at sample boundaries and streamed through in-process zstd. Falls
+  back to discrete record/script rounds when pipe mode is unavailable.
+  `perf script` runs at `nice 5` so the profiler yields to the workload.
 - Single agent implementation: a static C binary (~2 MB, vendored zstd,
   zero deps) that cross-compiles for five architectures, installs with one
   curl command (install-agent.sh), and self-updates with --update.
 - Bidirectional interactive protocol: agent sends hello + data + metrics,
   server sends commands (start, stop, pause, resume, configure, etc.).
+  `start` accepts an optional `events` subset of the probed record events;
+  the UI's control-bar popovers expose live profiling settings (frequency,
+  interval, events — restarting collection transparently when needed),
+  process switching, and metrics toggles.
 - Two connection patterns: `--server` (agent connects out to server) and
   `--listen` (agent binds port, server/UI connects in via wizard).
 - Agent collects device health metrics (CPU, memory, temperature, load,
@@ -96,7 +106,16 @@ history.
 perflens/
 ├── install-agent.sh              # curl-able agent installer (no sudo)
 ├── agent-c/
-│   ├── perflens_agent.c          # C agent (~3200 lines, static binary)
+│   ├── src/                      # C agent modules (agent.h + 10 .c files)
+│   │   ├── agent.h               # shared types, constants, cross-module API
+│   │   ├── main.c                # agent state, session loop, run modes, CLI
+│   │   ├── collect.c             # round + continuous collection loops
+│   │   ├── commands.c            # command handlers + dispatch
+│   │   ├── metrics.c             # device health metrics
+│   │   ├── probe.c               # platform + perf capability probing
+│   │   ├── subproc.c             # signals, child tracking, fork/exec helpers
+│   │   ├── wire.c                # TCP framing + streaming zstd sink
+│   │   └── util.c, procs.c, update.c
 │   ├── Makefile                  # native + cross-compile targets
 │   └── vendor/zstd/              # zstd single-file amalgamation
 ├── pyproject.toml                # pip/uv package (console script: perflens)
@@ -235,8 +254,11 @@ Options:
 - Single agent connection at a time — a new agent replaces the current one.
 - `perf_event_paranoid > 1` may restrict the set of usable events (the agent
   warns at startup).
-- Call-graph probing adds ~6–12 s to first-connection startup (tests `fp`,
-  `dwarf`, `lbr` in sequence).
+- Capability probing adds ~8–14 s to first-connection startup (events,
+  call-graph modes `fp`/`dwarf`/`lbr`, script fields, pipe mode).
+- In continuous mode, `perf record` flushes its ring buffer in batches, so
+  the first chunk or two after `start` may carry only PERF_STAT data before
+  samples begin flowing.
 - Some container environments don't support `perf record -p <pid>`. The
   agent's per-PID mode returns empty in that case; a system-wide
   `perf record -a` usually works as a fallback.

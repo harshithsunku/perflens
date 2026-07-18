@@ -214,7 +214,31 @@
                     <span id="ctrl-pid"></span>
                 </div>
                 <div class="ctrl-group">
-                    <button id="ctrl-settings" class="ctrl-btn" title="Settings">&#9881;</button>
+                    <span id="ctrl-mode" class="ctrl-mode" title="Collection mode"></span>
+                    <button id="ctrl-switch" class="ctrl-btn" title="Switch process">&#8646;</button>
+                    <button id="ctrl-settings" class="ctrl-btn" title="Profiling settings">&#9881;</button>
+                </div>
+                <div id="ctrl-settings-pop" class="metrics-settings-pop hidden">
+                    <div class="msp-title">Profiling settings</div>
+                    <div id="csp-info" class="csp-info"></div>
+                    <label class="msp-row">Frequency (Hz)
+                        <input type="number" id="csp-frequency" min="1" max="10000" class="csp-num" />
+                    </label>
+                    <label class="msp-row">Interval (s)
+                        <input type="number" id="csp-duration" min="1" max="300" class="csp-num" />
+                    </label>
+                    <div class="msp-title">Record events</div>
+                    <div id="csp-events" class="csp-events"></div>
+                    <div class="msp-actions">
+                        <button id="csp-apply" class="wiz-btn wiz-btn-primary">Apply</button>
+                        <span id="csp-status" class="msp-status"></span>
+                    </div>
+                    <div class="msp-hint">Frequency and event changes restart collection; the interval applies from the next chunk.</div>
+                </div>
+                <div id="ctrl-switch-pop" class="metrics-settings-pop hidden">
+                    <div class="msp-title">Switch process</div>
+                    <div id="swp-list" class="swp-list"><div class="wiz-spinner">Loading...</div></div>
+                    <div class="msp-actions"><span id="swp-status" class="msp-status"></span></div>
                 </div>
             </div>
 
@@ -252,6 +276,7 @@
                 </div>
                 <div id="metrics-settings-pop" class="metrics-settings-pop hidden">
                     <div class="msp-title">Agent metrics collection</div>
+                    <label class="msp-row"><input type="checkbox" id="msp-enabled" checked> Metrics collection <span class="msp-hint">(master)</span></label>
                     <label class="msp-row"><input type="checkbox" id="msp-network" checked> Network stats</label>
                     <label class="msp-row"><input type="checkbox" id="msp-disk"> Disk I/O <span class="msp-hint">(off by default)</span></label>
                     <label class="msp-row"><input type="checkbox" id="msp-threads"> Per-thread CPU <span class="msp-hint">(off by default)</span></label>

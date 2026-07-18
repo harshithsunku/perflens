@@ -1757,6 +1757,7 @@ let wizardData = {
     processName: '',
     frequency: 99,
     duration: 8,
+    events: null,   /* null = all probed record events */
     agentHello: null,
     capabilities: null,
 };
@@ -1776,6 +1777,7 @@ document.getElementById('card-live').addEventListener('click', function() {
             if (ws.pid) document.getElementById('wiz-pid').value = ws.pid;
             if (ws.frequency) document.getElementById('wiz-frequency').value = ws.frequency;
             if (ws.duration) document.getElementById('wiz-duration').value = ws.duration;
+            if (ws.events && ws.events.length) wizardData.events = ws.events;
         })
         .catch(function() {});
 });
@@ -1966,13 +1968,29 @@ function wizardProbeCapabilities() {
         wizardData.capabilities = data;
         var html = '';
         (data.record_events || []).forEach(function(evt) {
-            html += '<span class="wiz-cap-tag record" title="Available for perf record">' + escapeHtml(evt) + '</span>';
+            var checked = !wizardData.events || wizardData.events.indexOf(evt) !== -1;
+            html += '<label class="wiz-cap-tag record selectable" title="Click to include/exclude from recording">' +
+                '<input type="checkbox" class="wiz-evt-cb" value="' + escapeAttr(evt) + '"' +
+                (checked ? ' checked' : '') + '> ' + escapeHtml(evt) + '</label>';
         });
         (data.stat_only_events || []).forEach(function(evt) {
-            html += '<span class="wiz-cap-tag stat" title="perf stat only">' + escapeHtml(evt) + '</span>';
+            html += '<span class="wiz-cap-tag stat" title="perf stat only (always collected)">' + escapeHtml(evt) + '</span>';
         });
         if (!html) html = '<span class="wiz-err">No events detected</span>';
         eventsEl.innerHTML = html;
+
+        // Track selection; null means "all probed events"
+        eventsEl.querySelectorAll('.wiz-evt-cb').forEach(function(cb) {
+            cb.addEventListener('change', function() {
+                var sel = [];
+                eventsEl.querySelectorAll('.wiz-evt-cb:checked').forEach(function(c) {
+                    sel.push(c.value);
+                });
+                var total = eventsEl.querySelectorAll('.wiz-evt-cb').length;
+                wizardData.events = (sel.length === 0 || sel.length === total)
+                    ? null : sel;
+            });
+        });
 
         var cg = data.callgraph_method;
         if (cg) {
@@ -2179,7 +2197,11 @@ function wizardBuildReview() {
         '<div class="wiz-review-row"><span class="wiz-review-label">Frequency</span>' +
             '<span class="wiz-review-value">' + wizardData.frequency + ' Hz</span></div>' +
         '<div class="wiz-review-row"><span class="wiz-review-label">Duration</span>' +
-            '<span class="wiz-review-value">' + wizardData.duration + 's per round</span></div>';
+            '<span class="wiz-review-value">' + wizardData.duration + 's per round</span></div>' +
+        '<div class="wiz-review-row"><span class="wiz-review-label">Events</span>' +
+            '<span class="wiz-review-value">' +
+            (wizardData.events ? escapeHtml(wizardData.events.join(', '))
+                               : 'all supported') + '</span></div>';
     if (wizardData.binary) {
         html += '<div class="wiz-review-row"><span class="wiz-review-label">Binary</span>' +
             '<span class="wiz-review-value">' + escapeHtml(wizardData.binary) + '</span></div>';
@@ -2207,11 +2229,16 @@ document.getElementById('wiz-start-btn').addEventListener('click', function() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
             cmd: 'start',
-            args: {
-                pid: wizardData.pid,
-                frequency: wizardData.frequency,
-                duration: wizardData.duration,
-            },
+            args: (function() {
+                var args = {
+                    pid: wizardData.pid,
+                    frequency: wizardData.frequency,
+                    duration: wizardData.duration,
+                };
+                if (wizardData.events && wizardData.events.length)
+                    args.events = wizardData.events;
+                return args;
+            })(),
             timeout: 120,
         }),
     })
@@ -2226,7 +2253,7 @@ document.getElementById('wiz-start-btn').addEventListener('click', function() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     step: 6, pid: wizardData.pid, frequency: wizardData.frequency,
-                    duration: wizardData.duration,
+                    duration: wizardData.duration, events: wizardData.events,
                 }),
             }).catch(function() {});
 
@@ -2278,6 +2305,14 @@ function refreshControlBar() {
             if (data.pid) wizardData.pid = data.pid;
             if (data.frequency) wizardData.frequency = data.frequency;
             if (data.duration) wizardData.duration = data.duration;
+            var caps = data.capabilities || {};
+            var modeEl = document.getElementById('ctrl-mode');
+            if (modeEl) {
+                modeEl.textContent = (caps.pipe_mode ? 'continuous' : 'rounds') +
+                    ' · ' + (data.frequency || '?') + ' Hz';
+                modeEl.title = 'Collection mode · sampling frequency' +
+                    (data.agent_version ? ' · agent v' + data.agent_version : '');
+            }
             if (data.state === 'paused') {
                 document.getElementById('ctrl-state').textContent = 'Paused';
                 document.getElementById('ctrl-state').className = 'paused';
@@ -2331,27 +2366,197 @@ document.getElementById('ctrl-stop').addEventListener('click', function() {
     }).catch(function() {});
 });
 
-document.getElementById('ctrl-settings').addEventListener('click', function() {
-    // Quick settings: change frequency/duration via configure command
-    var freq = prompt('Sampling frequency (Hz):', wizardData.frequency);
-    if (freq === null) return;
-    var dur = prompt('Collection duration (seconds):', wizardData.duration);
-    if (dur === null) return;
+// --- Profiling settings popover -------------------------------------
+// Live view of the agent's actual state (frequency, interval, events,
+// mode, callgraph, version). Frequency/event changes need a restart of
+// collection; the popover does the stop+start transparently.
 
-    fetch('/api/agent/command', {
+var cspAgent = null;  // last agent status snapshot shown in the popover
+
+function agentCommand(cmd, args, timeout) {
+    return fetch('/api/agent/command', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            cmd: 'configure',
-            args: { frequency: parseInt(freq), duration: parseInt(dur) },
-        }),
-    }).then(function(r) { return r.json(); }).then(function(data) {
-        if (data.ok) {
-            wizardData.frequency = data.frequency;
-            wizardData.duration = data.duration;
+        body: JSON.stringify({ cmd: cmd, args: args || {}, timeout: timeout || 30 }),
+    }).then(function(r) { return r.json(); });
+}
+
+(function initProfilingSettings() {
+    var btn = document.getElementById('ctrl-settings');
+    var pop = document.getElementById('ctrl-settings-pop');
+    if (!btn || !pop) return;
+
+    function populate(data) {
+        cspAgent = data;
+        document.getElementById('csp-frequency').value = data.frequency || 99;
+        document.getElementById('csp-duration').value = data.duration || 8;
+
+        var caps = data.capabilities || {};
+        var info = '';
+        info += '<div class="csp-info-row"><span>Mode</span><strong>' +
+            (caps.pipe_mode ? 'continuous' : 'rounds') + '</strong></div>';
+        if (caps.callgraph_method !== undefined) {
+            info += '<div class="csp-info-row"><span>Call-graph</span><strong>' +
+                escapeHtml(caps.callgraph_method || 'none (flat)') + '</strong></div>';
         }
-    }).catch(function() {});
-});
+        if (data.agent_version) {
+            info += '<div class="csp-info-row"><span>Agent</span><strong>v' +
+                escapeHtml(data.agent_version) + '</strong></div>';
+        }
+        document.getElementById('csp-info').innerHTML = info;
+
+        var active = data.events || [];
+        var html = '';
+        (caps.record_events || []).forEach(function(evt) {
+            var on = active.length === 0 || active.indexOf(evt) !== -1;
+            html += '<label class="csp-evt"><input type="checkbox" class="csp-evt-cb" value="' +
+                escapeAttr(evt) + '"' + (on ? ' checked' : '') + '> ' +
+                escapeHtml(evt) + '</label>';
+        });
+        document.getElementById('csp-events').innerHTML =
+            html || '<span class="msp-hint">No probed events (start profiling first)</span>';
+    }
+
+    btn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        pop.classList.toggle('hidden');
+        if (pop.classList.contains('hidden')) return;
+        document.getElementById('csp-status').textContent = '';
+        agentCommand('status', {}, 10).then(function(data) {
+            if (data.ok) populate(data);
+        }).catch(function() {});
+    });
+    pop.addEventListener('click', function(e) { e.stopPropagation(); });
+    document.addEventListener('click', function() { pop.classList.add('hidden'); });
+
+    document.getElementById('csp-apply').addEventListener('click', function() {
+        var status = document.getElementById('csp-status');
+        var freq = parseInt(document.getElementById('csp-frequency').value);
+        var dur = parseInt(document.getElementById('csp-duration').value);
+        if (!(freq >= 1 && freq <= 10000) || !(dur >= 1 && dur <= 300)) {
+            status.textContent = 'Invalid values';
+            status.className = 'msp-status err';
+            return;
+        }
+
+        var events = [];
+        document.querySelectorAll('.csp-evt-cb:checked').forEach(function(cb) {
+            events.push(cb.value);
+        });
+        var all = (cspAgent && cspAgent.capabilities &&
+                   cspAgent.capabilities.record_events) || [];
+        var current = (cspAgent && cspAgent.events) || all;
+        var eventsChanged = events.length > 0 &&
+            events.join(',') !== current.join(',');
+        var freqChanged = cspAgent && freq !== cspAgent.frequency;
+        var profiling = cspAgent &&
+            (cspAgent.state === 'profiling' || cspAgent.state === 'paused');
+
+        status.textContent = 'Applying...';
+        status.className = 'msp-status';
+
+        function done(ok, msg) {
+            status.textContent = ok ? 'Applied' : (msg || 'Failed');
+            status.className = 'msp-status ' + (ok ? 'ok' : 'err');
+            if (ok) {
+                wizardData.frequency = freq;
+                wizardData.duration = dur;
+                if (events.length) wizardData.events = events;
+                refreshControlBar();
+            }
+        }
+
+        if (profiling && (eventsChanged || freqChanged)) {
+            // Needs a restart of collection with the new parameters
+            var pid = cspAgent.pid;
+            agentCommand('stop').then(function() {
+                var args = { pid: pid, frequency: freq, duration: dur };
+                if (eventsChanged || events.length < all.length) args.events = events;
+                return agentCommand('start', args, 120);
+            }).then(function(data) {
+                done(data.ok, data.error);
+            }).catch(function(err) { done(false, String(err)); });
+        } else {
+            agentCommand('configure', { frequency: freq, duration: dur })
+                .then(function(data) { done(data.ok, data.error); })
+                .catch(function(err) { done(false, String(err)); });
+        }
+    });
+})();
+
+// --- Switch process popover ------------------------------------------
+
+(function initSwitchProcess() {
+    var btn = document.getElementById('ctrl-switch');
+    var pop = document.getElementById('ctrl-switch-pop');
+    if (!btn || !pop) return;
+
+    btn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        pop.classList.toggle('hidden');
+        if (pop.classList.contains('hidden')) return;
+        var list = document.getElementById('swp-list');
+        list.innerHTML = '<div class="wiz-spinner">Loading processes...</div>';
+        document.getElementById('swp-status').textContent = '';
+        agentCommand('list_processes', {}, 30).then(function(data) {
+            if (!data.ok) {
+                list.innerHTML = '<span class="msp-hint">' +
+                    escapeHtml(data.error || 'Failed') + '</span>';
+                return;
+            }
+            var html = '';
+            (data.processes || []).slice(0, 30).forEach(function(p) {
+                html += '<div class="swp-row" data-pid="' + p.pid +
+                    '" data-comm="' + escapeAttr(p.comm) + '">' +
+                    '<span class="swp-pid">' + p.pid + '</span>' +
+                    '<span class="swp-comm">' + escapeHtml(p.comm) + '</span>' +
+                    '<span class="swp-cpu">' + (p.cpu || 0).toFixed(1) + '%</span></div>';
+            });
+            list.innerHTML = html || '<span class="msp-hint">No processes</span>';
+        }).catch(function(err) {
+            list.innerHTML = '<span class="msp-hint">' + escapeHtml(String(err)) + '</span>';
+        });
+    });
+    pop.addEventListener('click', function(e) { e.stopPropagation(); });
+    document.addEventListener('click', function() { pop.classList.add('hidden'); });
+
+    document.getElementById('swp-list').addEventListener('click', function(e) {
+        var row = e.target.closest('.swp-row');
+        if (!row) return;
+        var pid = parseInt(row.dataset.pid);
+        var comm = row.dataset.comm || '';
+        var status = document.getElementById('swp-status');
+        status.textContent = 'Switching to PID ' + pid +
+            ' (re-probing, may take a moment)...';
+        status.className = 'msp-status';
+
+        agentCommand('stop').then(function() {
+            var args = {
+                pid: pid,
+                frequency: wizardData.frequency || 99,
+                duration: wizardData.duration || 8,
+            };
+            return agentCommand('start', args, 180);
+        }).then(function(data) {
+            if (data.ok) {
+                status.textContent = 'Now profiling PID ' + pid;
+                status.className = 'msp-status ok';
+                wizardData.pid = pid;
+                wizardData.processName = comm;
+                wizardData.events = null;
+                showControlBar(pid, comm);
+                refreshControlBar();
+                setTimeout(function() { pop.classList.add('hidden'); }, 1200);
+            } else {
+                status.textContent = data.error || 'Start failed';
+                status.className = 'msp-status err';
+            }
+        }).catch(function(err) {
+            status.textContent = String(err);
+            status.className = 'msp-status err';
+        });
+    });
+})();
 
 // =====================================================================
 // File Browser Modal
@@ -2929,6 +3134,8 @@ function updateDiskPanel(current, previous) {
             .then(function(r) { return r.json(); })
             .then(function(data) {
                 if (!data.ok) return;
+                if (data.metrics_enabled !== undefined)
+                    document.getElementById('msp-enabled').checked = !!data.metrics_enabled;
                 if (data.network !== undefined)
                     document.getElementById('msp-network').checked = !!data.network;
                 if (data.disk !== undefined)
@@ -2957,6 +3164,7 @@ function updateDiskPanel(current, previous) {
             body: JSON.stringify({
                 cmd: 'configure_metrics',
                 args: {
+                    enabled: document.getElementById('msp-enabled').checked,
                     network: document.getElementById('msp-network').checked,
                     disk: document.getElementById('msp-disk').checked,
                     threads: document.getElementById('msp-threads').checked,

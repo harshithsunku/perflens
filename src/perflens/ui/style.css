@@ -1463,6 +1463,12 @@ main {
 }
 .wiz-cap-tag.record { background: var(--success-muted); color: var(--success); }
 .wiz-cap-tag.stat   { background: var(--warning-muted); color: var(--warning); }
+.wiz-cap-tag.selectable { cursor: pointer; user-select: none; }
+.wiz-cap-tag.selectable input { accent-color: var(--success); margin-right: 2px; }
+.wiz-cap-tag.selectable:has(input:not(:checked)) {
+    opacity: 0.45;
+    text-decoration: line-through;
+}
 .wiz-caps-callgraph {
     font-size: 13px;
     color: var(--text-secondary);
@@ -1524,6 +1530,7 @@ main {
 
 /* ===== Control Bar ===== */
 #control-bar {
+    position: relative;
     display: flex;
     align-items: center;
     gap: 12px;
@@ -1833,6 +1840,75 @@ main {
     gap: 8px;
     margin-top: 4px;
 }
+
+/* Control-bar popovers (profiling settings, switch process) */
+#ctrl-settings-pop, #ctrl-switch-pop {
+    top: 46px;
+    right: 8px;
+    min-width: 250px;
+    max-width: 340px;
+}
+.ctrl-mode {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    font-family: var(--font-mono);
+    align-self: center;
+    margin-right: 6px;
+    white-space: nowrap;
+}
+.csp-info { margin-bottom: 8px; }
+.csp-info-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 11px;
+    margin-bottom: 3px;
+}
+.csp-info-row strong { color: var(--text-primary); font-family: var(--font-mono); }
+.csp-num {
+    width: 70px;
+    margin-left: auto;
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    padding: 2px 6px;
+}
+.csp-events { margin-bottom: 8px; }
+.csp-evt {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    padding: 2px 0;
+    cursor: pointer;
+}
+.csp-evt input { accent-color: var(--success); }
+.msp-status.err { color: var(--error); }
+
+/* Switch-process list */
+.swp-list { max-height: 260px; overflow-y: auto; margin-bottom: 6px; }
+.swp-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    padding: 4px 6px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-size: 11px;
+}
+.swp-row:hover { background: var(--accent-muted); }
+.swp-pid { font-family: var(--font-mono); color: var(--text-tertiary); min-width: 46px; }
+.swp-comm {
+    font-family: var(--font-mono);
+    color: var(--text-primary);
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.swp-cpu { font-family: var(--font-mono); color: var(--accent-text); }
 .metrics-settings-pop .msp-status { font-size: 11px; color: var(--text-tertiary); }
 .metrics-settings-pop .msp-status.ok { color: var(--success); }
 .metrics-settings-pop .msp-status.error { color: var(--error); }
