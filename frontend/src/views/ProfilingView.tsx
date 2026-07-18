@@ -193,6 +193,7 @@ export default function ProfilingView({ active }: { active: boolean }) {
               {view.windowSamples !== undefined ? ` · ${view.windowSamples} samples` : ''}
             </span>
             <button id="time-window-clear" title="Back to full session"
+                    aria-label="Clear time window"
                     onClick={() => setTimeWindow(null)}>&times;</button>
           </span>
         )}
@@ -219,22 +220,33 @@ export default function ProfilingView({ active }: { active: boolean }) {
                 {' '}Diff vs <span id="diff-label">{baseline.label}</span>
               </label>
               <button id="diff-clear-btn" className="diff-btn" title="Clear baseline"
+                      aria-label="Clear baseline"
                       onClick={() => useLive.getState().clearBaseline()}>
                 &times;
               </button>
             </>
           )}
         </span>
+        {diffActive && (
+          <span className="diff-legend" data-testid="diff-legend"
+                title="Δ Self compares each function's self% against the baseline">
+            <span className="diff-up">+red</span> hotter than baseline
+            {' · '}<span className="diff-down">&minus;green</span> cooler
+            {' · '}<span className="diff-new">new</span> not in baseline
+          </span>
+        )}
       </div>
 
       <div id="source-banner" className={entry && !hasSource ? 'visible' : ''}>
         Source view unavailable &mdash; start server with <code>--binary</code> to enable
       </div>
 
-      <div id="tabs">
-        {TABS.map((t) => (
+      <div id="tabs" role="tablist" aria-label="Profile views">
+        {TABS.map((t, i) => (
           <button key={t.id} className={'tab' + (activeTab === t.id ? ' active' : '')}
-                  data-tab={t.id} onClick={() => switchTab(t.id)}>
+                  data-tab={t.id} role="tab" aria-selected={activeTab === t.id}
+                  title={`${t.label} (${i + 1})`}
+                  onClick={() => switchTab(t.id)}>
             {t.label}
           </button>
         ))}

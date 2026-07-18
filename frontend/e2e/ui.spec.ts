@@ -170,6 +170,45 @@ test('event selector switches events; URL hash tracks the view', async ({ page }
   await expect.poll(() => page.url()).toContain('session=' + FIXTURE);
 });
 
+test('keyboard shortcuts switch tabs, focus search, open help', async ({ page }) => {
+  await replayFixture(page);
+
+  // Number keys switch tabs
+  await page.keyboard.press('3');
+  await expect(page.locator('.tab[data-tab="flamegraph"]')).toHaveClass(/active/);
+  await page.keyboard.press('1');
+  await expect(page.locator('.tab[data-tab="functions"]')).toHaveClass(/active/);
+
+  // '/' jumps to the flamegraph search box
+  await page.keyboard.press('/');
+  await expect(page.locator('.tab[data-tab="flamegraph"]')).toHaveClass(/active/);
+  await expect(page.locator('#fg-search')).toBeFocused();
+
+  // Shortcuts are inert while typing: '1' goes into the input
+  await page.keyboard.press('1');
+  await expect(page.locator('.tab[data-tab="flamegraph"]')).toHaveClass(/active/);
+  await page.locator('#fg-search-clear').click();
+
+  // '?' opens the help overlay, Escape closes it
+  await page.locator('body').click({ position: { x: 5, y: 5 } });
+  await page.keyboard.press('?');
+  await expect(page.getByTestId('shortcuts-help')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.getByTestId('shortcuts-help')).toBeHidden();
+});
+
+test('setting a baseline shows the diff column and legend', async ({ page }) => {
+  await replayFixture(page);
+  await page.locator('#diff-set-btn').click();
+  await expect(page.locator('#diff-toggle')).toBeChecked();
+  await expect(page.getByTestId('diff-legend')).toBeVisible();
+  // Replay vs itself: the Δ Self column shows flat deltas
+  await expect(page.locator('#function-table').first()).toHaveClass(/diff-mode/);
+  await expect(page.locator('#function-tbody .diff-flat').first()).toBeVisible();
+  await page.locator('#diff-clear-btn').click();
+  await expect(page.getByTestId('diff-legend')).toBeHidden();
+});
+
 test('no page errors across the whole run', async ({ page }) => {
   await replayFixture(page);
   for (const tab of ['functions', 'flamegraph', 'threads', 'sessions']) {

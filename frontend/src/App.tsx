@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { api, exportUrls } from './api/client';
 import { connectSSE, disconnectSSE } from './api/sse';
 import { replaySession } from './lib/replay';
+import { installShortcuts } from './lib/shortcuts';
+import ShortcutsHelp from './components/ShortcutsHelp';
 import { useLive } from './store/live';
 import { useUi } from './store/ui';
 import { parseHash, replaceHash } from './store/urlHash';
@@ -89,7 +91,7 @@ function Banners() {
     <>
       <div id="error-banner" className={error ? 'visible' : ''}>
         <span id="error-text">{error ?? ''}</span>
-        <button id="error-close" onClick={hideError}>&times;</button>
+        <button id="error-close" aria-label="Dismiss error" onClick={hideError}>&times;</button>
       </div>
       <div id="replay-banner" className={isReplayMode ? 'visible' : ''} data-testid="replay-banner">
         <span id="replay-text">
@@ -129,7 +131,8 @@ export default function App() {
     }).catch(() => {});
 
     connectSSE();
-    return () => disconnectSSE();
+    const uninstall = installShortcuts();
+    return () => { disconnectSSE(); uninstall(); };
   }, []);
 
   // Keep the URL hash in sync with the shareable view state
@@ -160,6 +163,7 @@ export default function App() {
           <ProfilingView active={view === 'profiling'} />
         </div>
       </main>
+      <ShortcutsHelp />
     </>
   );
 }

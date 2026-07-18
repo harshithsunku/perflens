@@ -96,9 +96,20 @@ export default function FunctionTable({ data, baselineMap, onSelectFunction }: P
           </tr>
         </thead>
         <tbody id="function-tbody">
-          {visible.length === 0 && (
+          {data === null && (
+            // Loading skeleton: no snapshot fetched yet
+            Array.from({ length: 8 }, (_, i) => (
+              <tr key={'skel' + i} className="skeleton-row" aria-hidden="true">
+                <td colSpan={7}><div className="skeleton-bar"
+                    style={{ width: `${85 - i * 9}%` }}></div></td>
+              </tr>
+            ))
+          )}
+          {data !== null && visible.length === 0 && (
             <tr><td colSpan={7} className="empty">
-              {totalFunctions === 0 ? 'Waiting for data...' : 'No matching functions'}
+              {totalFunctions === 0
+                ? 'Waiting for samples — they appear a few seconds after collection starts'
+                : 'No matching functions'}
             </td></tr>
           )}
           {visible.map((f, i) => {

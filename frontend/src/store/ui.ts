@@ -11,6 +11,7 @@ interface UiState {
   activeTab: Tab;
   theme: Theme;
   error: string | null;
+  helpOpen: boolean;
 
   showView: (v: View) => void;
   switchTab: (t: Tab) => void;
@@ -18,6 +19,7 @@ interface UiState {
   toggleTheme: () => void;
   showError: (msg: string) => void;
   hideError: () => void;
+  setHelp: (open: boolean) => void;
 }
 
 function initialTheme(): Theme {
@@ -35,6 +37,7 @@ export const useUi = create<UiState>((set, get) => ({
   activeTab: 'functions',
   theme: initialTheme(),
   error: null,
+  helpOpen: false,
 
   showView: (v) => set({ view: v }),
   switchTab: (t) => set({ activeTab: t }),
@@ -55,6 +58,8 @@ export const useUi = create<UiState>((set, get) => ({
     clearTimeout(errorTimer);
     set({ error: null });
   },
+
+  setHelp: (open) => set({ helpOpen: open }),
 }));
 
 /** Read a CSS custom property off the document root (theme-aware colors

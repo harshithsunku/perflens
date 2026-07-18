@@ -172,6 +172,20 @@ perflens serve --addr2line /opt/toolchain/bin/arm-linux-gnueabihf-addr2line \\
   <p>Drag across any Device Health sparkline to select a time range — the Functions table and Flame Graph rebuild from only the samples received in that window. A chip next to the event selector shows the active window; click &times; to return to the full session. Limited to the raw-sample ring buffer (<code>--max-samples</code>) and live sessions.</p>
 </section>
 <section class="docs-section">
+  <h3>Keyboard Shortcuts</h3>
+  <table class="docs-table">
+    <thead><tr><th>Key</th><th>Action</th></tr></thead>
+    <tbody>
+      <tr><td><code>1</code>&ndash;<code>5</code></td><td>Switch tab (Functions / Source / Flame Graph / Threads / Sessions)</td></tr>
+      <tr><td><code>/</code></td><td>Search the flame graph</td></tr>
+      <tr><td><code>Ctrl+F</code></td><td>Focus search on the Flame Graph tab</td></tr>
+      <tr><td><code>t</code></td><td>Toggle light / dark theme</td></tr>
+      <tr><td><code>?</code></td><td>Show the shortcut help overlay</td></tr>
+      <tr><td><code>Esc</code></td><td>Close dialogs and popovers</td></tr>
+    </tbody>
+  </table>
+</section>
+<section class="docs-section">
   <h3>Shareable URLs</h3>
   <p>The active tab, event, thread filter, flame-graph zoom path, and replayed session are reflected in the URL hash — refresh keeps your place, and the link can be pasted to a teammate looking at the same server.</p>
 </section>
