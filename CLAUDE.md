@@ -30,7 +30,7 @@ history.
                                         parser.py  (perf script / perf stat)
                                         source_mapper.py  (addr2line + source)
                                              |
-                                        SSE  --->  Browser (app.js)
+                                        SSE  --->  Browser (React SPA)
 ```
 
 ### Wire protocol
@@ -52,11 +52,26 @@ history.
   Python package with a small, deliberate dependency set (fastapi, uvicorn,
   orjson, zstandard) — everything resolves user-space via `uvx perflens`
   or `pip install --user`; no sudo, no Docker, corporate-machine friendly.
-- Plain HTML + vanilla JS + CSS for the UI. No bundler, no framework.
-- HTTP layer (`web.py`): FastAPI on uvicorn. Every handler is a direct
-  port of the original stdlib implementation — URL paths and JSON shapes
-  are frozen (the UI depends on them). SSE fan-out is an asyncio hub;
-  worker threads publish via `loop.call_soon_threadsafe`.
+- UI: React 19 + TypeScript + Vite single-page app in `frontend/`.
+  The wheel ships the **prebuilt** static assets (Vite output lands in
+  `src/perflens/ui/`, which is gitignored) — end users need only
+  `uvx perflens` / pip; Node is a dev/CI-build-time dependency only.
+  State: zustand (live session) + TanStack Query (fetches). Styling:
+  the original CSS custom-property theme (`frontend/src/styles/theme.css`,
+  `data-theme` dark/light); Tailwind 4 + Radix are installed for the
+  upcoming visual overhaul.
+- Type-safety bridge: Pydantic v2 models (`src/perflens/api/models.py`)
+  → FastAPI OpenAPI (`/api/openapi.json`, exported to
+  `frontend/openapi.json` by `tools/export_openapi.py`) →
+  `npm run typegen` generates `frontend/src/api/types.gen.ts`. CI fails
+  on schema drift, so keep the exported file in sync when models change.
+- No module globals on the server: everything hangs off `AppContext`
+  (`app.py`) — HTTP routes get it via `request.app.state.ctx`, worker
+  threads receive it at construction.
+- HTTP layer (`web.py`): FastAPI on uvicorn. SSE fan-out is an asyncio
+  hub; worker threads publish via `loop.call_soon_threadsafe`. Live
+  updates use notify-and-fetch: a tiny `data_version` SSE stamp, then the
+  browser pulls `/api/per-event` for the event it is viewing.
 - The agent TCP listener, recv loops, and the aggregation rebuild worker
   are plain threads (blocking sockets + subprocess work); uvicorn owns
   only the HTTP side. Heavy request handlers are sync `def` routes that
@@ -120,16 +135,32 @@ perflens/
 │   └── vendor/zstd/              # zstd single-file amalgamation
 ├── pyproject.toml                # pip/uv package (console script: perflens)
 ├── src/perflens/                 # the server package
-│   ├── server.py                 # agent TCP protocol + state + sessions
+│   ├── app.py                    # AppContext + lifecycle + main()
+│   ├── config.py                 # ServerConfig, CLI parsing, tool probing
+│   ├── state.py                  # ProfilingState, MetricsState, rebuild worker
+│   ├── agentlink.py              # agent TCP wire protocol + AgentSession
+│   ├── sessions.py               # session persistence, replay, perf.data import
+│   ├── export.py                 # collapsed-stack + SVG flamegraph export
 │   ├── web.py                    # FastAPI/uvicorn HTTP layer + SSE hub
+│   ├── api/                      # Pydantic v2 schemas + response helpers
+│   ├── server.py                 # compat shim (one release)
 │   ├── cli.py                    # perflens serve/import/push-agent/provision
 │   ├── parser.py                 # perf script / perf stat parser
 │   ├── aggregator.py             # incremental per-event aggregation
 │   ├── source_mapper.py          # addr2line pipeline + path remap
 │   ├── symcache.py               # persistent caches (~/.perflens/cache)
 │   ├── provision.py              # static addr2line/readelf download (~/.perflens/bin)
-│   └── ui/                       # single-page app (ships in the wheel)
+│   └── ui/                       # BUILT React app (gitignored Vite output;
+│                                 #   ships in the wheel/sdist via hatch artifacts)
+├── frontend/                     # React 19 + TypeScript + Vite SPA source
+│   ├── src/api/                  # typed client, SSE wiring, types.gen.ts
+│   ├── src/store/                # zustand stores + URL-hash deep links
+│   ├── src/lib/flamegraph/       # pure layout/zoom/diff/color modules
+│   ├── src/components/, src/views/
+│   ├── e2e/                      # Playwright browser E2E (self-contained)
+│   └── openapi.json              # committed schema (CI drift-checked)
 ├── server/perflens_server.py     # compat shim (one release)
+├── tools/export_openapi.py       # dump OpenAPI schema for TS typegen
 ├── docs/
 │   ├── hero.svg
 │   ├── architecture.svg
@@ -137,13 +168,12 @@ perflens/
 ├── tests/
 │   ├── conftest.py               # shared pytest fixtures
 │   ├── test_*.py                 # pytest suite (parser, aggregator, http, agent, ...)
-│   ├── e2e_ui.mjs                # puppeteer browser E2E (self-contained)
 │   ├── fixtures/                 # device-captured perf sessions (gzipped)
 │   ├── sample_workload.c
 │   └── Makefile
-├── build_package.sh
-├── .github/workflows/test.yml    # pytest matrix + browser e2e
-├── .github/workflows/build.yml
+├── build_package.sh              # builds frontend (if needed) + wheel + agent
+├── .github/workflows/test.yml    # pytest matrix + vitest + playwright e2e
+├── .github/workflows/build.yml   # frontend build + wheel + release
 ├── VERSION
 ├── LICENSE (MIT)
 ├── README.md
@@ -234,18 +264,29 @@ Options:
 
 ## Development rules
 
+- **The agent is FROZEN.** Do not change `agent-c/` or the TCP wire
+  protocol. Everything server-side of the socket is fair game.
 - **Simplicity first.** A small, deliberate server dependency set
-  (fastapi, uvicorn, orjson, zstandard — all user-space); plain HTML/JS/CSS
-  for the UI, no bundler, no npm at runtime; the agent stays
-  zero-dependency static C.
+  (fastapi, uvicorn, orjson, zstandard, pydantic — all user-space).
+  The UI is React + TS + Vite, but Node is dev/CI-only: the wheel ships
+  prebuilt assets, so `uvx perflens` needs no npm at runtime; the agent
+  stays zero-dependency static C.
+- **Frontend dev workflow.** `perflens serve` on 8080 + `npm --prefix
+  frontend run dev` (Vite on 5173, proxies `/api` incl. SSE). Build with
+  `npm --prefix frontend run build` (emits into `src/perflens/ui/`).
+  After changing `api/models.py` or routes: `python tools/export_openapi.py
+  && npm --prefix frontend run typegen` (CI diff-checks both).
 - **Defensive parsing.** `perf` output format varies across kernel versions;
   the parser is forgiving.
 - **Generic.** No proprietary names, no IPs, no credentials, no company
   references in code, docs, commit messages, or history.
 - **No over-engineering.** If a piece of code doesn't earn its complexity,
   it gets cut.
-- **Test end-to-end before committing.** Server + agent + browser UI on a
-  real Linux target.
+- **Test end-to-end before committing.** `pytest tests/`, `npm --prefix
+  frontend run test` (vitest), and `npm --prefix frontend run e2e`
+  (Playwright, self-contained: starts its own server + fixture session).
+  For agent changes (rare, requires explicit approval): a real Linux
+  target.
 
 ---
 

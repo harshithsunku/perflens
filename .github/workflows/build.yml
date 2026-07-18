@@ -35,6 +35,18 @@ jobs:
       - name: Build C agent (needed by the protocol tests)
         run: make -C agent-c
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        run: |
+          npm --prefix frontend ci
+          npm --prefix frontend run build
+
       - name: Run pytest
         run: |
           python -m pip install -e '.[dev]'
@@ -52,13 +64,16 @@ jobs:
           import glob, sys, zipfile
           whl = glob.glob('dist/perflens-*-py3-none-any.whl')[0]
           names = zipfile.ZipFile(whl).namelist()
-          required = ['perflens/server.py', 'perflens/web.py',
+          required = ['perflens/app.py', 'perflens/web.py',
                       'perflens/provision.py', 'perflens/cli.py']
           missing = [r for r in required if r not in names]
           ui = [n for n in names if '/ui/' in n]
-          for f in ('index.html', 'app.js', 'style.css'):
-              if not any(n.endswith(f) for n in ui):
-                  missing.append(f'ui/{f}')
+          if not any(n.endswith('index.html') for n in ui):
+              missing.append('ui/index.html')
+          if not any('/ui/assets/' in n and n.endswith('.js') for n in ui):
+              missing.append('ui/assets/*.js')
+          if not any('/ui/assets/' in n and n.endswith('.css') for n in ui):
+              missing.append('ui/assets/*.css')
           if missing:
               sys.exit(f'wheel is missing: {missing}')
           print(f'wheel OK: {len(names)} files, UI bundled')

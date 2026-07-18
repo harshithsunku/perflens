@@ -30,7 +30,7 @@
 
 **PerfLens** is a remote Linux performance profiler with a real-time web UI. Drop the agent on any Linux device (ARM or x86), point it at a PID, and watch flame graphs, function tables, `perf stat` metrics, and line-level annotated source update live in your browser.
 
-No frontend frameworks. No Docker. Plain HTML/CSS/JS for the UI, and a single static C agent binary (~2 MB) with zero runtime dependencies — it runs on anything from bare-metal embedded boards to servers, installs with one curl command, and updates itself with `--update`.
+No Docker, no sudo. A modern React + TypeScript UI shipped **prebuilt** inside the Python wheel (end users never need Node), and a single static C agent binary (~2 MB) with zero runtime dependencies — it runs on anything from bare-metal embedded boards to servers, installs with one curl command, and updates itself with `--update`.
 
 ---
 
@@ -43,7 +43,7 @@ No frontend frameworks. No Docker. Plain HTML/CSS/JS for the UI, and a single st
 - **Timeline scrubbing** — drag across a Device Health sparkline to rebuild the flame graph and function table from only the samples collected in that window (e.g. select a CPU spike)
 - **Per-thread profiling** — filter flame graphs, function tables, and source annotations by thread; dedicated thread analysis view with per-thread CPU breakdown, plus an optional real-time Live CPU column fed by the agent
 - **Device health strip** — live CPU, memory, temperature, load, and network sparklines; opt-in disk I/O and per-thread CPU collectors (off by default to stay light on embedded targets) toggled from the UI at runtime
-- **Interactive SVG flame graphs** — vanilla JS, no d3, no bundling; zoomable, hoverable
+- **Interactive SVG flame graphs** — hand-rolled layout engine (no d3); ancestry zoom, regex search, diff coloring, hover details
 - **Shareable URLs** — tab, event, thread filter, flame-graph zoom, and replayed session live in the URL hash; refresh or paste a link and land on the same view
 - **Cross-compilation toolchain support** — `--toolchain-prefix` derives addr2line and readelf from a single prefix; `--sysroot` resolves shared libraries and source files under a sysroot tree
 - **ARM + x86** — same agent code runs on aarch64, aarch64_be, armv7l, x86_64
@@ -356,10 +356,8 @@ perflens/
 │   ├── source_mapper.py          # addr2line pipeline + path remap
 │   ├── symcache.py               # persistent caches (~/.perflens/cache)
 │   ├── provision.py              # user-space static-tools download
-│   └── ui/                       # single-page app (ships in the wheel)
-│       ├── index.html
-│       ├── app.js                # all UI logic (vanilla JS)
-│       └── style.css             # dark + light themes
+│   └── ui/                       # built React app (Vite output; ships in the wheel)
+├── frontend/                     # React + TypeScript + Vite UI source
 ├── docs/
 │   ├── hero.svg
 │   ├── architecture.svg
@@ -405,7 +403,7 @@ sudo sysctl -w kernel.perf_event_paranoid=1
 
 These are the rules the project is built to:
 
-- **Simplicity first** — a small, deliberate server stack (fastapi/uvicorn/orjson/zstandard, all user-space via uv); plain HTML/JS/CSS, no bundler, no npm; the agent stays zero-dependency static C
+- **Simplicity first** — a small, deliberate server stack (fastapi/uvicorn/orjson/zstandard, all user-space via uv); the React + TypeScript UI ships prebuilt in the wheel so npm is a contributor-only tool; the agent stays zero-dependency static C
 - **Defensive parsing** — `perf` output format varies across kernel versions; parser is forgiving
 - **No secrets in code** — generic and open-source-friendly
 - **No over-engineering** — if it doesn't earn its complexity, it gets cut

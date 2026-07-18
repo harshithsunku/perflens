@@ -16,3 +16,7 @@ tests/matrixlab/bin/
 .devices.conf
 node_modules/
 *.pid
+src/perflens/ui/
+frontend/test-results/
+frontend/playwright-report/
+*.tsbuildinfo

@@ -78,7 +78,25 @@ info "PerfLens build -- version ${VERSION}"
 # Server: Python wheel + sdist
 # ---------------------------------------------------------------------------
 
+build_frontend() {
+    # The wheel ships the built React UI (src/perflens/ui is gitignored
+    # build output). Build it if missing or stale.
+    if [ ! -f "$REPO_ROOT/src/perflens/ui/index.html" ]; then
+        info "Building frontend (npm --prefix frontend)"
+        if ! command -v npm >/dev/null 2>&1; then
+            err "npm not found — the frontend must be built before packaging."
+            err "Install Node 22+ or run: npm --prefix frontend ci && npm --prefix frontend run build"
+            return 1
+        fi
+        (cd "$REPO_ROOT/frontend" && npm ci && npm run build) || {
+            err "frontend build failed"
+            return 1
+        }
+    fi
+}
+
 build_server() {
+    build_frontend || return 1
     info "Building Python wheel + sdist"
     if command -v uv >/dev/null 2>&1; then
         uv build
@@ -100,12 +118,16 @@ build_server() {
     python3 - "$whl" <<'EOF'
 import sys, zipfile
 names = zipfile.ZipFile(sys.argv[1]).namelist()
-required = ['perflens/server.py', 'perflens/web.py',
+required = ['perflens/app.py', 'perflens/web.py',
             'perflens/provision.py', 'perflens/cli.py']
 missing = [r for r in required if r not in names]
-for f in ('index.html', 'app.js', 'style.css'):
-    if not any(n.endswith(f) and '/ui/' in n for n in names):
-        missing.append(f'ui/{f}')
+ui = [n for n in names if '/ui/' in n]
+if not any(n.endswith('index.html') for n in ui):
+    missing.append('ui/index.html')
+if not any('/ui/assets/' in n and n.endswith('.js') for n in ui):
+    missing.append('ui/assets/*.js')
+if not any('/ui/assets/' in n and n.endswith('.css') for n in ui):
+    missing.append('ui/assets/*.css')
 if missing:
     sys.exit(f'wheel is missing: {missing}')
 EOF

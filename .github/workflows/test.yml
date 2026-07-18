@@ -14,7 +14,8 @@ jobs:
   # pytest suite: parser, aggregator (differential vs device fixtures),
   # source mapper, HTTP API (TestClient + live SSE), provisioning against
   # a fake release server, and the C-agent wire protocol (real binary
-  # against a fake framing server with a perf shim).
+  # against a fake framing server with a perf shim). Runs without Node —
+  # the static-UI test skips when the frontend isn't built.
   # -------------------------------------------------------------------------
   pytest:
     name: pytest (py${{ matrix.python }})
@@ -42,12 +43,13 @@ jobs:
         run: python -m pytest tests/ -v -ra
 
   # -------------------------------------------------------------------------
-  # Browser E2E: puppeteer drives the real UI against a real server
-  # replaying a device-captured fixture session (tests/e2e_ui.mjs is
-  # self-contained — it starts and stops its own server).
+  # Frontend: typecheck + vitest unit tests + Playwright browser E2E
+  # against a real server replaying a device-captured fixture session
+  # (frontend/e2e is self-contained — it starts and stops its own server).
+  # Also verifies the committed OpenAPI schema hasn't drifted.
   # -------------------------------------------------------------------------
-  e2e:
-    name: browser e2e
+  frontend:
+    name: frontend (vitest + playwright e2e)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -63,12 +65,35 @@ jobs:
         with:
           node-version: '22'
           cache: npm
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Install server
         run: python -m pip install -e .
 
-      - name: Install puppeteer
-        run: npm ci
+      - name: Install frontend deps
+        run: npm --prefix frontend ci
 
-      - name: Run browser E2E
-        run: node tests/e2e_ui.mjs
+      - name: OpenAPI schema drift check
+        run: |
+          python tools/export_openapi.py /tmp/openapi.json
+          diff -u frontend/openapi.json /tmp/openapi.json
+
+      - name: Unit tests (vitest)
+        run: npm --prefix frontend run test
+
+      - name: Build frontend
+        run: npm --prefix frontend run build
+
+      - name: Install Playwright browser
+        run: cd frontend && npx playwright install chromium --with-deps
+
+      - name: Run browser E2E (Playwright)
+        run: npm --prefix frontend run e2e
+
+      - name: Upload Playwright traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: frontend/playwright-report/
+          retention-days: 7

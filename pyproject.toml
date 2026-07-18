@@ -67,6 +67,9 @@ include = [
     "LICENSE",
     "CHANGELOG.md",
 ]
+# The built UI is gitignored (Vite output) but must ship in the sdist so
+# `pip install perflens-x.tar.gz` serves the web UI without Node.
+artifacts = ["src/perflens/ui/**"]
 
 [tool.ruff]
 line-length = 100

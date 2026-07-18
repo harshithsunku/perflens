@@ -1,0 +1,2146 @@
+{
+  "components": {
+    "schemas": {
+      "AgentCommand": {
+        "description": "One flag-2 command frame: {id, cmd, args}. The documented command\nset of the frozen agent; used for OpenAPI/TS documentation now and\nserver-side enforcement in API v2.",
+        "properties": {
+          "args": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StartArgs"
+              },
+              {
+                "$ref": "#/components/schemas/ConfigureArgs"
+              },
+              {
+                "$ref": "#/components/schemas/ConfigureMetricsArgs"
+              },
+              {
+                "additionalProperties": true,
+                "type": "object"
+              }
+            ],
+            "title": "Args"
+          },
+          "cmd": {
+            "enum": [
+              "ping",
+              "status",
+              "start",
+              "stop",
+              "pause",
+              "resume",
+              "configure",
+              "configure_metrics",
+              "list_processes",
+              "reprobe",
+              "probe_binary"
+            ],
+            "title": "Cmd",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "cmd"
+        ],
+        "title": "AgentCommand",
+        "type": "object"
+      },
+      "AgentCommandRequest": {
+        "description": "Generic command relay body for POST /api/agent/command.",
+        "properties": {
+          "args": {
+            "additionalProperties": true,
+            "title": "Args",
+            "type": "object"
+          },
+          "cmd": {
+            "default": "",
+            "title": "Cmd",
+            "type": "string"
+          },
+          "timeout": {
+            "default": 60,
+            "title": "Timeout",
+            "type": "integer"
+          }
+        },
+        "title": "AgentCommandRequest",
+        "type": "object"
+      },
+      "AgentCommandResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "ok": {
+            "default": true,
+            "title": "Ok",
+            "type": "boolean"
+          }
+        },
+        "title": "AgentCommandResponse",
+        "type": "object"
+      },
+      "AgentHello": {
+        "additionalProperties": true,
+        "description": "The agent's flag-3 hello payload (frozen wire JSON).",
+        "properties": {
+          "platform": {
+            "additionalProperties": true,
+            "title": "Platform",
+            "type": "object"
+          },
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Token"
+          },
+          "type": {
+            "const": "hello",
+            "default": "hello",
+            "title": "Type",
+            "type": "string"
+          },
+          "version": {
+            "default": "",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "title": "AgentHello",
+        "type": "object"
+      },
+      "BrowseEntry": {
+        "properties": {
+          "is_dir": {
+            "title": "Is Dir",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "size": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size"
+          }
+        },
+        "required": [
+          "name",
+          "path",
+          "is_dir"
+        ],
+        "title": "BrowseEntry",
+        "type": "object"
+      },
+      "BrowseResponse": {
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/BrowseEntry"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "parent": {
+            "title": "Parent",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "parent",
+          "entries"
+        ],
+        "title": "BrowseResponse",
+        "type": "object"
+      },
+      "ConfigResult": {
+        "additionalProperties": true,
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok"
+        ],
+        "title": "ConfigResult",
+        "type": "object"
+      },
+      "ConfigureArgs": {
+        "description": "configure: change sampling parameters mid-session.",
+        "properties": {
+          "duration": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Duration"
+          },
+          "frequency": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Frequency"
+          }
+        },
+        "title": "ConfigureArgs",
+        "type": "object"
+      },
+      "ConfigureMetricsArgs": {
+        "description": "configure_metrics: toggle opt-in collectors / interval on the agent.",
+        "properties": {
+          "disk": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Disk"
+          },
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Enabled"
+          },
+          "interval": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Interval"
+          },
+          "network": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Network"
+          },
+          "threads": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Threads"
+          }
+        },
+        "title": "ConfigureMetricsArgs",
+        "type": "object"
+      },
+      "ConnectRequest": {
+        "properties": {
+          "host": {
+            "title": "Host",
+            "type": "string"
+          },
+          "port": {
+            "default": 9999,
+            "title": "Port",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "host"
+        ],
+        "title": "ConnectRequest",
+        "type": "object"
+      },
+      "ConnectResponse": {
+        "properties": {
+          "addr": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Addr"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "hello": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentHello"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok"
+        ],
+        "title": "ConnectResponse",
+        "type": "object"
+      },
+      "DataVersion": {
+        "description": "Version stamp for the notify-and-fetch cycle. Broadcast over SSE\n(with event_types) and echoed by /api/per-event (without).",
+        "properties": {
+          "chunk_count": {
+            "title": "Chunk Count",
+            "type": "integer"
+          },
+          "event_types": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Event Types"
+          },
+          "total_samples": {
+            "title": "Total Samples",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "chunk_count",
+          "total_samples"
+        ],
+        "title": "DataVersion",
+        "type": "object"
+      },
+      "ErrorResponse": {
+        "properties": {
+          "error": {
+            "title": "Error",
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "title": "ErrorResponse",
+        "type": "object"
+      },
+      "FlamegraphNode": {
+        "properties": {
+          "children": {
+            "items": {
+              "$ref": "#/components/schemas/FlamegraphNode"
+            },
+            "title": "Children",
+            "type": "array"
+          },
+          "inlined": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inlined"
+          },
+          "module": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Module"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "value"
+        ],
+        "title": "FlamegraphNode",
+        "type": "object"
+      },
+      "FunctionEntry": {
+        "properties": {
+          "module": {
+            "title": "Module",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "percent": {
+            "title": "Percent",
+            "type": "number"
+          },
+          "samples": {
+            "title": "Samples",
+            "type": "integer"
+          },
+          "self_percent": {
+            "title": "Self Percent",
+            "type": "number"
+          },
+          "self_samples": {
+            "title": "Self Samples",
+            "type": "integer"
+          },
+          "total_percent": {
+            "title": "Total Percent",
+            "type": "number"
+          },
+          "total_samples": {
+            "title": "Total Samples",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "module",
+          "samples",
+          "percent",
+          "self_samples",
+          "self_percent",
+          "total_samples",
+          "total_percent"
+        ],
+        "title": "FunctionEntry",
+        "type": "object"
+      },
+      "FunctionSummary": {
+        "properties": {
+          "functions": {
+            "items": {
+              "$ref": "#/components/schemas/FunctionEntry"
+            },
+            "title": "Functions",
+            "type": "array"
+          },
+          "total_samples": {
+            "title": "Total Samples",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total_samples",
+          "functions"
+        ],
+        "title": "FunctionSummary",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "ImportResponse": {
+        "properties": {
+          "event_types": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Event Types",
+            "type": "array"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "total_samples": {
+            "title": "Total Samples",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "session_id",
+          "total_samples",
+          "event_types"
+        ],
+        "title": "ImportResponse",
+        "type": "object"
+      },
+      "IndexFilesResponse": {
+        "properties": {
+          "files": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Files",
+            "type": "array"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total",
+          "offset",
+          "limit",
+          "files"
+        ],
+        "title": "IndexFilesResponse",
+        "type": "object"
+      },
+      "IndexStatus": {
+        "additionalProperties": true,
+        "properties": {
+          "indexing": {
+            "default": false,
+            "title": "Indexing",
+            "type": "boolean"
+          },
+          "source_files_found": {
+            "default": 0,
+            "title": "Source Files Found",
+            "type": "integer"
+          },
+          "symbols_loaded": {
+            "default": 0,
+            "title": "Symbols Loaded",
+            "type": "integer"
+          }
+        },
+        "title": "IndexStatus",
+        "type": "object"
+      },
+      "MetricsFrame": {
+        "additionalProperties": true,
+        "description": "One health-metrics snapshot from the agent (flag-4 frame). The\nagent's shape varies by type and platform \u2014 modeled loosely on\npurpose; `type` is system|process|network|disk|threads.",
+        "properties": {
+          "ts": {
+            "default": 0,
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "default": "",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "title": "MetricsFrame",
+        "type": "object"
+      },
+      "PathConfigRequest": {
+        "properties": {
+          "path": {
+            "default": "",
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        "title": "PathConfigRequest",
+        "type": "object"
+      },
+      "PathMapConfigRequest": {
+        "properties": {
+          "path_map": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Path Map",
+            "type": "object"
+          }
+        },
+        "title": "PathMapConfigRequest",
+        "type": "object"
+      },
+      "PerEventEntry": {
+        "properties": {
+          "flamegraph": {
+            "$ref": "#/components/schemas/FlamegraphNode"
+          },
+          "function_summary": {
+            "$ref": "#/components/schemas/FunctionSummary"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "source_files": {
+            "items": {
+              "$ref": "#/components/schemas/SourceFileRef"
+            },
+            "title": "Source Files",
+            "type": "array"
+          },
+          "threads": {
+            "items": {
+              "$ref": "#/components/schemas/ThreadRef"
+            },
+            "title": "Threads",
+            "type": "array"
+          }
+        },
+        "required": [
+          "function_summary",
+          "flamegraph",
+          "source_files",
+          "threads"
+        ],
+        "title": "PerEventEntry",
+        "type": "object"
+      },
+      "PerEventResponse": {
+        "description": "GET /api/per-event?event=<evt>",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/PerEventEntry"
+          },
+          "event": {
+            "title": "Event",
+            "type": "string"
+          },
+          "version": {
+            "$ref": "#/components/schemas/DataVersion"
+          }
+        },
+        "required": [
+          "event",
+          "data",
+          "version"
+        ],
+        "title": "PerEventResponse",
+        "type": "object"
+      },
+      "SSEAgentConnectedEvent": {
+        "description": "`agent_connected` event: fired once per new agent session.",
+        "properties": {
+          "agent": {
+            "title": "Agent",
+            "type": "string"
+          },
+          "platform": {
+            "additionalProperties": true,
+            "title": "Platform",
+            "type": "object"
+          }
+        },
+        "required": [
+          "agent"
+        ],
+        "title": "SSEAgentConnectedEvent",
+        "type": "object"
+      },
+      "SSECatalog": {
+        "description": "Not an endpoint \u2014 enumerates every event on GET /api/stream so the\npayload models land in the OpenAPI components for TS generation.\n\nEvents: `status` (SSEStatusEvent), `agent_connected`\n(SSEAgentConnectedEvent), `event_types` (list[str]), `data_version`\n(DataVersion, with event_types), `perf_stat` (dict), `metrics_system`\n/ `metrics_process` / `metrics_network` / `metrics_disk` /\n`metrics_threads` (MetricsFrame).",
+        "properties": {
+          "agent_connected": {
+            "$ref": "#/components/schemas/SSEAgentConnectedEvent"
+          },
+          "data_version": {
+            "$ref": "#/components/schemas/DataVersion"
+          },
+          "event_types": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Event Types",
+            "type": "array"
+          },
+          "metrics": {
+            "$ref": "#/components/schemas/MetricsFrame"
+          },
+          "perf_stat": {
+            "additionalProperties": true,
+            "title": "Perf Stat",
+            "type": "object"
+          },
+          "status": {
+            "$ref": "#/components/schemas/SSEStatusEvent"
+          }
+        },
+        "required": [
+          "status",
+          "agent_connected",
+          "event_types",
+          "data_version",
+          "perf_stat",
+          "metrics"
+        ],
+        "title": "SSECatalog",
+        "type": "object"
+      },
+      "SSEStatusEvent": {
+        "description": "`status` event: agent connect/disconnect.",
+        "properties": {
+          "agent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Agent"
+          },
+          "connected": {
+            "title": "Connected",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "connected"
+        ],
+        "title": "SSEStatusEvent",
+        "type": "object"
+      },
+      "SessionMetadata": {
+        "additionalProperties": true,
+        "properties": {
+          "agent": {
+            "default": "",
+            "title": "Agent",
+            "type": "string"
+          },
+          "chunks": {
+            "default": 0,
+            "title": "Chunks",
+            "type": "integer"
+          },
+          "event_types": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Event Types",
+            "type": "array"
+          },
+          "metrics_summary": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metrics Summary"
+          },
+          "perf_stat": {
+            "additionalProperties": true,
+            "title": "Perf Stat",
+            "type": "object"
+          },
+          "platform": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Platform"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "timestamp": {
+            "default": "",
+            "title": "Timestamp",
+            "type": "string"
+          },
+          "total_samples": {
+            "default": 0,
+            "title": "Total Samples",
+            "type": "integer"
+          },
+          "version": {
+            "default": "",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id"
+        ],
+        "title": "SessionMetadata",
+        "type": "object"
+      },
+      "SessionReplayResponse": {
+        "properties": {
+          "metadata": {
+            "$ref": "#/components/schemas/SessionMetadata"
+          },
+          "metrics": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metrics"
+          },
+          "per_event": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/PerEventEntry"
+            },
+            "title": "Per Event",
+            "type": "object"
+          }
+        },
+        "required": [
+          "metadata",
+          "per_event"
+        ],
+        "title": "SessionReplayResponse",
+        "type": "object"
+      },
+      "SourceFileRef": {
+        "properties": {
+          "found": {
+            "title": "Found",
+            "type": "boolean"
+          },
+          "functions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Functions",
+            "type": "array"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "total_samples": {
+            "title": "Total Samples",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path",
+          "found",
+          "total_samples",
+          "functions"
+        ],
+        "title": "SourceFileRef",
+        "type": "object"
+      },
+      "SourceResponse": {
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "file": {
+            "title": "File",
+            "type": "string"
+          },
+          "lines": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Lines",
+            "type": "array"
+          }
+        },
+        "required": [
+          "file",
+          "lines"
+        ],
+        "title": "SourceResponse",
+        "type": "object"
+      },
+      "StartArgs": {
+        "description": "start: begin collection on a PID. `events` may narrow the probed\nrecord-event set; frequency/duration override the agent defaults.",
+        "properties": {
+          "duration": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Duration"
+          },
+          "events": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Events"
+          },
+          "frequency": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Frequency"
+          },
+          "pid": {
+            "title": "Pid",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pid"
+        ],
+        "title": "StartArgs",
+        "type": "object"
+      },
+      "Status": {
+        "properties": {
+          "agent_addr": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Addr"
+          },
+          "agent_connected": {
+            "title": "Agent Connected",
+            "type": "boolean"
+          },
+          "chunk_count": {
+            "title": "Chunk Count",
+            "type": "integer"
+          },
+          "status": {
+            "const": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "total_samples": {
+            "title": "Total Samples",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "status",
+          "agent_connected",
+          "total_samples",
+          "chunk_count"
+        ],
+        "title": "Status",
+        "type": "object"
+      },
+      "StopResponse": {
+        "properties": {
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "stopped": {
+            "title": "Stopped",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "stopped"
+        ],
+        "title": "StopResponse",
+        "type": "object"
+      },
+      "ThreadRef": {
+        "properties": {
+          "comm": {
+            "title": "Comm",
+            "type": "string"
+          },
+          "tid": {
+            "title": "Tid",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "tid",
+          "comm"
+        ],
+        "title": "ThreadRef",
+        "type": "object"
+      },
+      "ThreadSummaryEntry": {
+        "properties": {
+          "comm": {
+            "title": "Comm",
+            "type": "string"
+          },
+          "percent": {
+            "title": "Percent",
+            "type": "number"
+          },
+          "samples": {
+            "title": "Samples",
+            "type": "integer"
+          },
+          "tid": {
+            "title": "Tid",
+            "type": "integer"
+          },
+          "top_function": {
+            "title": "Top Function",
+            "type": "string"
+          },
+          "top_function_samples": {
+            "title": "Top Function Samples",
+            "type": "integer"
+          },
+          "top_functions": {
+            "items": {
+              "$ref": "#/components/schemas/ThreadTopFunction"
+            },
+            "title": "Top Functions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "tid",
+          "comm",
+          "samples",
+          "percent",
+          "top_function",
+          "top_function_samples",
+          "top_functions"
+        ],
+        "title": "ThreadSummaryEntry",
+        "type": "object"
+      },
+      "ThreadSummaryResponse": {
+        "properties": {
+          "threads": {
+            "items": {
+              "$ref": "#/components/schemas/ThreadSummaryEntry"
+            },
+            "title": "Threads",
+            "type": "array"
+          },
+          "total_samples": {
+            "title": "Total Samples",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total_samples",
+          "threads"
+        ],
+        "title": "ThreadSummaryResponse",
+        "type": "object"
+      },
+      "ThreadTopFunction": {
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "percent": {
+            "title": "Percent",
+            "type": "number"
+          },
+          "samples": {
+            "title": "Samples",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "samples",
+          "percent"
+        ],
+        "title": "ThreadTopFunction",
+        "type": "object"
+      },
+      "ThreadViewResponse": {
+        "properties": {
+          "flamegraph": {
+            "$ref": "#/components/schemas/FlamegraphNode"
+          },
+          "function_summary": {
+            "$ref": "#/components/schemas/FunctionSummary"
+          },
+          "source_files": {
+            "items": {
+              "$ref": "#/components/schemas/SourceFileRef"
+            },
+            "title": "Source Files",
+            "type": "array"
+          }
+        },
+        "required": [
+          "flamegraph",
+          "function_summary"
+        ],
+        "title": "ThreadViewResponse",
+        "type": "object"
+      },
+      "TimeWindow": {
+        "properties": {
+          "end": {
+            "title": "End",
+            "type": "number"
+          },
+          "samples": {
+            "title": "Samples",
+            "type": "integer"
+          },
+          "start": {
+            "title": "Start",
+            "type": "number"
+          }
+        },
+        "required": [
+          "start",
+          "end",
+          "samples"
+        ],
+        "title": "TimeWindow",
+        "type": "object"
+      },
+      "TimeWindowResponse": {
+        "properties": {
+          "flamegraph": {
+            "$ref": "#/components/schemas/FlamegraphNode"
+          },
+          "function_summary": {
+            "$ref": "#/components/schemas/FunctionSummary"
+          },
+          "window": {
+            "$ref": "#/components/schemas/TimeWindow"
+          }
+        },
+        "required": [
+          "flamegraph",
+          "function_summary",
+          "window"
+        ],
+        "title": "TimeWindowResponse",
+        "type": "object"
+      },
+      "ToolchainConfigRequest": {
+        "properties": {
+          "prefix": {
+            "default": "",
+            "title": "Prefix",
+            "type": "string"
+          },
+          "sysroot": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sysroot"
+          }
+        },
+        "title": "ToolchainConfigRequest",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      },
+      "WizardState": {
+        "additionalProperties": true,
+        "properties": {
+          "agent_host": {
+            "default": "",
+            "title": "Agent Host",
+            "type": "string"
+          },
+          "agent_port": {
+            "default": 9999,
+            "title": "Agent Port",
+            "type": "integer"
+          },
+          "binary_path": {
+            "default": "",
+            "title": "Binary Path",
+            "type": "string"
+          },
+          "connected": {
+            "default": false,
+            "title": "Connected",
+            "type": "boolean"
+          },
+          "duration": {
+            "default": 8,
+            "title": "Duration",
+            "type": "integer"
+          },
+          "frequency": {
+            "default": 99,
+            "title": "Frequency",
+            "type": "integer"
+          },
+          "perf_verified": {
+            "default": false,
+            "title": "Perf Verified",
+            "type": "boolean"
+          },
+          "pid": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pid"
+          },
+          "process_name": {
+            "default": "",
+            "title": "Process Name",
+            "type": "string"
+          },
+          "source_dir": {
+            "default": "",
+            "title": "Source Dir",
+            "type": "string"
+          },
+          "step": {
+            "default": 0,
+            "title": "Step",
+            "type": "integer"
+          }
+        },
+        "title": "WizardState",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "PerfLens",
+    "version": "0.6.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/agent/command": {
+      "post": {
+        "description": "Relay a command to the managed agent.",
+        "operationId": "api_agent_command_api_agent_command_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentCommandRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentCommandResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Api Agent Command"
+      }
+    },
+    "/api/browse": {
+      "get": {
+        "description": "Browse the server filesystem for the wizard's binary/source pickers.\nConfined to config.browse_root.",
+        "operationId": "api_browse_api_browse_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrowseResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Api Browse"
+      }
+    },
+    "/api/config/binary": {
+      "post": {
+        "operationId": "config_route_api_config_binary_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PathConfigRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Config Route"
+      }
+    },
+    "/api/config/pathmap": {
+      "post": {
+        "operationId": "config_route_api_config_pathmap_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PathMapConfigRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Config Route"
+      }
+    },
+    "/api/config/source": {
+      "post": {
+        "operationId": "config_route_api_config_source_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PathConfigRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Config Route"
+      }
+    },
+    "/api/config/toolchain": {
+      "post": {
+        "operationId": "config_route_api_config_toolchain_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ToolchainConfigRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Config Route"
+      }
+    },
+    "/api/connect": {
+      "post": {
+        "description": "Connect to a listen-mode agent.",
+        "operationId": "api_connect_api_connect_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Api Connect"
+      }
+    },
+    "/api/export/flamegraph": {
+      "get": {
+        "description": "Export flamegraph as standalone SVG. Uses session data if provided.",
+        "operationId": "api_export_flamegraph_api_export_flamegraph_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Api Export Flamegraph"
+      }
+    },
+    "/api/export/session/{session_id}": {
+      "get": {
+        "description": "Export session in collapsed or JSON format.",
+        "operationId": "api_export_session_api_export_session__session_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Api Export Session"
+      }
+    },
+    "/api/import": {
+      "post": {
+        "description": "Import an uploaded perf.data file.",
+        "operationId": "api_import_api_import_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Api Import"
+      }
+    },
+    "/api/index/files": {
+      "get": {
+        "operationId": "api_index_files_api_index_files_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IndexFilesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Api Index Files"
+      }
+    },
+    "/api/index/status": {
+      "get": {
+        "operationId": "api_index_status_api_index_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IndexStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Api Index Status"
+      }
+    },
+    "/api/metrics/current": {
+      "get": {
+        "operationId": "api_metrics_current_api_metrics_current_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "$ref": "#/components/schemas/MetricsFrame"
+                  },
+                  "title": "Response Api Metrics Current Api Metrics Current Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Api Metrics Current"
+      }
+    },
+    "/api/metrics/history": {
+      "get": {
+        "operationId": "api_metrics_history_api_metrics_history_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/MetricsFrame"
+                  },
+                  "title": "Response Api Metrics History Api Metrics History Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Api Metrics History"
+      }
+    },
+    "/api/per-event": {
+      "get": {
+        "description": "Pull the cached per-event snapshot (one event, or all). Pairs with\nthe 'data_version' SSE notify: browsers fetch only the event they're\nviewing.",
+        "operationId": "api_per_event_api_per_event_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PerEventResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          }
+        },
+        "summary": "Api Per Event"
+      }
+    },
+    "/api/sessions": {
+      "get": {
+        "operationId": "api_sessions_list_api_sessions_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SessionMetadata"
+                  },
+                  "title": "Response Api Sessions List Api Sessions Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Api Sessions List"
+      }
+    },
+    "/api/sessions/{session_id}": {
+      "get": {
+        "description": "Rebuild session data on the fly from raw chunks (cached on disk \u2014\nsessions are immutable once saved).",
+        "operationId": "api_session_replay_api_sessions__session_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionReplayResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Api Session Replay"
+      }
+    },
+    "/api/source": {
+      "get": {
+        "description": "Return annotated source for a specific file. Optional tid filter.",
+        "operationId": "api_source_api_source_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Api Source"
+      }
+    },
+    "/api/status": {
+      "get": {
+        "operationId": "api_status_api_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Status"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Api Status"
+      }
+    },
+    "/api/stop": {
+      "get": {
+        "description": "Close the agent connection, triggering normal disconnect flow.",
+        "operationId": "api_stop_api_stop_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StopResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Api Stop"
+      }
+    },
+    "/api/stream": {
+      "get": {
+        "description": "Server-Sent Events endpoint for real-time updates.",
+        "operationId": "api_stream_api_stream_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Api Stream"
+      }
+    },
+    "/api/thread-summary": {
+      "get": {
+        "description": "Overview of all threads with CPU breakdown.",
+        "operationId": "api_thread_summary_api_thread_summary_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThreadSummaryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Api Thread Summary"
+      }
+    },
+    "/api/thread-view": {
+      "get": {
+        "description": "Per-thread flamegraph + summary + source_files.",
+        "operationId": "api_thread_view_api_thread_view_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThreadViewResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Api Thread View"
+      }
+    },
+    "/api/time-window": {
+      "get": {
+        "description": "Flamegraph + function summary restricted to samples received inside\n[start, end] (unix seconds). Backs the UI's timeline scrubbing: samples\nare stamped with arrival time, so a window on the Device Health\ntimeline maps to the profile chunks collected in that window. Bounded\nby the raw-sample ring buffer (--max-samples).",
+        "operationId": "api_time_window_api_time_window_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TimeWindowResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Api Time Window"
+      }
+    },
+    "/api/wizard/state": {
+      "get": {
+        "operationId": "api_wizard_state_api_wizard_state_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WizardState"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Api Wizard State"
+      },
+      "post": {
+        "operationId": "api_wizard_state_update_api_wizard_state_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "title": "Body",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WizardState"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Api Wizard State Update"
+      }
+    },
+    "/{path}": {
+      "get": {
+        "operationId": "ui_missing__path__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "title": "Path",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Ui Missing"
+      }
+    }
+  }
+}
