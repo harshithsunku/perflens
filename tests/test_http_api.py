@@ -1,8 +1,9 @@
-"""HTTP API tests via FastAPI's TestClient.
+"""HTTP API (v2) tests via FastAPI's TestClient.
 
-Covers every endpoint's shape, the security regressions (path traversal,
-session-id traversal, browse confinement), gzip negotiation, the replay
-cache, and the SSE stream's initial frames.
+Covers every endpoint's shape, the {"error": {code, message}} envelope
+with real status codes, the security regressions (path traversal,
+session-id traversal, DELETE traversal, browse confinement), gzip
+negotiation, the replay cache, and the SSE stream against live uvicorn.
 """
 
 import gzip as gzip_mod
@@ -48,6 +49,15 @@ def client(core):
 @pytest.fixture()
 def session_id(core):
     return materialize_fixture_session(FIXTURE, core.config.sessions_dir)
+
+
+def assert_error(response, status, code):
+    """Every failure is {"error": {"code": ..., "message": ...}}."""
+    assert response.status_code == status
+    body = response.json()
+    assert body['error']['code'] == code
+    assert body['error']['message']
+    return body['error']
 
 
 # ---------------------------------------------------------------------------
@@ -96,47 +106,53 @@ def test_ui_missing_fallback(client, core, tmp_path):
         assert c.get('/api/status').status_code == 200
 
 
-def test_per_event_empty_and_404(client):
-    r = client.get('/api/per-event')
+def test_snapshot_empty_and_404(client):
+    r = client.get('/api/snapshot')
     assert r.status_code == 200
     assert r.json() == {'per_event': {},
                         'version': {'chunk_count': 0, 'total_samples': 0}}
-    r = client.get('/api/per-event', params={'event': 'nope'})
-    assert r.status_code == 404
-    assert 'error' in r.json()
+    assert_error(client.get('/api/snapshot', params={'event': 'nope'}),
+                 404, 'not_found')
 
 
-def test_stop_without_agent(client):
-    r = client.get('/api/stop')
+def test_agent_info_and_disconnect_without_agent(client):
+    assert client.get('/api/agent').json() == {
+        'connected': False, 'addr': None, 'hello': None}
+    r = client.delete('/api/agent')
     assert r.json() == {'stopped': False, 'reason': 'no agent connected'}
 
 
 def test_agent_command_without_agent(client):
     r = client.post('/api/agent/command', json={'cmd': 'ping'})
-    assert r.status_code == 400
-    assert r.json() == {'error': 'no managed agent connected'}
+    assert_error(r, 409, 'no_agent')
+
+
+def test_agent_command_unknown_cmd(client):
+    """cmd is enforced against the frozen agent's command set."""
+    r = client.post('/api/agent/command', json={'cmd': 'format_disk'})
+    assert_error(r, 400, 'validation')
 
 
 def test_connect_validation(client):
-    assert client.post('/api/connect', json={'host': ''}).status_code == 400
-    # Malformed JSON is rejected by request-model validation (Pydantic)
-    r = client.post('/api/connect', content=b'not json',
+    assert_error(client.post('/api/agent/connect', json={'host': ''}),
+                 400, 'validation')
+    # Malformed JSON is rejected by request-model validation (rendered
+    # through the same error envelope)
+    r = client.post('/api/agent/connect', content=b'not json',
                     headers={'content-type': 'application/json'})
-    assert r.status_code == 422
+    assert_error(r, 400, 'validation')
 
 
 def test_import_empty_body(client):
-    r = client.post('/api/import')
-    assert r.status_code == 400
-    assert r.json() == {'error': 'empty request body'}
+    assert_error(client.post('/api/sessions/import'), 400, 'empty_body')
 
 
 def test_wizard_roundtrip(client):
-    r = client.get('/api/wizard/state')
+    r = client.get('/api/wizard')
     assert r.json()['step'] == 0
-    r = client.post('/api/wizard/state', json={'step': 3, 'pid': 42})
+    r = client.put('/api/wizard', json={'step': 3, 'pid': 42})
     assert r.json()['step'] == 3
-    assert client.get('/api/wizard/state').json()['pid'] == 42
+    assert client.get('/api/wizard').json()['pid'] == 42
 
 
 def test_metrics_endpoints(client, core):
@@ -147,27 +163,70 @@ def test_metrics_endpoints(client, core):
     assert len(hist) == 1
     r = client.get('/api/metrics/history', params={'type': 'system',
                                                    'start': 'zzz'})
-    assert r.status_code == 400
+    assert_error(r, 400, 'validation')
 
 
 def test_index_endpoints(client):
     r = client.get('/api/index/status')
     assert r.status_code == 200
     assert 'indexing' in r.json()
-    r = client.get('/api/index/files', params={'offset': 'x'})
-    assert r.status_code == 400
-    assert r.json() == {'error': 'bad offset/limit'}
+    assert_error(client.get('/api/index/files', params={'offset': 'x'}),
+                 400, 'validation')
 
 
-def test_config_binary_bad_path(client):
-    r = client.post('/api/config/binary', json={'path': '/nonexistent/xyz'})
-    assert r.status_code == 400
-    assert r.json()['ok'] is False
+def test_config_get_state(client, core, tmp_path):
+    body = client.get('/api/config').json()
+    assert body['binary'] is None
+    assert body['source_dir'] == str(tmp_path)
+    assert body['inline'] is True
 
 
-def test_config_source_bad_path(client):
-    r = client.post('/api/config/source', json={'path': '/nonexistent/xyz'})
-    assert r.status_code == 400
+def test_config_patch_binary_and_source(client, core, tmp_path):
+    assert_error(client.patch('/api/config',
+                              json={'binary': '/nonexistent/xyz'}),
+                 400, 'bad_path')
+    assert_error(client.patch('/api/config',
+                              json={'source_dir': '/nonexistent/xyz'}),
+                 400, 'bad_path')
+    # Unknown fields are rejected (extra='forbid')
+    assert_error(client.patch('/api/config', json={'bogus': 1}),
+                 400, 'validation')
+
+    # A valid patch mutates config and reports the new state
+    src = tmp_path / 'src'
+    src.mkdir()
+    body = client.patch('/api/config',
+                        json={'source_dir': str(src)}).json()
+    assert body['source_dir'] == str(src)
+    assert core.config.source_dir == str(src)
+    # Clearing the binary is allowed; the wizard state tracks source_dir
+    assert client.patch('/api/config', json={'binary': ''}).status_code == 200
+    assert core.wizard['source_dir'] == str(src)
+
+
+def test_config_patch_pathmap(client, core):
+    body = client.patch('/api/config',
+                        json={'path_map': {'/build': '/src'}}).json()
+    assert body['path_map'] == {'/build': '/src'}
+    assert core.config.path_map == {'/build': '/src'}
+    assert client.patch('/api/config',
+                        json={'path_map': {}}).json()['path_map'] is None
+
+
+def test_config_patch_toolchain(client, core, tmp_path):
+    assert_error(client.patch('/api/config',
+                              json={'toolchain_prefix': str(tmp_path) + '/no-such-'}),
+                 400, 'bad_path')
+    assert_error(client.patch('/api/config',
+                              json={'sysroot': '/nonexistent/sysroot'}),
+                 400, 'bad_path')
+    sysroot = tmp_path / 'sysroot'
+    sysroot.mkdir()
+    assert client.patch('/api/config',
+                        json={'sysroot': str(sysroot)}).json()['sysroot'] == str(sysroot)
+    # Explicit empty sysroot clears it
+    assert client.patch('/api/config',
+                        json={'sysroot': ''}).json()['sysroot'] is None
 
 
 # ---------------------------------------------------------------------------
@@ -188,8 +247,20 @@ def test_session_id_traversal_blocked(client, core, tmp_path):
     outside.mkdir()
     (outside / 'metadata.json').write_text('{"secret": true}')
     r = client.get('/api/sessions/..%2Foutside')
-    assert r.status_code in (200, 404)
+    assert r.status_code == 404
     assert 'secret' not in r.text
+
+
+def test_session_delete_traversal_blocked(client, core, tmp_path):
+    """DELETE must refuse ids that resolve outside sessions_dir."""
+    outside = tmp_path / 'precious'
+    outside.mkdir()
+    (outside / 'metadata.json').write_text('{}')
+    # Encoded-slash ids never reach the route (404/405 from routing or the
+    # static mount); ids that do reach it are checked by safe_session_dir.
+    r = client.delete('/api/sessions/..%2Fprecious')
+    assert r.status_code in (404, 405)
+    assert outside.is_dir(), 'directory outside sessions_dir was deleted'
 
 
 def test_browse_confined_to_root(client, core, tmp_path):
@@ -207,12 +278,18 @@ def test_browse_lists_entries(client, core, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Sessions: list / replay / export
+# Sessions: list / replay / delete / export
 # ---------------------------------------------------------------------------
 
-def test_sessions_list(client, session_id):
-    ids = [s['session_id'] for s in client.get('/api/sessions').json()]
-    assert session_id in ids
+def test_sessions_list_and_pagination(client, session_id):
+    body = client.get('/api/sessions').json()
+    assert body['total'] == 1
+    assert [s['session_id'] for s in body['sessions']] == [session_id]
+
+    page = client.get('/api/sessions', params={'offset': 1, 'limit': 5}).json()
+    assert page == {'sessions': [], 'total': 1, 'offset': 1, 'limit': 5}
+    assert client.get('/api/sessions',
+                      params={'limit': 0}).json()['sessions'] == []
 
 
 def test_session_replay_and_cache(client, core, session_id):
@@ -227,20 +304,44 @@ def test_session_replay_and_cache(client, core, session_id):
     assert entry['flamegraph']['value'] > 0
     assert 'threads' in entry
 
-    # Replay cache written; second call returns the same payload
+    # Replay cache written with the schema-2 key; second call returns the
+    # same payload
     cache = os.path.join(core.config.sessions_dir, session_id,
                          'replay_cache.json.gz')
     assert os.path.isfile(cache)
+    with gzip_mod.open(cache, 'rt') as f:
+        assert json.load(f)['key']['schema'] == 2
     assert client.get(f'/api/sessions/{session_id}').json() == body
 
 
+def test_session_replay_stale_cache_regenerates(client, core, session_id):
+    """A v1-era cache (no schema field) is ignored and rewritten."""
+    cache = os.path.join(core.config.sessions_dir, session_id,
+                         'replay_cache.json.gz')
+    with gzip_mod.open(cache, 'wt') as f:
+        json.dump({'key': {'chunks': 1}, 'per_event': {'bogus': {}}}, f)
+    body = client.get(f'/api/sessions/{session_id}').json()
+    assert 'bogus' not in body['per_event']
+    with gzip_mod.open(cache, 'rt') as f:
+        assert json.load(f)['key']['schema'] == 2
+
+
 def test_session_replay_not_found(client):
-    assert client.get('/api/sessions/nope').json() == {
-        'error': 'session not found'}
+    assert_error(client.get('/api/sessions/nope'), 404, 'not_found')
+
+
+def test_session_delete(client, core, session_id):
+    assert client.delete(f'/api/sessions/{session_id}').json() == {
+        'ok': True, 'session_id': session_id}
+    assert not os.path.isdir(os.path.join(core.config.sessions_dir,
+                                          session_id))
+    assert_error(client.delete(f'/api/sessions/{session_id}'),
+                 404, 'not_found')
+    assert client.get('/api/sessions').json()['total'] == 0
 
 
 def test_export_collapsed(client, session_id):
-    r = client.get(f'/api/export/session/{session_id}',
+    r = client.get(f'/api/sessions/{session_id}/export',
                    params={'format': 'collapsed'})
     assert r.status_code == 200
     assert 'attachment' in r.headers['content-disposition']
@@ -250,29 +351,50 @@ def test_export_collapsed(client, session_id):
 
 
 def test_export_json(client, session_id):
-    r = client.get(f'/api/export/session/{session_id}',
+    r = client.get(f'/api/sessions/{session_id}/export',
                    params={'format': 'json'})
     body = r.json()
     assert body['metadata']['session_id'] == session_id
     assert body['per_event']
 
 
-def test_export_unknown_format(client, session_id):
-    r = client.get(f'/api/export/session/{session_id}',
-                   params={'format': 'xml'})
-    assert r.json() == {'error': 'unknown format: xml'}
-
-
-def test_export_flamegraph_svg(client, session_id):
-    r = client.get('/api/export/flamegraph',
-                   params={'event': 'cycles', 'session': session_id})
+def test_export_svg(client, session_id):
+    r = client.get(f'/api/sessions/{session_id}/export',
+                   params={'format': 'svg', 'event': 'cycles'})
     assert r.headers['content-type'].startswith('image/svg')
     assert r.text.startswith('<svg')
+    assert_error(client.get(f'/api/sessions/{session_id}/export',
+                            params={'format': 'svg', 'event': 'nope'}),
+                 404, 'not_found')
 
 
-def test_export_flamegraph_no_data(client):
-    r = client.get('/api/export/flamegraph', params={'event': 'cycles'})
-    assert r.json() == {'error': 'no data available'}
+def test_export_unknown_format(client, session_id):
+    assert_error(client.get(f'/api/sessions/{session_id}/export',
+                            params={'format': 'xml'}),
+                 400, 'bad_format')
+
+
+def test_export_session_not_found(client):
+    assert_error(client.get('/api/sessions/nope/export'), 404, 'not_found')
+
+
+def test_live_export_no_data(client):
+    assert_error(client.get('/api/live/export'), 404, 'no_data')
+
+
+def test_live_export(client, core):
+    samples = _seed_live_state(core)
+    r = client.get('/api/live/export', params={'format': 'collapsed'})
+    assert r.status_code == 200
+    assert 'attachment' in r.headers['content-disposition']
+
+    r = client.get('/api/live/export', params={'format': 'json'})
+    assert r.json()['metadata']['session_id'] == 'live'
+
+    evt = samples[0]['event_type']
+    r = client.get('/api/live/export', params={'format': 'svg',
+                                               'event': evt})
+    assert r.text.startswith('<svg')
 
 
 # ---------------------------------------------------------------------------
@@ -288,28 +410,31 @@ def _seed_live_state(core):
     return all_samples
 
 
-def test_thread_summary_and_view(client, core):
+def test_threads_summary_and_view(client, core):
     samples = _seed_live_state(core)
     evt = samples[0]['event_type']
 
-    r = client.get('/api/thread-summary', params={'event': evt})
+    r = client.get('/api/threads', params={'event': evt})
     body = r.json()
     assert body['total_samples'] > 0
     assert body['threads']
     tid = body['threads'][0]['tid']
 
-    r = client.get('/api/thread-view', params={'event': evt, 'tid': tid})
+    r = client.get(f'/api/threads/{tid}', params={'event': evt})
     view = r.json()
     assert view['function_summary']['total_samples'] > 0
     assert view['flamegraph']['value'] > 0
 
-    assert client.get('/api/thread-view',
-                      params={'event': evt}).status_code == 400
-    assert client.get('/api/thread-view',
-                      params={'event': evt, 'tid': 'zz'}).status_code == 400
+    # Non-integer tid is a path-validation failure
+    assert_error(client.get('/api/threads/zz', params={'event': evt}),
+                 400, 'validation')
+    # Unknown tid is empty but well-formed
+    empty = client.get('/api/threads/999999999',
+                       params={'event': evt}).json()
+    assert empty['function_summary']['total_samples'] == 0
 
 
-def test_time_window(client, core):
+def test_window(client, core):
     """Samples are stamped with arrival time; the window endpoint filters
     the raw deque by it (timeline scrubbing)."""
     import time as time_mod
@@ -318,7 +443,7 @@ def test_time_window(client, core):
     now = time_mod.time()
 
     # A window covering "now" holds everything just seeded
-    r = client.get('/api/time-window', params={
+    r = client.get('/api/window', params={
         'event': evt, 'start': now - 60, 'end': now + 60})
     assert r.status_code == 200
     body = r.json()
@@ -327,37 +452,39 @@ def test_time_window(client, core):
     assert body['flamegraph']['value'] > 0
 
     # A window in the past is empty but well-formed
-    r = client.get('/api/time-window', params={
+    r = client.get('/api/window', params={
         'event': evt, 'start': now - 120, 'end': now - 60})
     body = r.json()
     assert body['window']['samples'] == 0
     assert body['function_summary']['total_samples'] == 0
 
     # Validation
-    assert client.get('/api/time-window',
-                      params={'event': evt}).status_code == 400
-    assert client.get('/api/time-window',
-                      params={'event': evt, 'start': now - 60, 'end': now + 60,
-                              'tid': 'zz'}).status_code == 400
+    assert_error(client.get('/api/window', params={'event': evt}),
+                 400, 'validation')
+    assert_error(client.get('/api/window',
+                            params={'event': evt, 'start': now - 60,
+                                    'end': now + 60, 'tid': 'zz'}),
+                 400, 'validation')
 
     # tid filter composes with the window
     tids = {s.get('tid', s.get('pid', 0)) for s in samples
             if s['event_type'] == evt}
     tid = next(iter(tids))
-    r = client.get('/api/time-window', params={
+    r = client.get('/api/window', params={
         'event': evt, 'start': now - 60, 'end': now + 60, 'tid': tid})
     assert r.json()['window']['samples'] > 0
 
 
-def test_source_endpoint_no_mapper(client, core):
+def test_source_endpoint_errors(client, core):
     _seed_live_state(core)
-    r = client.get('/api/source', params={'file': 'x.c'})
-    assert r.json()['error'] == 'source mapper not available'
-    r = client.get('/api/source')
-    assert r.json()['error'] == 'file parameter required'
+    # No source mapper configured → 409, not a fake-success body
+    assert_error(client.get('/api/source', params={'file': 'x.c'}),
+                 409, 'no_mapper')
+    # Missing required file param → validation
+    assert_error(client.get('/api/source'), 400, 'validation')
 
 
-def test_per_event_gzip_negotiation(client, core):
+def test_snapshot_gzip_negotiation(client, core):
     """Payloads >8KB gzip when the client accepts it."""
     big = {'function_summary': {'total_samples': 1,
                                 'functions': [{'name': f'f{i}' * 20,
@@ -367,12 +494,12 @@ def test_per_event_gzip_negotiation(client, core):
            'threads': [], 'source_files': []}
     with core.state.lock:
         core.state._cached_per_event = {'cycles': big}
-    r = client.get('/api/per-event', params={'event': 'cycles'},
+    r = client.get('/api/snapshot', params={'event': 'cycles'},
                    headers={'Accept-Encoding': 'gzip'})
     assert r.headers.get('content-encoding') == 'gzip'
     assert r.json()['event'] == 'cycles'  # httpx transparently decompresses
     # Without Accept-Encoding: no compression
-    r = client.get('/api/per-event', params={'event': 'cycles'},
+    r = client.get('/api/snapshot', params={'event': 'cycles'},
                    headers={'Accept-Encoding': 'identity'})
     assert 'content-encoding' not in r.headers
 
@@ -433,25 +560,27 @@ def _read_sse(url, want, on_first_line=None, max_lines=60):
 
 def test_sse_initial_frames(core, live_server):
     """With cached data present, a new SSE client immediately receives
-    event_types, data_version, and perf_stat frames."""
+    data_version (carrying event_types) and perf_stat frames."""
     with core.state.lock:
         core.state._cached_per_event = {'cycles': {}}
         core.state._event_types_set.add('cycles')
         core.state.event_types = ['cycles']
         core.state.perf_stat = {'cycles': {'value': 1, 'comment': ''}}
 
-    got = _read_sse(live_server, {'event_types', 'data_version', 'perf_stat'})
-    assert got['event_types'] == ['cycles']
+    got = _read_sse(live_server, {'data_version', 'perf_stat'})
     assert got['data_version']['event_types'] == ['cycles']
     assert got['perf_stat']['cycles']['value'] == 1
 
 
 def test_sse_broadcast_reaches_client(core, live_server):
-    """A broadcast_sse() from a worker thread lands on connected clients.
+    """A broadcast() from a worker thread lands on connected clients.
     The broadcast fires after the first received line, which proves the
-    client's queue is registered."""
-    got = _read_sse(
-        live_server, {'status'},
-        on_first_line=lambda: core.broadcast(
-            'status', {'connected': True, 'agent': 'x:1'}))
+    client's queue is registered. The consolidated 'metrics' event carries
+    its type in the payload."""
+    def fire():
+        core.broadcast('status', {'connected': True, 'agent': 'x:1'})
+        core.broadcast('metrics', {'type': 'system', 'ts': 2.0})
+
+    got = _read_sse(live_server, {'status', 'metrics'}, on_first_line=fire)
     assert got['status'] == {'connected': True, 'agent': 'x:1'}
+    assert got['metrics']['type'] == 'system'

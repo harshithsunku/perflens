@@ -16,6 +16,13 @@ def dumps(data):
     return orjson.dumps(data, option=orjson.OPT_NON_STR_KEYS)
 
 
+def error_response(code, message, status):
+    """The v2 error envelope: every error is
+    {"error": {"code": "<slug>", "message": "..."}} with a real status."""
+    return json_response({'error': {'code': code, 'message': message}},
+                         status)
+
+
 def json_response(data, status=200, request=None, allow_gzip=False):
     body = dumps(data)
     headers = {'Access-Control-Allow-Origin': '*'}

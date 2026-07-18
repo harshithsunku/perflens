@@ -11,29 +11,36 @@ export default function SessionsTab() {
   const [importStatus, setImportStatus] = useState('');
   const [importing, setImporting] = useState(false);
 
-  const { data: sessions } = useQuery({
+  const { data } = useQuery({
     queryKey: ['sessions'],
     queryFn: api.sessions,
   });
+  const sessions = data?.sessions;
 
   const onImportFile = async (file: File) => {
     setImporting(true);
     setImportStatus('Importing ' + file.name + '...');
     try {
-      const data = await api.importPerfData(file);
+      const result = await api.importPerfData(file);
       setImporting(false);
-      if (data.error) {
-        setImportStatus('');
-        showError('Import failed: ' + data.error);
-        return;
-      }
-      setImportStatus('Imported ' + data.total_samples + ' samples');
+      setImportStatus('Imported ' + result.total_samples + ' samples');
       void queryClient.invalidateQueries({ queryKey: ['sessions'] });
-      void replaySession(data.session_id);
+      void replaySession(result.session_id);
     } catch (err) {
       setImporting(false);
       setImportStatus('');
-      showError('Import failed: ' + String(err));
+      showError('Import failed: '
+        + (err instanceof Error ? err.message : String(err)));
+    }
+  };
+
+  const onDelete = async (sessionId: string) => {
+    try {
+      await api.deleteSession(sessionId);
+      void queryClient.invalidateQueries({ queryKey: ['sessions'] });
+    } catch (err) {
+      showError('Delete failed: '
+        + (err instanceof Error ? err.message : String(err)));
     }
   };
 
@@ -83,6 +90,12 @@ export default function SessionsTab() {
                             title="Compare the live profile against this session"
                             onClick={() => void baselineFromSession(s.session_id)}>
                       Baseline
+                    </button>{' '}
+                    <button className="replay-btn session-delete-btn"
+                            data-session={s.session_id}
+                            title="Delete this session from disk"
+                            onClick={() => void onDelete(s.session_id)}>
+                      Delete
                     </button>
                   </td>
                 </tr>

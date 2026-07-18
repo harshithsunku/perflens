@@ -228,6 +228,7 @@ export default function ControlBar() {
     <div id="control-bar">
       <div className="ctrl-group">
         <button id="ctrl-pause" className={'ctrl-btn' + (paused ? ' hidden' : '')} title="Pause"
+                aria-label="Pause profiling"
                 onClick={() => {
                   api.agentCommand('pause').then((d) => { if (d.ok) setPaused(true); })
                     .catch(() => {});
@@ -235,6 +236,7 @@ export default function ControlBar() {
           &#9208;
         </button>
         <button id="ctrl-resume" className={'ctrl-btn' + (paused ? '' : ' hidden')} title="Resume"
+                aria-label="Resume profiling"
                 onClick={() => {
                   api.agentCommand('resume').then((d) => { if (d.ok) setPaused(false); })
                     .catch(() => {});
@@ -242,8 +244,9 @@ export default function ControlBar() {
           &#9654;
         </button>
         <button id="ctrl-stop" className="ctrl-btn ctrl-btn-danger" title="Stop"
+                aria-label="Stop profiling and disconnect"
                 onClick={() => {
-                  api.stop().then((d) => {
+                  api.disconnectAgent().then((d) => {
                     if (d.stopped) {
                       setStopped(true);
                       useLive.setState({ managedAgent: false });

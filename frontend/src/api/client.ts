@@ -1,17 +1,22 @@
-// Typed API client. Response/request shapes come from the generated
+// Typed API client (v2). Response/request shapes come from the generated
 // OpenAPI types (types.gen.ts) — regenerate with `npm run typegen`.
+//
+// Error model: every non-2xx response is
+// {"error": {"code": "<slug>", "message": "..."}}.
 
 import type { components } from './types.gen';
 
 export type Schemas = components['schemas'];
 export type Status = Schemas['Status'];
 export type DataVersion = Schemas['DataVersion'];
+export type ErrorDetail = Schemas['ErrorDetail'];
 export type FlamegraphNode = Schemas['FlamegraphNode'];
 export type FunctionEntry = Schemas['FunctionEntry'];
 export type FunctionSummary = Schemas['FunctionSummary'];
 export type PerEventEntry = Schemas['PerEventEntry'];
-export type PerEventResponse = Schemas['PerEventResponse'];
+export type SnapshotResponse = Schemas['SnapshotResponse'];
 export type SessionMetadata = Schemas['SessionMetadata'];
+export type SessionListResponse = Schemas['SessionListResponse'];
 export type SessionReplayResponse = Schemas['SessionReplayResponse'];
 export type ThreadSummaryResponse = Schemas['ThreadSummaryResponse'];
 export type ThreadViewResponse = Schemas['ThreadViewResponse'];
@@ -20,9 +25,12 @@ export type SourceResponse = Schemas['SourceResponse'];
 export type BrowseResponse = Schemas['BrowseResponse'];
 export type WizardState = Schemas['WizardState'];
 export type ConnectResponse = Schemas['ConnectResponse'];
+export type AgentInfo = Schemas['AgentInfo'];
 export type MetricsFrame = Schemas['MetricsFrame'];
 export type IndexStatus = Schemas['IndexStatus'];
 export type ImportResponse = Schemas['ImportResponse'];
+export type ConfigState = Schemas['ConfigState'];
+export type ConfigUpdate = Schemas['ConfigUpdate'];
 
 /** Agent command responses are loosely shaped (the agent adds fields per
  * command); model the common ones. */
@@ -32,23 +40,42 @@ export interface AgentCommandResult {
   [key: string]: unknown;
 }
 
-async function getJson<T>(url: string): Promise<T> {
-  const r = await fetch(url);
-  if (!r.ok && r.headers.get('content-type')?.includes('json')) {
-    const body = await r.json().catch(() => null) as { error?: string } | null;
-    throw new Error(body?.error ?? `HTTP ${r.status}`);
+/** Error thrown for any non-2xx API response, carrying the v2 envelope. */
+export class ApiError extends Error {
+  code: string;
+  status: number;
+  constructor(status: number, code: string, message: string) {
+    super(message);
+    this.code = code;
+    this.status = status;
   }
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return r.json() as Promise<T>;
 }
 
-async function postJson<T>(url: string, body: unknown): Promise<T> {
-  const r = await fetch(url, {
-    method: 'POST',
+async function unwrap<T>(r: Response): Promise<T> {
+  if (r.ok) return r.json() as Promise<T>;
+  let code = 'http_error';
+  let message = `HTTP ${r.status}`;
+  if (r.headers.get('content-type')?.includes('json')) {
+    const body = await r.json().catch(() => null) as
+      { error?: { code?: string; message?: string } } | null;
+    if (body?.error) {
+      code = body.error.code ?? code;
+      message = body.error.message ?? message;
+    }
+  }
+  throw new ApiError(r.status, code, message);
+}
+
+async function getJson<T>(url: string): Promise<T> {
+  return unwrap<T>(await fetch(url));
+}
+
+async function sendJson<T>(method: string, url: string, body?: unknown): Promise<T> {
+  return unwrap<T>(await fetch(url, {
+    method,
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  return r.json() as Promise<T>;
+    body: body === undefined ? undefined : JSON.stringify(body),
+  }));
 }
 
 const q = encodeURIComponent;
@@ -56,25 +83,32 @@ const q = encodeURIComponent;
 export const api = {
   status: () => getJson<Status>('/api/status'),
 
-  perEvent: (event: string) =>
-    getJson<PerEventResponse>(`/api/per-event?event=${q(event)}`),
+  snapshot: (event: string) =>
+    getJson<SnapshotResponse>(`/api/snapshot?event=${q(event)}`),
 
-  stop: () => getJson<{ stopped: boolean; error?: string }>('/api/stop'),
+  disconnectAgent: () =>
+    sendJson<{ stopped: boolean; reason?: string }>('DELETE', '/api/agent'),
 
-  sessions: () => getJson<SessionMetadata[]>('/api/sessions'),
+  agentInfo: () => getJson<AgentInfo>('/api/agent'),
+
+  sessions: () => getJson<SessionListResponse>('/api/sessions'),
 
   session: (id: string) =>
-    getJson<SessionReplayResponse & { error?: string }>(`/api/sessions/${q(id)}`),
+    getJson<SessionReplayResponse>(`/api/sessions/${q(id)}`),
+
+  deleteSession: (id: string) =>
+    sendJson<{ ok: boolean; session_id: string }>(
+      'DELETE', `/api/sessions/${q(id)}`),
 
   threadSummary: (event: string) =>
-    getJson<ThreadSummaryResponse>(`/api/thread-summary?event=${q(event)}`),
+    getJson<ThreadSummaryResponse>(`/api/threads?event=${q(event)}`),
 
   threadView: (event: string, tid: number) =>
-    getJson<ThreadViewResponse>(`/api/thread-view?event=${q(event)}&tid=${tid}`),
+    getJson<ThreadViewResponse>(`/api/threads/${tid}?event=${q(event)}`),
 
   timeWindow: (event: string, start: number, end: number, tid: number | null) =>
-    getJson<TimeWindowResponse & { error?: string }>(
-      `/api/time-window?event=${q(event)}&start=${start}&end=${end}` +
+    getJson<TimeWindowResponse>(
+      `/api/window?event=${q(event)}&start=${start}&end=${end}` +
       (tid !== null ? `&tid=${tid}` : '')),
 
   source: (file: string, event: string, tid?: number) =>
@@ -88,36 +122,39 @@ export const api = {
   indexStatus: () => getJson<IndexStatus>('/api/index/status'),
 
   browse: (path: string) =>
-    getJson<BrowseResponse & { error?: string }>(`/api/browse?path=${q(path)}`),
+    getJson<BrowseResponse>(`/api/browse?path=${q(path)}`),
 
-  wizardState: () => getJson<WizardState>('/api/wizard/state'),
+  wizardState: () => getJson<WizardState>('/api/wizard'),
   saveWizardState: (updates: Record<string, unknown>) =>
-    postJson<WizardState>('/api/wizard/state', updates),
+    sendJson<WizardState>('PUT', '/api/wizard', updates),
 
   connect: (host: string, port: number) =>
-    postJson<ConnectResponse>('/api/connect', { host, port }),
+    sendJson<ConnectResponse>('POST', '/api/agent/connect', { host, port }),
 
   agentCommand: (cmd: string, args: Record<string, unknown> = {}, timeout = 30) =>
-    postJson<AgentCommandResult>('/api/agent/command', { cmd, args, timeout }),
+    sendJson<AgentCommandResult>('POST', '/api/agent/command',
+      { cmd, args, timeout }),
 
-  configBinary: (path: string) =>
-    postJson<{ ok: boolean; error?: string }>('/api/config/binary', { path }),
-  configSource: (path: string) =>
-    postJson<{ ok: boolean; error?: string }>('/api/config/source', { path }),
-  configToolchain: (body: { prefix?: string; sysroot?: string }) =>
-    postJson<{ ok: boolean; error?: string }>('/api/config/toolchain', body),
+  config: () => getJson<ConfigState>('/api/config'),
+  patchConfig: (update: ConfigUpdate) =>
+    sendJson<ConfigState>('PATCH', '/api/config', update),
 
-  importPerfData: async (file: File): Promise<ImportResponse & { error?: string }> => {
-    const r = await fetch('/api/import', { method: 'POST', body: file });
-    return r.json();
-  },
+  importPerfData: async (file: File): Promise<ImportResponse> =>
+    unwrap<ImportResponse>(
+      await fetch('/api/sessions/import', { method: 'POST', body: file })),
 };
 
 export const exportUrls = {
   flamegraphSvg: (event: string, sessionId: string) =>
-    `/api/export/flamegraph?event=${q(event)}&session=${q(sessionId)}`,
+    sessionId === 'live'
+      ? `/api/live/export?format=svg&event=${q(event)}`
+      : `/api/sessions/${q(sessionId)}/export?format=svg&event=${q(event)}`,
   collapsed: (sessionId: string) =>
-    `/api/export/session/${q(sessionId)}?format=collapsed`,
+    sessionId === 'live'
+      ? '/api/live/export?format=collapsed'
+      : `/api/sessions/${q(sessionId)}/export?format=collapsed`,
   json: (sessionId: string) =>
-    `/api/export/session/${q(sessionId)}?format=json`,
+    sessionId === 'live'
+      ? '/api/live/export?format=json'
+      : `/api/sessions/${q(sessionId)}/export?format=json`,
 };

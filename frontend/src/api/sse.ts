@@ -24,18 +24,8 @@ export function connectSSE(): void {
     if (data.connected) live().exitReplay();
   });
 
-  es.addEventListener('event_types', (e) => {
-    const types = JSON.parse(e.data) as string[];
-    useLive.setState((s) => {
-      const update: Record<string, unknown> = { eventTypes: types };
-      if (!types.includes(s.selectedEvent) && types.length) {
-        update.selectedEvent = types[0];
-      }
-      return update;
-    });
-  });
-
   es.addEventListener('data_version', (e) => {
+    // Carries event_types alongside the version stamp (v2)
     live().onDataVersion(JSON.parse(e.data));
   });
 
@@ -43,23 +33,20 @@ export function connectSSE(): void {
     useLive.setState({ perfStat: JSON.parse(e.data) });
   });
 
-  es.addEventListener('metrics_system', (e) => {
-    live().pushSystemMetrics(JSON.parse(e.data));
-  });
-  es.addEventListener('metrics_process', (e) => {
-    live().pushProcessMetrics(JSON.parse(e.data));
-  });
-  es.addEventListener('metrics_network', (e) => {
-    live().pushNetworkMetrics(JSON.parse(e.data));
-  });
-  es.addEventListener('metrics_disk', (e) => {
-    live().pushDiskMetrics(JSON.parse(e.data));
-  });
-  es.addEventListener('metrics_threads', (e) => {
-    live().pushThreadMetrics(JSON.parse(e.data));
+  // One consolidated 'metrics' event; the payload's own `type` field
+  // discriminates system/process/network/disk/threads (v2).
+  es.addEventListener('metrics', (e) => {
+    const frame = JSON.parse(e.data) as MetricsFrame;
+    switch (frame.type) {
+      case 'system': live().pushSystemMetrics(frame); break;
+      case 'process': live().pushProcessMetrics(frame); break;
+      case 'network': live().pushNetworkMetrics(frame); break;
+      case 'disk': live().pushDiskMetrics(frame); break;
+      case 'threads': live().pushThreadMetrics(frame); break;
+    }
   });
 
-  es.addEventListener('agent_connected', (e) => {
+  es.addEventListener('agent', (e) => {
     const data = JSON.parse(e.data) as { platform?: Record<string, unknown> };
     useLive.setState({ platform: data.platform ?? {}, managedAgent: true });
     if (useUi.getState().view === 'landing') {

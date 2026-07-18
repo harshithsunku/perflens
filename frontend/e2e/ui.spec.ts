@@ -139,18 +139,18 @@ test('export menu lists the three formats and the endpoints serve them',
 
   // The endpoints behind the menu items work for the replayed session
   const svg = await request.get(
-    `/api/export/flamegraph?event=cycles&session=${FIXTURE}`);
+    `/api/sessions/${FIXTURE}/export?format=svg&event=cycles`);
   expect(svg.ok()).toBeTruthy();
   expect((await svg.text()).startsWith('<svg')).toBeTruthy();
 
   const collapsed = await request.get(
-    `/api/export/session/${FIXTURE}?format=collapsed`);
+    `/api/sessions/${FIXTURE}/export?format=collapsed`);
   expect(collapsed.ok()).toBeTruthy();
   const firstLine = (await collapsed.text()).trim().split('\n')[0];
   const count = parseInt(firstLine.slice(firstLine.lastIndexOf(' ') + 1), 10);
   expect(count).toBeGreaterThan(0);
 
-  const json = await request.get(`/api/export/session/${FIXTURE}?format=json`);
+  const json = await request.get(`/api/sessions/${FIXTURE}/export?format=json`);
   expect(json.ok()).toBeTruthy();
   const body = await json.json();
   expect(body.metadata.session_id).toBe(FIXTURE);

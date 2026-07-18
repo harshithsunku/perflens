@@ -265,16 +265,18 @@ perflens serve --addr2line /opt/toolchain/bin/arm-linux-gnueabihf-addr2line \\
     <thead><tr><th>Endpoint</th><th>Method</th><th>Description</th></tr></thead>
     <tbody>
       <tr><td><code>/api/status</code></td><td>GET</td><td>Server + agent state, sample totals</td></tr>
-      <tr><td><code>/api/stream</code></td><td>GET</td><td>SSE: status, event_types, data_version, perf_stat, metrics</td></tr>
-      <tr><td><code>/api/per-event</code></td><td>GET</td><td>Cached per-event snapshot (<code>?event=</code>)</td></tr>
-      <tr><td><code>/api/sessions</code></td><td>GET</td><td>List saved sessions</td></tr>
-      <tr><td><code>/api/sessions/&lt;id&gt;</code></td><td>GET</td><td>Replay a session</td></tr>
+      <tr><td><code>/api/stream</code></td><td>GET</td><td>SSE: status, agent, data_version, perf_stat, metrics</td></tr>
+      <tr><td><code>/api/snapshot</code></td><td>GET</td><td>Cached per-event snapshot (<code>?event=</code>)</td></tr>
+      <tr><td><code>/api/sessions</code></td><td>GET</td><td>List saved sessions (<code>?offset=&amp;limit=</code>)</td></tr>
+      <tr><td><code>/api/sessions/&lt;id&gt;</code></td><td>GET / DELETE</td><td>Replay / delete a session</td></tr>
+      <tr><td><code>/api/sessions/&lt;id&gt;/export</code></td><td>GET</td><td>Export (<code>?format=collapsed|json|svg</code>)</td></tr>
+      <tr><td><code>/api/live/export</code></td><td>GET</td><td>Export the live profile</td></tr>
       <tr><td><code>/api/source</code></td><td>GET</td><td>Annotated source (<code>?file=&amp;event=&amp;tid=</code>)</td></tr>
-      <tr><td><code>/api/thread-view</code></td><td>GET</td><td>Per-thread flamegraph + functions (<code>?event=&amp;tid=</code>)</td></tr>
-      <tr><td><code>/api/thread-summary</code></td><td>GET</td><td>All threads overview (<code>?event=</code>)</td></tr>
-      <tr><td><code>/api/time-window</code></td><td>GET</td><td>Flamegraph + functions for a time range</td></tr>
-      <tr><td><code>/api/config/*</code></td><td>POST</td><td>Runtime binary/source/toolchain configuration</td></tr>
-      <tr><td><code>/api/stop</code></td><td>GET</td><td>Disconnect agent</td></tr>
+      <tr><td><code>/api/threads</code></td><td>GET</td><td>All threads overview (<code>?event=</code>)</td></tr>
+      <tr><td><code>/api/threads/&lt;tid&gt;</code></td><td>GET</td><td>Per-thread flamegraph + functions (<code>?event=</code>)</td></tr>
+      <tr><td><code>/api/window</code></td><td>GET</td><td>Flamegraph + functions for a time range</td></tr>
+      <tr><td><code>/api/config</code></td><td>GET / PATCH</td><td>Runtime binary/source/toolchain configuration</td></tr>
+      <tr><td><code>/api/agent</code></td><td>GET / DELETE</td><td>Agent connection info / disconnect</td></tr>
     </tbody>
   </table>
 </section>

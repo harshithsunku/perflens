@@ -1,6 +1,6 @@
 // Central live-session store. Mirrors the vanilla UI's global `state`
 // object; the notify-and-fetch cycle (SSE data_version stamp → pull
-// /api/per-event for the viewed event) lives here.
+// /api/snapshot for the viewed event) lives here.
 
 import { create } from 'zustand';
 import { api } from '../api/client';
@@ -132,7 +132,7 @@ export const useLive = create<LiveState>((set, get) => ({
     if (perEventFetching) return;
     if (!force && fetchedVersion >= dataVersion) return;
     perEventFetching = true;
-    api.perEvent(event)
+    api.snapshot(event)
       .then((resp) => {
         perEventFetching = false;
         fetchedVersion = resp.version.chunk_count || 0;

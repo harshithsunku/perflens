@@ -24,12 +24,12 @@ export default function BrowseModal({ request, onClose }:
     setError(null);
     setSelected(request.mode === 'dir' ? p : null);
     api.browse(p).then((data) => {
-      if (data.error) { setError(data.error); return; }
       setPath(data.path);
       setParent(data.parent && data.parent !== data.path ? data.parent : null);
       setEntries(data.entries as Entry[]);
       if (request.mode === 'dir') setSelected(data.path);
-    }).catch((err) => setError(String(err)));
+    }).catch((err) =>
+      setError(err instanceof Error ? err.message : String(err)));
   }, [request.mode]);
 
   useEffect(() => { browseTo(request.startPath); }, [browseTo, request.startPath]);

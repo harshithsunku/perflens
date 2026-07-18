@@ -9,29 +9,25 @@ import { useUi } from '../store/ui';
 export async function replaySession(sessionId: string, keepTab = false): Promise<void> {
   try {
     const data = await api.session(sessionId);
-    if (data.error) {
-      useUi.getState().showError('Replay error: ' + data.error);
-      return;
-    }
     useLive.getState().loadReplay(sessionId, data);
     useUi.getState().showView('profiling');
     if (!keepTab) useUi.getState().switchTab('functions');
   } catch (err) {
-    useUi.getState().showError('Failed to load session: ' + String(err));
+    useUi.getState().showError('Replay error: ' + errMsg(err));
   }
 }
 
 export async function baselineFromSession(sessionId: string): Promise<void> {
   try {
     const data = await api.session(sessionId);
-    if (data.error) {
-      useUi.getState().showError('Baseline error: ' + data.error);
-      return;
-    }
     useLive.getState().setBaseline(
       data.per_event as Record<string, PerEventEntry>, sessionId);
     useUi.getState().switchTab('functions');
   } catch (err) {
-    useUi.getState().showError('Failed to load baseline session: ' + String(err));
+    useUi.getState().showError('Baseline error: ' + errMsg(err));
   }
+}
+
+function errMsg(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }

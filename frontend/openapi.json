@@ -2,7 +2,7 @@
   "components": {
     "schemas": {
       "AgentCommand": {
-        "description": "One flag-2 command frame: {id, cmd, args}. The documented command\nset of the frozen agent; used for OpenAPI/TS documentation now and\nserver-side enforcement in API v2.",
+        "description": "One flag-2 command frame: {id, cmd, args}. The documented command\nset of the frozen agent; AgentCommandRequest enforces the same set\nserver-side.",
         "properties": {
           "args": {
             "anyOf": [
@@ -26,15 +26,17 @@
             "enum": [
               "ping",
               "status",
+              "list_processes",
+              "verify_pid",
+              "verify_perf",
+              "reprobe",
               "start",
               "stop",
               "pause",
               "resume",
               "configure",
               "configure_metrics",
-              "list_processes",
-              "reprobe",
-              "probe_binary"
+              "update"
             ],
             "title": "Cmd",
             "type": "string"
@@ -52,7 +54,7 @@
         "type": "object"
       },
       "AgentCommandRequest": {
-        "description": "Generic command relay body for POST /api/agent/command.",
+        "description": "Command relay body for POST /api/agent/command. `cmd` is enforced\nagainst the frozen agent's command set.",
         "properties": {
           "args": {
             "additionalProperties": true,
@@ -60,7 +62,21 @@
             "type": "object"
           },
           "cmd": {
-            "default": "",
+            "enum": [
+              "ping",
+              "status",
+              "list_processes",
+              "verify_pid",
+              "verify_perf",
+              "reprobe",
+              "start",
+              "stop",
+              "pause",
+              "resume",
+              "configure",
+              "configure_metrics",
+              "update"
+            ],
             "title": "Cmd",
             "type": "string"
           },
@@ -70,6 +86,9 @@
             "type": "integer"
           }
         },
+        "required": [
+          "cmd"
+        ],
         "title": "AgentCommandRequest",
         "type": "object"
       },
@@ -132,6 +151,41 @@
         "title": "AgentHello",
         "type": "object"
       },
+      "AgentInfo": {
+        "description": "GET /api/agent \u2014 current agent connection.",
+        "properties": {
+          "addr": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Addr"
+          },
+          "connected": {
+            "title": "Connected",
+            "type": "boolean"
+          },
+          "hello": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentHello"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "connected"
+        ],
+        "title": "AgentInfo",
+        "type": "object"
+      },
       "BrowseEntry": {
         "properties": {
           "is_dir": {
@@ -192,10 +246,10 @@
         "title": "BrowseResponse",
         "type": "object"
       },
-      "ConfigResult": {
-        "additionalProperties": true,
+      "ConfigState": {
+        "description": "GET /api/config \u2014 the resolvable-path parts of the server config.\nAlso the PATCH response (the state after the update).",
         "properties": {
-          "error": {
+          "addr2line": {
             "anyOf": [
               {
                 "type": "string"
@@ -204,17 +258,135 @@
                 "type": "null"
               }
             ],
-            "title": "Error"
+            "title": "Addr2Line"
           },
-          "ok": {
-            "title": "Ok",
+          "binary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Binary"
+          },
+          "inline": {
+            "default": true,
+            "title": "Inline",
             "type": "boolean"
+          },
+          "path_map": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path Map"
+          },
+          "readelf": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Readelf"
+          },
+          "source_dir": {
+            "title": "Source Dir",
+            "type": "string"
+          },
+          "sysroot": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sysroot"
           }
         },
         "required": [
-          "ok"
+          "source_dir"
         ],
-        "title": "ConfigResult",
+        "title": "ConfigState",
+        "type": "object"
+      },
+      "ConfigUpdate": {
+        "additionalProperties": false,
+        "description": "PATCH /api/config \u2014 every field optional; only provided fields\nchange. `binary: \"\"` clears the binary; `sysroot: \"\"` clears the\nsysroot; the source mapper rebuilds once per request.",
+        "properties": {
+          "binary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Binary"
+          },
+          "path_map": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path Map"
+          },
+          "source_dir": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Dir"
+          },
+          "sysroot": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sysroot"
+          },
+          "toolchain_prefix": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Toolchain Prefix"
+          }
+        },
+        "title": "ConfigUpdate",
         "type": "object"
       },
       "ConfigureArgs": {
@@ -346,17 +518,6 @@
             ],
             "title": "Addr"
           },
-          "error": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Error"
-          },
           "hello": {
             "anyOf": [
               {
@@ -379,7 +540,7 @@
         "type": "object"
       },
       "DataVersion": {
-        "description": "Version stamp for the notify-and-fetch cycle. Broadcast over SSE\n(with event_types) and echoed by /api/per-event (without).",
+        "description": "Version stamp for the notify-and-fetch cycle. Broadcast over SSE\n(with event_types) and echoed by /api/snapshot (without).",
         "properties": {
           "chunk_count": {
             "title": "Chunk Count",
@@ -412,11 +573,29 @@
         "title": "DataVersion",
         "type": "object"
       },
+      "ErrorDetail": {
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "ErrorDetail",
+        "type": "object"
+      },
       "ErrorResponse": {
+        "description": "Every non-2xx response renders as this envelope.",
         "properties": {
           "error": {
-            "title": "Error",
-            "type": "string"
+            "$ref": "#/components/schemas/ErrorDetail"
           }
         },
         "required": [
@@ -651,30 +830,6 @@
         "title": "MetricsFrame",
         "type": "object"
       },
-      "PathConfigRequest": {
-        "properties": {
-          "path": {
-            "default": "",
-            "title": "Path",
-            "type": "string"
-          }
-        },
-        "title": "PathConfigRequest",
-        "type": "object"
-      },
-      "PathMapConfigRequest": {
-        "properties": {
-          "path_map": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "title": "Path Map",
-            "type": "object"
-          }
-        },
-        "title": "PathMapConfigRequest",
-        "type": "object"
-      },
       "PerEventEntry": {
         "properties": {
           "flamegraph": {
@@ -719,30 +874,8 @@
         "title": "PerEventEntry",
         "type": "object"
       },
-      "PerEventResponse": {
-        "description": "GET /api/per-event?event=<evt>",
-        "properties": {
-          "data": {
-            "$ref": "#/components/schemas/PerEventEntry"
-          },
-          "event": {
-            "title": "Event",
-            "type": "string"
-          },
-          "version": {
-            "$ref": "#/components/schemas/DataVersion"
-          }
-        },
-        "required": [
-          "event",
-          "data",
-          "version"
-        ],
-        "title": "PerEventResponse",
-        "type": "object"
-      },
-      "SSEAgentConnectedEvent": {
-        "description": "`agent_connected` event: fired once per new agent session.",
+      "SSEAgentEvent": {
+        "description": "`agent` event: fired once per new agent session.",
         "properties": {
           "agent": {
             "title": "Agent",
@@ -757,24 +890,17 @@
         "required": [
           "agent"
         ],
-        "title": "SSEAgentConnectedEvent",
+        "title": "SSEAgentEvent",
         "type": "object"
       },
       "SSECatalog": {
-        "description": "Not an endpoint \u2014 enumerates every event on GET /api/stream so the\npayload models land in the OpenAPI components for TS generation.\n\nEvents: `status` (SSEStatusEvent), `agent_connected`\n(SSEAgentConnectedEvent), `event_types` (list[str]), `data_version`\n(DataVersion, with event_types), `perf_stat` (dict), `metrics_system`\n/ `metrics_process` / `metrics_network` / `metrics_disk` /\n`metrics_threads` (MetricsFrame).",
+        "description": "Not an endpoint \u2014 enumerates every event on GET /api/stream so the\npayload models land in the OpenAPI components for TS generation.\n\nEvents: `status` (SSEStatusEvent), `agent` (SSEAgentEvent),\n`data_version` (DataVersion, with event_types), `perf_stat` (dict),\n`metrics` (MetricsFrame, discriminated by its `type` field).",
         "properties": {
-          "agent_connected": {
-            "$ref": "#/components/schemas/SSEAgentConnectedEvent"
+          "agent": {
+            "$ref": "#/components/schemas/SSEAgentEvent"
           },
           "data_version": {
             "$ref": "#/components/schemas/DataVersion"
-          },
-          "event_types": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Event Types",
-            "type": "array"
           },
           "metrics": {
             "$ref": "#/components/schemas/MetricsFrame"
@@ -790,8 +916,7 @@
         },
         "required": [
           "status",
-          "agent_connected",
-          "event_types",
+          "agent",
           "data_version",
           "perf_stat",
           "metrics"
@@ -823,6 +948,56 @@
           "connected"
         ],
         "title": "SSEStatusEvent",
+        "type": "object"
+      },
+      "SessionDeleteResponse": {
+        "properties": {
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ok",
+          "session_id"
+        ],
+        "title": "SessionDeleteResponse",
+        "type": "object"
+      },
+      "SessionListResponse": {
+        "description": "GET /api/sessions?offset=&limit=",
+        "properties": {
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "sessions": {
+            "items": {
+              "$ref": "#/components/schemas/SessionMetadata"
+            },
+            "title": "Sessions",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sessions",
+          "total",
+          "offset",
+          "limit"
+        ],
+        "title": "SessionListResponse",
         "type": "object"
       },
       "SessionMetadata": {
@@ -932,6 +1107,28 @@
         "title": "SessionReplayResponse",
         "type": "object"
       },
+      "SnapshotResponse": {
+        "description": "GET /api/snapshot?event=<evt>",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/PerEventEntry"
+          },
+          "event": {
+            "title": "Event",
+            "type": "string"
+          },
+          "version": {
+            "$ref": "#/components/schemas/DataVersion"
+          }
+        },
+        "required": [
+          "event",
+          "data",
+          "version"
+        ],
+        "title": "SnapshotResponse",
+        "type": "object"
+      },
       "SourceFileRef": {
         "properties": {
           "found": {
@@ -965,17 +1162,6 @@
       },
       "SourceResponse": {
         "properties": {
-          "error": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Error"
-          },
           "file": {
             "title": "File",
             "type": "string"
@@ -1287,28 +1473,6 @@
         "title": "TimeWindowResponse",
         "type": "object"
       },
-      "ToolchainConfigRequest": {
-        "properties": {
-          "prefix": {
-            "default": "",
-            "title": "Prefix",
-            "type": "string"
-          },
-          "sysroot": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Sysroot"
-          }
-        },
-        "title": "ToolchainConfigRequest",
-        "type": "object"
-      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -1425,6 +1589,42 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/agent": {
+      "delete": {
+        "description": "Close the agent connection, triggering normal disconnect flow.",
+        "operationId": "api_agent_disconnect_api_agent_delete",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StopResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Api Agent Disconnect"
+      },
+      "get": {
+        "description": "Current agent connection: address + hello (platform, version).",
+        "operationId": "api_agent_info_api_agent_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentInfo"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Api Agent Info"
+      }
+    },
     "/api/agent/command": {
       "post": {
         "description": "Relay a command to the managed agent.",
@@ -1450,6 +1650,16 @@
             },
             "description": "Successful Response"
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -1459,186 +1669,25 @@
               }
             },
             "description": "Validation Error"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Gateway"
           }
         },
         "summary": "Api Agent Command"
       }
     },
-    "/api/browse": {
-      "get": {
-        "description": "Browse the server filesystem for the wizard's binary/source pickers.\nConfined to config.browse_root.",
-        "operationId": "api_browse_api_browse_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/BrowseResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Api Browse"
-      }
-    },
-    "/api/config/binary": {
-      "post": {
-        "operationId": "config_route_api_config_binary_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/PathConfigRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ConfigResult"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Config Route"
-      }
-    },
-    "/api/config/pathmap": {
-      "post": {
-        "operationId": "config_route_api_config_pathmap_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/PathMapConfigRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ConfigResult"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Config Route"
-      }
-    },
-    "/api/config/source": {
-      "post": {
-        "operationId": "config_route_api_config_source_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/PathConfigRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ConfigResult"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Config Route"
-      }
-    },
-    "/api/config/toolchain": {
-      "post": {
-        "operationId": "config_route_api_config_toolchain_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ToolchainConfigRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ConfigResult"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Config Route"
-      }
-    },
-    "/api/connect": {
+    "/api/agent/connect": {
       "post": {
         "description": "Connect to a listen-mode agent.",
-        "operationId": "api_connect_api_connect_post",
+        "operationId": "api_agent_connect_api_agent_connect_post",
         "requestBody": {
           "content": {
             "application/json": {
@@ -1660,6 +1709,87 @@
             },
             "description": "Successful Response"
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Gateway"
+          }
+        },
+        "summary": "Api Agent Connect"
+      }
+    },
+    "/api/browse": {
+      "get": {
+        "description": "Browse the server filesystem for the wizard's binary/source pickers.\nConfined to config.browse_root.",
+        "operationId": "api_browse_api_browse_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "path",
+            "required": false,
+            "schema": {
+              "default": "/",
+              "title": "Path",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrowseResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -1671,37 +1801,105 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Api Connect"
+        "summary": "Api Browse"
       }
     },
-    "/api/export/flamegraph": {
+    "/api/config": {
       "get": {
-        "description": "Export flamegraph as standalone SVG. Uses session data if provided.",
-        "operationId": "api_export_flamegraph_api_export_flamegraph_get",
+        "operationId": "api_config_get_api_config_get",
         "responses": {
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigState"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Api Export Flamegraph"
+        "summary": "Api Config Get"
+      },
+      "patch": {
+        "description": "Update binary / source dir / path map / toolchain / sysroot in one\nrequest; the source mapper rebuilds once.",
+        "operationId": "api_config_patch_api_config_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfigUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigState"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Api Config Patch"
       }
     },
-    "/api/export/session/{session_id}": {
+    "/api/index/files": {
       "get": {
-        "description": "Export session in collapsed or JSON format.",
-        "operationId": "api_export_session_api_export_session__session_id__get",
+        "operationId": "api_index_files_api_index_files_get",
         "parameters": [
           {
-            "in": "path",
-            "name": "session_id",
-            "required": true,
+            "in": "query",
+            "name": "offset",
+            "required": false,
             "schema": {
-              "title": "Session Id",
+              "default": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Q",
               "type": "string"
             }
           }
@@ -1710,7 +1908,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/IndexFilesResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -1724,43 +1924,6 @@
               }
             },
             "description": "Validation Error"
-          }
-        },
-        "summary": "Api Export Session"
-      }
-    },
-    "/api/import": {
-      "post": {
-        "description": "Import an uploaded perf.data file.",
-        "operationId": "api_import_api_import_post",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ImportResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Api Import"
-      }
-    },
-    "/api/index/files": {
-      "get": {
-        "operationId": "api_index_files_api_index_files_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/IndexFilesResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
           }
         },
         "summary": "Api Index Files"
@@ -1782,6 +1945,75 @@
           }
         },
         "summary": "Api Index Status"
+      }
+    },
+    "/api/live/export": {
+      "get": {
+        "description": "Export the live in-memory profile (bounded by --max-samples).",
+        "operationId": "api_live_export_api_live_export_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "format",
+            "required": false,
+            "schema": {
+              "default": "collapsed",
+              "title": "Format",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "event",
+            "required": false,
+            "schema": {
+              "default": "cycles",
+              "title": "Event",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Api Live Export"
       }
     },
     "/api/metrics/current": {
@@ -1809,6 +2041,50 @@
     "/api/metrics/history": {
       "get": {
         "operationId": "api_metrics_history_api_metrics_history_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "type",
+            "required": false,
+            "schema": {
+              "default": "system",
+              "title": "Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "start",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Start"
+            }
+          },
+          {
+            "in": "query",
+            "name": "end",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "End"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -1823,21 +2099,140 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "Api Metrics History"
       }
     },
-    "/api/per-event": {
+    "/api/sessions": {
       "get": {
-        "description": "Pull the cached per-event snapshot (one event, or all). Pairs with\nthe 'data_version' SSE notify: browsers fetch only the event they're\nviewing.",
-        "operationId": "api_per_event_api_per_event_get",
+        "operationId": "api_sessions_list_api_sessions_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PerEventResponse"
+                  "$ref": "#/components/schemas/SessionListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Api Sessions List"
+      }
+    },
+    "/api/sessions/import": {
+      "post": {
+        "description": "Import an uploaded perf.data file as a saved session.",
+        "operationId": "api_sessions_import_api_sessions_import_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          }
+        },
+        "summary": "Api Sessions Import"
+      }
+    },
+    "/api/sessions/{session_id}": {
+      "delete": {
+        "operationId": "api_session_delete_api_sessions__session_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionDeleteResponse"
                 }
               }
             },
@@ -1852,34 +2247,20 @@
               }
             },
             "description": "Not Found"
-          }
-        },
-        "summary": "Api Per Event"
-      }
-    },
-    "/api/sessions": {
-      "get": {
-        "operationId": "api_sessions_list_api_sessions_get",
-        "responses": {
-          "200": {
+          },
+          "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/SessionMetadata"
-                  },
-                  "title": "Response Api Sessions List Api Sessions Get",
-                  "type": "array"
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             },
-            "description": "Successful Response"
+            "description": "Validation Error"
           }
         },
-        "summary": "Api Sessions List"
-      }
-    },
-    "/api/sessions/{session_id}": {
+        "summary": "Api Session Delete"
+      },
       "get": {
         "description": "Rebuild session data on the fly from raw chunks (cached on disk \u2014\nsessions are immutable once saved).",
         "operationId": "api_session_replay_api_sessions__session_id__get",
@@ -1905,6 +2286,16 @@
             },
             "description": "Successful Response"
           },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -1919,10 +2310,188 @@
         "summary": "Api Session Replay"
       }
     },
+    "/api/sessions/{session_id}/export": {
+      "get": {
+        "description": "Export a saved session: collapsed stacks, full JSON, or SVG\nflamegraph (per event).",
+        "operationId": "api_session_export_api_sessions__session_id__export_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "format",
+            "required": false,
+            "schema": {
+              "default": "collapsed",
+              "title": "Format",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "event",
+            "required": false,
+            "schema": {
+              "default": "cycles",
+              "title": "Event",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Api Session Export"
+      }
+    },
+    "/api/snapshot": {
+      "get": {
+        "description": "Pull the cached per-event snapshot (one event, or all). Pairs with\nthe 'data_version' SSE notify: browsers fetch only the event they're\nviewing.",
+        "operationId": "api_snapshot_api_snapshot_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "event",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Event"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnapshotResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Api Snapshot"
+      }
+    },
     "/api/source": {
       "get": {
         "description": "Return annotated source for a specific file. Optional tid filter.",
         "operationId": "api_source_api_source_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "file",
+            "required": true,
+            "schema": {
+              "title": "File",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "event",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Event"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tid",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tid"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -1933,6 +2502,36 @@
               }
             },
             "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "Api Source"
@@ -1956,28 +2555,9 @@
         "summary": "Api Status"
       }
     },
-    "/api/stop": {
-      "get": {
-        "description": "Close the agent connection, triggering normal disconnect flow.",
-        "operationId": "api_stop_api_stop_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/StopResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Api Stop"
-      }
-    },
     "/api/stream": {
       "get": {
-        "description": "Server-Sent Events endpoint for real-time updates.",
+        "description": "Server-Sent Events endpoint for real-time updates.\n\nEvents: `status`, `agent`, `data_version` (carries event_types),\n`perf_stat`, `metrics` (discriminated by its `type` field).",
         "operationId": "api_stream_api_stream_get",
         "responses": {
           "200": {
@@ -1992,10 +2572,22 @@
         "summary": "Api Stream"
       }
     },
-    "/api/thread-summary": {
+    "/api/threads": {
       "get": {
         "description": "Overview of all threads with CPU breakdown.",
-        "operationId": "api_thread_summary_api_thread_summary_get",
+        "operationId": "api_threads_api_threads_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "event",
+            "required": false,
+            "schema": {
+              "default": "cycles",
+              "title": "Event",
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -2006,15 +2598,46 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
-        "summary": "Api Thread Summary"
+        "summary": "Api Threads"
       }
     },
-    "/api/thread-view": {
+    "/api/threads/{tid}": {
       "get": {
         "description": "Per-thread flamegraph + summary + source_files.",
-        "operationId": "api_thread_view_api_thread_view_get",
+        "operationId": "api_thread_view_api_threads__tid__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tid",
+            "required": true,
+            "schema": {
+              "title": "Tid",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "event",
+            "required": false,
+            "schema": {
+              "default": "cycles",
+              "title": "Event",
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -2025,15 +2648,71 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "Api Thread View"
       }
     },
-    "/api/time-window": {
+    "/api/window": {
       "get": {
         "description": "Flamegraph + function summary restricted to samples received inside\n[start, end] (unix seconds). Backs the UI's timeline scrubbing: samples\nare stamped with arrival time, so a window on the Device Health\ntimeline maps to the profile chunks collected in that window. Bounded\nby the raw-sample ring buffer (--max-samples).",
-        "operationId": "api_time_window_api_time_window_get",
+        "operationId": "api_window_api_window_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "start",
+            "required": true,
+            "schema": {
+              "title": "Start",
+              "type": "number"
+            }
+          },
+          {
+            "in": "query",
+            "name": "end",
+            "required": true,
+            "schema": {
+              "title": "End",
+              "type": "number"
+            }
+          },
+          {
+            "in": "query",
+            "name": "event",
+            "required": false,
+            "schema": {
+              "default": "cycles",
+              "title": "Event",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tid",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tid"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -2044,14 +2723,24 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
-        "summary": "Api Time Window"
+        "summary": "Api Window"
       }
     },
-    "/api/wizard/state": {
+    "/api/wizard": {
       "get": {
-        "operationId": "api_wizard_state_api_wizard_state_get",
+        "operationId": "api_wizard_get_api_wizard_get",
         "responses": {
           "200": {
             "content": {
@@ -2064,10 +2753,10 @@
             "description": "Successful Response"
           }
         },
-        "summary": "Api Wizard State"
+        "summary": "Api Wizard Get"
       },
-      "post": {
-        "operationId": "api_wizard_state_update_api_wizard_state_post",
+      "put": {
+        "operationId": "api_wizard_put_api_wizard_put",
         "requestBody": {
           "content": {
             "application/json": {
@@ -2102,7 +2791,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Api Wizard State Update"
+        "summary": "Api Wizard Put"
       }
     },
     "/{path}": {

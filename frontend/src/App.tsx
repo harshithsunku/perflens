@@ -46,9 +46,8 @@ function Header() {
         <button id="stop-btn" className={'stop-btn' + (connected ? '' : ' hidden')}
                 title="Stop profiling"
                 onClick={() => {
-                  api.stop().then((d) => {
-                    if (d.error) useUi.getState().showError(d.error);
-                  }).catch(() => useUi.getState().showError('Stop not available'));
+                  api.disconnectAgent()
+                    .catch(() => useUi.getState().showError('Stop not available'));
                 }}>
           Stop
         </button>

@@ -29,14 +29,20 @@ class Status(BaseModel):
 
 class DataVersion(BaseModel):
     """Version stamp for the notify-and-fetch cycle. Broadcast over SSE
-    (with event_types) and echoed by /api/per-event (without)."""
+    (with event_types) and echoed by /api/snapshot (without)."""
     chunk_count: int
     total_samples: int
     event_types: Optional[list[str]] = None
 
 
+class ErrorDetail(BaseModel):
+    code: str
+    message: str
+
+
 class ErrorResponse(BaseModel):
-    error: str
+    """Every non-2xx response renders as this envelope."""
+    error: ErrorDetail
 
 
 # ---------------------------------------------------------------------------
@@ -96,15 +102,15 @@ class PerEventEntry(BaseModel):
     source: Optional[dict[str, Any]] = None
 
 
-class PerEventResponse(BaseModel):
-    """GET /api/per-event?event=<evt>"""
+class SnapshotResponse(BaseModel):
+    """GET /api/snapshot?event=<evt>"""
     event: str
     data: PerEventEntry
     version: DataVersion
 
 
-class PerEventAllResponse(BaseModel):
-    """GET /api/per-event (no event param)"""
+class SnapshotAllResponse(BaseModel):
+    """GET /api/snapshot (no event param)"""
     per_event: dict[str, PerEventEntry]
     version: DataVersion
 
@@ -128,10 +134,23 @@ class SessionMetadata(BaseModel):
     metrics_summary: Optional[dict[str, Any]] = None
 
 
+class SessionListResponse(BaseModel):
+    """GET /api/sessions?offset=&limit="""
+    sessions: list[SessionMetadata]
+    total: int
+    offset: int
+    limit: int
+
+
 class SessionReplayResponse(BaseModel):
     metadata: SessionMetadata
     per_event: dict[str, PerEventEntry]
     metrics: Optional[dict[str, Any]] = None
+
+
+class SessionDeleteResponse(BaseModel):
+    ok: bool
+    session_id: str
 
 
 class ImportResponse(BaseModel):
@@ -191,7 +210,6 @@ class TimeWindowResponse(BaseModel):
 class SourceResponse(BaseModel):
     file: str
     lines: list[dict[str, Any]]
-    error: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -276,12 +294,26 @@ class ConnectResponse(BaseModel):
     ok: bool
     hello: Optional[AgentHello] = None
     addr: Optional[str] = None
-    error: Optional[str] = None
+
+
+class AgentInfo(BaseModel):
+    """GET /api/agent — current agent connection."""
+    connected: bool
+    addr: Optional[str] = None
+    hello: Optional[AgentHello] = None
+
+
+# The frozen agent's dispatch table (agent-c/src/commands.c CMD_TABLE)
+AgentCommandName = Literal['ping', 'status', 'list_processes', 'verify_pid',
+                           'verify_perf', 'reprobe', 'start', 'stop',
+                           'pause', 'resume', 'configure',
+                           'configure_metrics', 'update']
 
 
 class AgentCommandRequest(BaseModel):
-    """Generic command relay body for POST /api/agent/command."""
-    cmd: str = ''
+    """Command relay body for POST /api/agent/command. `cmd` is enforced
+    against the frozen agent's command set."""
+    cmd: AgentCommandName
     args: dict[str, Any] = Field(default_factory=dict)
     timeout: int = 60
 
@@ -326,37 +358,40 @@ class EmptyArgs(BaseModel):
 
 class AgentCommand(BaseModel):
     """One flag-2 command frame: {id, cmd, args}. The documented command
-    set of the frozen agent; used for OpenAPI/TS documentation now and
-    server-side enforcement in API v2."""
+    set of the frozen agent; AgentCommandRequest enforces the same set
+    server-side."""
     id: str
-    cmd: Literal['ping', 'status', 'start', 'stop', 'pause', 'resume',
-                 'configure', 'configure_metrics', 'list_processes',
-                 'reprobe', 'probe_binary']
+    cmd: AgentCommandName
     args: Union[StartArgs, ConfigureArgs, ConfigureMetricsArgs,
                 dict[str, Any]] = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
-# Config endpoints
+# Config endpoint (unified GET + PATCH)
 # ---------------------------------------------------------------------------
 
-class PathConfigRequest(BaseModel):
-    path: str = ''
-
-
-class PathMapConfigRequest(BaseModel):
-    path_map: dict[str, str] = Field(default_factory=dict)
-
-
-class ToolchainConfigRequest(BaseModel):
-    prefix: str = ''
+class ConfigState(BaseModel):
+    """GET /api/config — the resolvable-path parts of the server config.
+    Also the PATCH response (the state after the update)."""
+    binary: Optional[str] = None
+    source_dir: str
+    path_map: Optional[dict[str, str]] = None
+    addr2line: Optional[str] = None
+    readelf: Optional[str] = None
     sysroot: Optional[str] = None
+    inline: bool = True
 
 
-class ConfigResult(BaseModel):
-    model_config = ConfigDict(extra='allow')
-    ok: bool
-    error: Optional[str] = None
+class ConfigUpdate(BaseModel):
+    """PATCH /api/config — every field optional; only provided fields
+    change. `binary: ""` clears the binary; `sysroot: ""` clears the
+    sysroot; the source mapper rebuilds once per request."""
+    model_config = ConfigDict(extra='forbid')
+    binary: Optional[str] = None
+    source_dir: Optional[str] = None
+    path_map: Optional[dict[str, str]] = None
+    toolchain_prefix: Optional[str] = None
+    sysroot: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -369,8 +404,8 @@ class SSEStatusEvent(BaseModel):
     agent: Optional[str] = None
 
 
-class SSEAgentConnectedEvent(BaseModel):
-    """`agent_connected` event: fired once per new agent session."""
+class SSEAgentEvent(BaseModel):
+    """`agent` event: fired once per new agent session."""
     agent: str
     platform: dict[str, Any] = Field(default_factory=dict)
 
@@ -379,15 +414,12 @@ class SSECatalog(BaseModel):
     """Not an endpoint — enumerates every event on GET /api/stream so the
     payload models land in the OpenAPI components for TS generation.
 
-    Events: `status` (SSEStatusEvent), `agent_connected`
-    (SSEAgentConnectedEvent), `event_types` (list[str]), `data_version`
-    (DataVersion, with event_types), `perf_stat` (dict), `metrics_system`
-    / `metrics_process` / `metrics_network` / `metrics_disk` /
-    `metrics_threads` (MetricsFrame).
+    Events: `status` (SSEStatusEvent), `agent` (SSEAgentEvent),
+    `data_version` (DataVersion, with event_types), `perf_stat` (dict),
+    `metrics` (MetricsFrame, discriminated by its `type` field).
     """
     status: SSEStatusEvent
-    agent_connected: SSEAgentConnectedEvent
-    event_types: list[str]
+    agent: SSEAgentEvent
     data_version: DataVersion
     perf_stat: dict[str, Any]
     metrics: MetricsFrame

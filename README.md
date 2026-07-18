@@ -265,31 +265,35 @@ Options:
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/status` | GET | Server + agent connection state, sample totals |
-| `/api/stream` | GET | Server-Sent Events: `status`, `agent_connected`, `event_types`, `data_version` (per chunk), `perf_stat`, `metrics_<type>` |
-| `/api/per-event?event=<evt>` | GET | Cached per-event snapshot (gzip); clients fetch it when SSE `data_version` bumps |
-| `/api/sessions` | GET | List saved sessions (metadata only) |
+| `/api/stream` | GET | Server-Sent Events: `status`, `agent`, `data_version` (per chunk, carries event types), `perf_stat`, `metrics` |
+| `/api/snapshot?event=<evt>` | GET | Cached per-event snapshot (gzip); clients fetch it when SSE `data_version` bumps |
+| `/api/sessions?offset=&limit=` | GET | List saved sessions (metadata only, paginated) |
 | `/api/sessions/<id>` | GET | Lazy-replay a session (parses raw chunks on demand, cached) |
-| `/api/export/session/<id>?format=` | GET | Export a session: `collapsed` (FlameGraph stacks) or `json` |
-| `/api/export/flamegraph?event=&session=` | GET | Standalone SVG flame graph |
+| `/api/sessions/<id>` | DELETE | Delete a saved session from disk |
+| `/api/sessions/<id>/export?format=` | GET | Export a session: `collapsed` (FlameGraph stacks), `json`, or `svg` flame graph (`&event=`) |
+| `/api/sessions/import` | POST | Import an uploaded `perf.data` file as a session (needs `perf` on the server) |
+| `/api/live/export?format=` | GET | Export the live in-memory profile (same formats) |
 | `/api/source?file=<path>&event=<evt>&tid=<tid>` | GET | Annotated source for a single file (optionally filtered by thread) |
-| `/api/thread-view?event=<evt>&tid=<tid>` | GET | Per-thread flamegraph and function summary |
-| `/api/thread-summary?event=<evt>` | GET | Thread overview: all threads with sample counts and top functions |
-| `/api/time-window?event=&start=&end=` | GET | Flame graph + function summary for samples received in a time range (timeline scrubbing) |
+| `/api/threads?event=<evt>` | GET | Thread overview: all threads with sample counts and top functions |
+| `/api/threads/<tid>?event=<evt>` | GET | Per-thread flamegraph and function summary |
+| `/api/window?event=&start=&end=` | GET | Flame graph + function summary for samples received in a time range (timeline scrubbing) |
 | `/api/index/status` | GET | Source-index / DWARF file-list state (truncated preview) |
 | `/api/index/files?offset=&limit=&q=` | GET | Paginated DWARF source-file list |
 | `/api/metrics/current` | GET | Latest device health metrics per type |
 | `/api/metrics/history?type=&start=` | GET | Health metrics time series |
-| `/api/connect` | POST | Connect out to a `--listen` agent (`{"host": ..., "port": ...}`) |
+| `/api/agent` | GET | Agent connection info (address, hello/platform) |
+| `/api/agent` | DELETE | Disconnect the active agent (triggers normal session save) |
+| `/api/agent/connect` | POST | Connect out to a `--listen` agent (`{"host": ..., "port": ...}`) |
 | `/api/agent/command` | POST | Send a command to the connected agent (`start`, `stop`, `pause`, ...) |
-| `/api/wizard/state` | GET/POST | Persisted Live Debug wizard state |
+| `/api/wizard` | GET/PUT | Persisted Live Debug wizard state |
 | `/api/browse?path=` | GET | File picker listing (confined to `--browse-root`) |
-| `/api/config/binary` | POST | Set the unstripped binary at runtime |
-| `/api/config/source` | POST | Set the source directory at runtime |
-| `/api/config/pathmap` | POST | Set compile-time path rewrites at runtime |
-| `/api/config/toolchain` | POST | Set toolchain prefix and sysroot at runtime |
-| `/api/import` | POST | Import an uploaded `perf.data` file as a session (needs `perf` on the server) |
-| `/api/stop` | GET | Disconnect the active agent (triggers normal session save) |
+| `/api/config` | GET/PATCH | Runtime binary/source/path-map/toolchain configuration (one typed model) |
 | `/*` | GET | Static files from `ui/` |
+
+Errors are uniform: every failure responds
+`{"error": {"code": "<slug>", "message": "..."}}` with a real status code
+(400 validation, 403 permission, 404 missing, 409 wrong server state,
+413 too large, 502 agent transport).
 
 ---
 

@@ -275,15 +275,14 @@ class AgentSession:
                         continue
 
                     # add_samples sets dirty flag and signals rebuild worker
-                    total_count, event_types = state.add_samples(samples, perf_stat)
+                    total_count, _ = state.add_samples(samples, perf_stat)
 
                     print(f"[server] Managed agent chunk: "
                           f"{len(samples)} new, {total_count} total",
                           file=sys.stderr)
 
-                    # Lightweight SSE: event types + stat pushed immediately.
-                    # Heavy per_event rebuild handled by background worker.
-                    ctx.broadcast('event_types', event_types)
+                    # Lightweight SSE: stat pushed immediately; event types
+                    # ride the data_version stamp from the rebuild worker.
                     if perf_stat:
                         # Broadcast the accumulated stat, not this round's
                         with state.lock:
@@ -297,7 +296,9 @@ class AgentSession:
                                                             errors='replace'))
                         mtype = metrics.get('type', '')
                         ctx.metrics.add(mtype, metrics)
-                        ctx.broadcast('metrics_%s' % mtype, metrics)
+                        # One 'metrics' event; the payload's own 'type'
+                        # field discriminates system/process/network/...
+                        ctx.broadcast('metrics', metrics)
                     except (ValueError, KeyError):
                         pass
 
@@ -387,7 +388,7 @@ def install_agent_session(ctx, session):
         session.start()
 
     ctx.broadcast('status', {'connected': True, 'agent': session.addr})
-    ctx.broadcast('agent_connected', {
+    ctx.broadcast('agent', {
         'agent': session.addr,
         'platform': (session.hello or {}).get('platform', {}),
     })

@@ -71,7 +71,7 @@ history.
 - HTTP layer (`web.py`): FastAPI on uvicorn. SSE fan-out is an asyncio
   hub; worker threads publish via `loop.call_soon_threadsafe`. Live
   updates use notify-and-fetch: a tiny `data_version` SSE stamp, then the
-  browser pulls `/api/per-event` for the event it is viewing.
+  browser pulls `/api/snapshot` for the event it is viewing.
 - The agent TCP listener, recv loops, and the aggregation rebuild worker
   are plain threads (blocking sockets + subprocess work); uvicorn owns
   only the HTTP side. Heavy request handlers are sync `def` routes that
@@ -187,31 +187,34 @@ perflens/
 | Endpoint                  | Method | Description                                     |
 |---------------------------|--------|-------------------------------------------------|
 | `/api/status`             | GET    | Server + agent connection state, sample totals  |
-| `/api/stream`             | GET    | SSE: `status`, `agent_connected`, `event_types`, `data_version`, `perf_stat`, `metrics_<type>` |
-| `/api/per-event?event=`   | GET    | Cached per-event snapshot (gzip); pairs with SSE `data_version` |
-| `/api/sessions`           | GET    | List saved sessions                             |
-| `/api/sessions/<id>`      | GET    | Lazy-replay a session from saved chunks (cached) |
-| `/api/export/session/<id>?format=` | GET | Export: `collapsed` or `json`             |
-| `/api/export/flamegraph?event=&session=` | GET | Standalone SVG flame graph          |
-| `/api/source?file=&event=&tid=` | GET | Annotated source (optionally per-thread)        |
-| `/api/thread-view?event=&tid=`  | GET | Per-thread flamegraph + function summary         |
-| `/api/thread-summary?event=`    | GET | Thread overview with sample counts and top funcs |
-| `/api/time-window?event=&start=&end=` | GET | Flamegraph + functions for a received-time range (timeline scrubbing) |
+| `/api/stream`             | GET    | SSE: `status`, `agent`, `data_version` (carries event types), `perf_stat`, `metrics` (typed by payload) |
+| `/api/snapshot?event=`    | GET    | Cached per-event snapshot (gzip); pairs with SSE `data_version` |
+| `/api/sessions?offset=&limit=` | GET | List saved sessions (paginated)               |
+| `/api/sessions/<id>`      | GET    | Lazy-replay a session from saved chunks (cached); 404 when missing |
+| `/api/sessions/<id>`      | DELETE | Delete a saved session                          |
+| `/api/sessions/<id>/export?format=&event=` | GET | Export: `collapsed`, `json`, or `svg` |
+| `/api/sessions/import`    | POST   | Import an uploaded `perf.data` as a session     |
+| `/api/live/export?format=&event=` | GET | Export the live in-memory profile          |
+| `/api/source?file=&event=&tid=` | GET | Annotated source (optionally per-thread); 404 when no data |
+| `/api/threads?event=`     | GET    | Thread overview with sample counts and top funcs |
+| `/api/threads/<tid>?event=` | GET  | Per-thread flamegraph + function summary        |
+| `/api/window?event=&start=&end=&tid=` | GET | Flamegraph + functions for a received-time range (timeline scrubbing) |
 | `/api/index/status`       | GET    | Source-index / DWARF list state (truncated)     |
 | `/api/index/files?offset=&limit=&q=` | GET | Paginated DWARF source-file list            |
 | `/api/metrics/current`    | GET    | Latest device health metrics per type           |
 | `/api/metrics/history?type=&start=` | GET | Health metrics time series               |
-| `/api/connect`            | POST   | Connect out to a `--listen` agent               |
-| `/api/agent/command`      | POST   | Send a command to the connected agent           |
-| `/api/wizard/state`       | GET/POST | Persisted Live Debug wizard state             |
+| `/api/agent`              | GET    | Agent connection info (addr + hello/platform)   |
+| `/api/agent`              | DELETE | Disconnect the active agent                     |
+| `/api/agent/connect`      | POST   | Connect out to a `--listen` agent               |
+| `/api/agent/command`      | POST   | Send a command to the connected agent (cmd names enforced) |
+| `/api/wizard`             | GET/PUT | Persisted Live Debug wizard state              |
 | `/api/browse?path=`       | GET    | File picker (confined to `--browse-root`)      |
-| `/api/config/binary`      | POST   | Set the unstripped binary at runtime            |
-| `/api/config/source`      | POST   | Set the source directory at runtime             |
-| `/api/config/pathmap`     | POST   | Set compile-time path rewrites at runtime       |
-| `/api/config/toolchain`   | POST   | Set toolchain prefix and sysroot at runtime     |
-| `/api/import`             | POST   | Import an uploaded `perf.data` as a session     |
-| `/api/stop`               | GET    | Disconnect the active agent                     |
+| `/api/config`             | GET/PATCH | Runtime binary/source/pathmap/toolchain config (one typed model) |
 | `/*`                      | GET    | Static files from `ui/`                         |
+
+Error model: every failure is `{"error": {"code": "<slug>", "message":
+"..."}}` with a real status code (400 validation, 403 permission, 404
+missing, 409 wrong server state, 413 too large, 502 agent transport).
 
 ---
 

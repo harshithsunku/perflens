@@ -24,7 +24,7 @@ class ProfilingState:
         self.last_update = 0
         self.agent_connected = False
         self.agent_addr = None
-        self.agent_conn = None     # active agent socket, for /api/stop
+        self.agent_conn = None     # active agent socket, for DELETE /api/agent
         self.event_types = []
         self.perf_stat = {}
         self.source_mapper = None  # SourceMapper, set at startup
@@ -44,7 +44,7 @@ class ProfilingState:
 
     def add_samples(self, new_samples, perf_stat=None):
         """Add samples and return (total_count, event_types_copy)."""
-        # Stamp arrival time — /api/time-window filters the raw deque by it
+        # Stamp arrival time — /api/window filters the raw deque by it
         now = time.time()
         for s in new_samples:
             s['recv_ts'] = now
@@ -243,6 +243,6 @@ def rebuild_worker(ctx):
             }
 
         # Notify-and-fetch: browsers get a tiny version stamp and pull the
-        # event they're actually viewing from /api/per-event — the full
+        # event they're actually viewing from /api/snapshot — the full
         # per-event blob (multi-MB on big profiles) is never broadcast.
         ctx.broadcast('data_version', version)

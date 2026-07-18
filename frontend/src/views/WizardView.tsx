@@ -91,18 +91,15 @@ export default function WizardView() {
     setConnectStatus({ text: `Connecting to ${h}:${p}...`, cls: 'info' });
     api.connect(h, p).then((data) => {
       setConnecting(false);
-      if (data.ok) {
-        setConnected(true);
-        setAgentHello(data.hello ?? null);
-        const platform = data.hello?.platform as { arch?: string; kernel?: string } | undefined;
-        const info = platform ? platform.arch + ' / ' + platform.kernel : 'connected';
-        setConnectStatus({ text: 'Connected: ' + info, cls: 'ok' });
-      } else {
-        setConnectStatus({ text: data.error || 'Connection failed', cls: 'error' });
-      }
+      setConnected(true);
+      setAgentHello(data.hello ?? null);
+      const platform = data.hello?.platform as { arch?: string; kernel?: string } | undefined;
+      const info = platform ? platform.arch + ' / ' + platform.kernel : 'connected';
+      setConnectStatus({ text: 'Connected: ' + info, cls: 'ok' });
     }).catch((err) => {
       setConnecting(false);
-      setConnectStatus({ text: 'Error: ' + String(err), cls: 'error' });
+      const msg = err instanceof Error ? err.message : String(err);
+      setConnectStatus({ text: msg || 'Connection failed', cls: 'error' });
     });
   };
 
@@ -210,31 +207,23 @@ export default function WizardView() {
     });
   };
 
-  // Apply binary/source/toolchain config when leaving step 4
+  // Apply binary/source/toolchain config when leaving step 4 — one
+  // PATCH /api/config sets everything and rebuilds the mapper once.
   const applyStep4 = (done: () => void) => {
     setBinaryStatus({ text: 'Applying...', cls: 'info' });
 
-    // Toolchain first — it sets addr2line/readelf used by binary indexing
-    const toolchainStep = (toolchainPrefix.trim() || sysroot.trim())
-      ? api.configToolchain({
-          ...(toolchainPrefix.trim() ? { prefix: toolchainPrefix.trim() } : {}),
-          ...(sysroot.trim() ? { sysroot: sysroot.trim() } : {}),
-        }).then((r) => {
-          if (!r.ok) throw new Error(r.error || 'Toolchain config failed');
-        })
-      : Promise.resolve();
+    const update: Record<string, unknown> = {};
+    if (toolchainPrefix.trim()) update.toolchain_prefix = toolchainPrefix.trim();
+    if (sysroot.trim()) update.sysroot = sysroot.trim();
+    if (binary.trim()) update.binary = binary.trim();
+    if (sourceDir.trim()) update.source_dir = sourceDir.trim();
 
-    toolchainStep.then(async () => {
-      const results: { ok: boolean; error?: string }[] = [];
-      if (binary.trim()) results.push(await api.configBinary(binary.trim()));
-      if (sourceDir.trim()) results.push(await api.configSource(sourceDir.trim()));
+    const patch = Object.keys(update).length
+      ? api.patchConfig(update)
+      : Promise.resolve(null);
 
-      const errors = results.filter((r) => !r.ok);
-      if (errors.length > 0) {
-        setBinaryStatus({ text: errors.map((e) => e.error).join('; '), cls: 'error' });
-      } else {
-        setBinaryStatus({ text: 'Applied', cls: 'ok' });
-      }
+    patch.then(() => {
+      setBinaryStatus({ text: 'Applied', cls: 'ok' });
       if (binary.trim()) {
         setIndexStatus({ text: 'Indexing symbols and source files...', cls: 'info' });
         pollIndexStatus(done);
@@ -242,7 +231,8 @@ export default function WizardView() {
         done();
       }
     }).catch((err) => {
-      setBinaryStatus({ text: 'Error: ' + String(err), cls: 'error' });
+      const msg = err instanceof Error ? err.message : String(err);
+      setBinaryStatus({ text: msg, cls: 'error' });
       done();
     });
   };
