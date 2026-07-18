@@ -7,7 +7,34 @@ releases may break APIs between minor versions when needed.
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-07-18
+
 ### Added
+
+- **Continuous pipe-mode collection** — the agent prefers one long-lived
+  `perf record -o - | perf script -i -` pipeline over discrete rounds:
+  no sampling dead time while `perf script` runs, symbol tables parsed
+  once per pipeline instead of once per round, and the end-of-round CPU
+  spike becomes a small continuous load (`perf script` additionally runs
+  at nice 5). Probed at startup; targets without pipe support fall back
+  to the existing round loop automatically.
+- **Streaming compression** — perf script output is zstd-compressed as
+  it is read from the pipe instead of being buffered whole; measured
+  peak agent RSS for a 40 MB round dropped from 81 MB to ~2 MB.
+- **Record-event selection** — `start` accepts an `events` subset of the
+  probed record events; the wizard's capability step and the new
+  profiling-settings popover expose it as checkboxes.
+- **Profiling settings popover** — replaces the old `prompt()` dialogs:
+  live frequency/interval/event editing synced from agent status, with
+  a transparent stop+start when a change requires restarting collection;
+  shows collection mode, call-graph method, and agent version.
+- **Switch process** — retarget profiling to another process from the
+  control bar (live process list with CPU%), keeping current settings.
+- **Metrics master toggle** — the metrics gear popover now exposes the
+  protocol's `enabled` flag to turn all health metrics off/on.
+- **Collection-mode indicator** in the control bar (`continuous · 99 Hz`);
+  `status` now reports `agent_version`, the effective event list, and
+  `pipe_mode`.
 
 - **Differential view** — snapshot the live profile ("Set Baseline") or
   pick any saved session as the baseline; the function table gains a
@@ -39,8 +66,19 @@ releases may break APIs between minor versions when needed.
 - **TCP keepalive on the agent** — a dead network path now unblocks
   `recv()` within ~2 minutes so `--server` mode actually reconnects.
 
+### Changed
+
+- **Agent source split into modules** — `agent-c/perflens_agent.c`
+  (4,600 lines) became `agent-c/src/` (`agent.h` + 10 focused `.c`
+  files); same flags, same static binary, same cross-compile targets.
+
 ### Fixed
 
+- **Perf children were immune to SIGTERM** — processes forked from the
+  agent's worker threads inherited the thread's blocked-signal mask
+  across exec, so stop/pause "immediate kill" never actually worked
+  (rounds just ran to completion, and the new long-lived pipeline hung
+  shutdown). Children now reset their signal mask before exec.
 - **Agent**: snprintf buffer overflow in network metrics on hosts with
   many interfaces; unbounded `malloc` from a corrupt frame header
   (now capped at 64 MB); `buf_ensure` doubling past its cap; recv

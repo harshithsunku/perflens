@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "perflens"
-version = "0.6.0"
+version = "0.7.0"
 description = "Real-time remote Linux performance profiler with a live web UI (perf + flame graphs + line-level source annotation)"
 readme = "README.md"
 license = { file = "LICENSE" }
