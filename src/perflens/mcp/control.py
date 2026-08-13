@@ -76,7 +76,8 @@ def register(mcp, client):
         title='Connect to a device agent',
         description=(
             'Connect out to a PerfLens agent that was started with --listen on '
-            'a device. Takes up to ~15 seconds because the agent probes which '
+            'a device. Takes ~10-20 s (longer on slow targets) because the '
+            'agent probes which '
             'perf events and call-graph modes work there before reporting '
             'ready. Not needed when the agent was started with --server, since '
             'it connects in on its own.'),

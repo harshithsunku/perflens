@@ -7,6 +7,84 @@ releases may break APIs between minor versions when needed.
 
 ## [Unreleased]
 
+The hands-on validation pass 0.8.0 shipped without. Everything below was
+found by running the profiler against a real 25-thread workload and looking
+at the output — not by an assertion.
+
+### Fixed
+
+- **Line-level source annotation reported each function's declaration line
+  instead of its hot line.** The agent asked `perf script` for `sym` but not
+  `symoff`, so every frame arrived as a bare symbol name; the server then
+  fell back to the symbol address, collapsing every sample in a function
+  onto the line its signature is on. A matrix-multiply hotspot pointed at
+  `void matrix_multiply_naive(...)` rather than the inner loop two lines
+  down. Both committed fixtures were captured through the same path and
+  carry no offsets, so the whole suite agreed with the broken behaviour.
+
+  Fixed on both sides. `SCRIPT_FIELDS` now requests `symoff`, which makes
+  new captures exact. Independently, the server recovers each module's
+  page-aligned load base from the raw instruction pointer — which was
+  present in the data all along — so agents that predate this release, and
+  every session already saved to disk, resolve correctly too. On a real
+  capture that took one file from 2 annotated lines to 10, and the profile
+  as a whole from 76 distinct source lines to 356.
+
+  A perf too old to know `symoff` rejects the field list and falls back to
+  the default output format, which prints the offset anyway.
+- **`/api/index/status` reported 0 symbols on a server started with
+  `--binary`.** `pre_index()` ran only on the runtime `PATCH /api/config`
+  path, so a binary passed at startup left `symbols_loaded` and
+  `source_files_found` at zero while resolution quietly worked — which is
+  what made `perflens_status` tell agents source annotation was unavailable
+  on servers where it was fine. `/api/index/files` returned an empty list
+  for the same reason. Both now pre-index at startup, in a background
+  thread so `serve` still comes up immediately.
+- **Every agent reconnect saved an empty session.** An agent started with
+  `--server` reconnects with backoff, so disconnecting one produced a
+  connect/disconnect cycle every few seconds and a saved session for each —
+  nineteen empty rows in one short run. Sessions with no samples and no
+  chunks are no longer persisted.
+- **Session metadata recorded a hardcoded version**, `"0.5.0"` for live
+  captures and `"0.4.0"` for `perflens import`. Both now record the running
+  version.
+- **`perflens_source_hotlines` dead-ended on a bare filename.** `/api/source`
+  keys on the compile-time path from DWARF, but an agent naturally passes
+  the basename it saw in a function table. It now resolves an unambiguous
+  basename, and otherwise names the candidates instead of returning a 404.
+  The saved-session branch already did this; only live data did not.
+- **Caching a malformed address could abort a request.** `store_addr2line`
+  caught `sqlite3.Error` but not the `OverflowError` raised when an address
+  wider than a signed 64-bit integer reaches SQLite.
+
+### Changed
+
+- **The agent is no longer frozen outright**; it changes by explicit
+  decision. The wire protocol is unchanged by this release.
+- Tailwind 4 and four Radix packages removed. They had been installed for a
+  visual overhaul that never started: no `tailwind.config`, no
+  `@import "tailwindcss"`, and not one Radix import. The Tailwind Vite
+  plugin ran on every build and emitted nothing — the bundle is byte-for-byte
+  identical without it.
+- Documentation corrected against the code. `docs/architecture.svg` still
+  advertised `/api/per-event` (renamed to `/api/snapshot` in API v2) and
+  `server.py` (deleted in 0.8.0), and it is embedded in three pages.
+  CLAUDE.md still described a feature freeze and a 0.7.0 version hold. The
+  claim that no IPs exist "in history" is now stated accurately: the tracked
+  tree is clean, the history is not, and that was a deliberate decision.
+  The capability-probe cost is one figure across all seven places that
+  quoted it rather than three.
+- `tests/test_aggregator_diff.py` deleted. It defined no `test_` function,
+  so pytest collected nothing from it, and the invariant it claimed to pin
+  is covered by `test_aggregator.py::test_incremental_matches_batch`.
+
+### Added
+
+- `tests/test_sessions.py` — session persistence had no dedicated tests.
+- Regression tests for ip-based line recovery (including equivalence with
+  the exact `symoff` path), startup pre-indexing, the `/api/index/status`
+  response shape, and MCP source-path resolution.
+
 ## [0.8.0] — 2026-08-13
 
 A stabilization release. The feature set was frozen on 2026-08-13 with the

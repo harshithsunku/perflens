@@ -396,7 +396,7 @@ dist/
 
 ### CI
 
-[`.github/workflows/test.yml`](.github/workflows/test.yml) runs the pytest suite on Python 3.10–3.13 (parser, aggregator differentials against device-captured fixtures, source mapper, HTTP API, MCP tools, provisioning against a fake release server, and the C-agent wire protocol driven through a fake framing server with a `perf` shim), plus a frontend job: OpenAPI schema drift check, vitest unit tests, and a self-contained Playwright browser E2E (`frontend/e2e/`) that replays a fixture session through the real UI.
+[`.github/workflows/test.yml`](.github/workflows/test.yml) runs the pytest suite on Python 3.10–3.13 (parser, aggregator differentials against device-captured fixtures, source mapper, HTTP API, MCP tools, provisioning against a fake release server, and the C-agent wire protocol driven through a fake framing server with a `perf` shim), and gates every PR on `ruff` and `tools/check_version.py`. A frontend job adds the OpenAPI schema drift check, the TypeScript typegen drift check, vitest unit tests, a self-contained Playwright browser E2E (`frontend/e2e/`) that replays a fixture session through the real UI, and a smoke run of the docs screenshot harness (`frontend/docs-shots/`) that asserts the images come out non-blank.
 
 [`.github/workflows/build.yml`](.github/workflows/build.yml) lints (`ruff`), runs the pytest suite, builds and smoke-runs the Python wheel (with a wheel-contents check), builds the static C agent for five architectures (x86_64, aarch64, aarch64_be, armv7l, armeb), and builds static addr2line/readelf tools bundles (x86_64, aarch64) for `perflens provision`. Big-endian agent targets use musl toolchains from musl.cc since Ubuntu only ships little-endian sysroots. Tagged pushes (`v*`) create a GitHub Release and attach all artifacts — including raw `perflens-agent-linux-<arch>` binaries with stable names that `install-agent.sh` and the agent's `--update` fetch from `releases/latest/download/`. Tagged pushes also publish the package to [PyPI](https://pypi.org/project/perflens/) via Trusted Publishing (OIDC — no stored tokens).
 
@@ -464,7 +464,7 @@ sudo sysctl -w kernel.perf_event_paranoid=1
 
 **LXC / container: `perf record -p <pid>` is empty.** Some container environments strip the perf capability set. A system-wide `perf record -a` usually works; the agent's `-p <pid>` mode does not.
 
-**Call-graph probing hangs / slow startup.** Call-graph probing tests `fp`, `dwarf`, then `lbr` in sequence — this adds ~6–12 seconds on first connection. Normal.
+**Call-graph probing hangs / slow startup.** Call-graph probing tests `fp`, `dwarf`, then `lbr` in sequence — this adds ~10-20 s on a typical target, longer on slow or hybrid-CPU hardware on first connection. Normal.
 
 ---
 

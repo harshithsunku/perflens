@@ -7,14 +7,14 @@ in a browser with line-level source annotation, interactive flame graphs, and
 function-level breakdowns.
 
 Generic open-source project — no proprietary names, no company-specific
-references, no IPs, credentials, or secrets anywhere in the repo or its
-history.
+references, no IPs, credentials, or secrets in the code or docs. Note the
+tracked tree only: device addresses remain in commits before 2026-08-13, and
+[STATUS.md](STATUS.md) records the deliberate decision not to rewrite
+history over them.
 
-**Status: feature-frozen since 2026-08-13, stabilizing toward 0.8.0.** The
-MCP server was the last capability added; the version is deliberately held
-at 0.7.0 until the stabilization checklist in [STATUS.md](STATUS.md) is
-clear. New features need an explicit decision to unfreeze — bug fixes,
-tests, docs and verification do not.
+**Status: 0.8.0 released 2026-08-13; 0.9.0 in progress.** The freeze that
+governed 0.8.0 is discharged. 0.9.0 is the hands-on validation pass 0.8.0
+shipped without — see [STATUS.md](STATUS.md) for what it has turned up.
 
 ---
 
@@ -63,9 +63,12 @@ tests, docs and verification do not.
   `src/perflens/ui/`, which is gitignored) — end users need only
   `uvx perflens` / pip; Node is a dev/CI-build-time dependency only.
   State: zustand (live session) + TanStack Query (fetches). Styling:
-  the original CSS custom-property theme (`frontend/src/styles/theme.css`,
-  `data-theme` dark/light); Tailwind 4 + Radix are installed for the
-  upcoming visual overhaul.
+  a CSS custom-property theme (`frontend/src/styles/theme.css`,
+  `data-theme` dark/light) with hand-written semantic class names.
+  Tailwind 4 and Radix were installed for a visual overhaul that never
+  started and were removed in 0.9.0 — the Tailwind Vite plugin ran on
+  every build with no `@import "tailwindcss"` to act on, and no Radix
+  component was ever imported. Re-add them when the overhaul is real.
 - Type-safety bridge: Pydantic v2 models (`src/perflens/api/models.py`)
   → FastAPI OpenAPI (`/api/openapi.json`, exported to
   `frontend/openapi.json` by `tools/export_openapi.py`) →
@@ -149,7 +152,6 @@ perflens/
 │   ├── export.py                 # collapsed-stack + SVG flamegraph export
 │   ├── web.py                    # FastAPI/uvicorn HTTP layer + SSE hub
 │   ├── api/                      # Pydantic v2 schemas + response helpers
-│   ├── server.py                 # compat shim (one release)
 │   ├── cli.py                    # perflens serve/import/push-agent/provision/mcp
 │   ├── mcp/                      # MCP server (optional [mcp] extra)
 │   │   ├── __init__.py           #   build_server() + `perflens mcp` entry point
@@ -172,10 +174,18 @@ perflens/
 │   ├── e2e/                      # Playwright browser E2E (self-contained)
 │   ├── docs-shots/               # Playwright docs screenshot harness (CI-smoked)
 │   └── openapi.json              # committed schema (CI drift-checked)
-├── tools/export_openapi.py       # dump OpenAPI schema for TS typegen
-├── tools/check_version.py        # assert every version location agrees
-├── tools/live-capture.sh         # local live profiling session for docs shots
-├── docs/
+├── tools/
+│   ├── README.md                 # docs-asset regeneration flow
+│   ├── export_openapi.py         # dump OpenAPI schema for TS typegen
+│   ├── check_version.py          # assert every version location agrees
+│   ├── encode-demo-gif.sh        # frames -> docs/demo.gif
+│   └── live-capture.sh           # local live profiling session for docs shots
+├── docs/                         # the GitHub Pages site (published from
+│   │                             #   branch=master, path=/docs on merge)
+│   ├── index.html, reference.html, architecture.html
+│   ├── assets/                   # styles.css + docs.js
+│   ├── screenshots/              # 12 PNGs from frontend/docs-shots/
+│   ├── demo.gif
 │   ├── hero.svg
 │   ├── architecture.svg
 │   └── wire-protocol.svg
@@ -183,6 +193,8 @@ perflens/
 │   ├── conftest.py               # shared pytest fixtures
 │   ├── test_*.py                 # pytest suite (parser, aggregator, http, agent, ...)
 │   ├── fixtures/                 # device-captured perf sessions (gzipped)
+│   ├── matrixlab/                # 25-thread multi-module C workload; what
+│   │                             #   tools/live-capture.sh profiles
 │   ├── sample_workload.c
 │   └── Makefile
 ├── build_package.sh              # builds frontend (if needed) + wheel + agent
@@ -191,6 +203,10 @@ perflens/
 ├── VERSION
 ├── LICENSE (MIT)
 ├── README.md
+├── STATUS.md                     # cross-session working state + backlog
+├── CHANGELOG.md
+├── CONTRIBUTING.md
+├── CODE_OF_CONDUCT.md
 └── CLAUDE.md                     # this file
 ```
 
@@ -294,8 +310,13 @@ Options:
 
 ## Development rules
 
-- **The agent is FROZEN.** Do not change `agent-c/` or the TCP wire
-  protocol. Everything server-side of the socket is fair game.
+- **The agent changes only by explicit decision.** `agent-c/` and the TCP
+  wire protocol are stable by default; everything server-side of the socket
+  is fair game. Unfrozen once, in 0.9.0, to add `symoff` to `SCRIPT_FIELDS`
+  — without it `perf script` prints a bare symbol name and line-level
+  annotation collapses onto each function's declaration line. The wire
+  protocol did not change, and the server still recovers line numbers from
+  the raw ip for agents that predate it.
 - **Simplicity first.** A small, deliberate server dependency set
   (fastapi, uvicorn, orjson, zstandard, pydantic — all user-space).
   The UI is React + TS + Vite, but Node is dev/CI-only: the wheel ships
@@ -324,9 +345,11 @@ Options:
   touching static serving. Likewise `VERSION` is compiled into the agent —
   rebuild it after a version change or the protocol test fails on a stale
   binary.
-- **Version lives in three places** — `VERSION`, `pyproject.toml`,
-  `src/perflens/__init__.py` — and they must agree; the OpenAPI
-  `info.version` follows the third.
+- **Version lives in four hand-edited places** — `VERSION`,
+  `pyproject.toml`, `src/perflens/__init__.py`, `frontend/package.json`
+  (plus the two `version` keys in `package-lock.json`). The OpenAPI
+  `info.version` and the UI's docs drawer follow automatically.
+  `tools/check_version.py` asserts all seven locations agree; CI runs it.
 
 ---
 
@@ -335,7 +358,7 @@ Options:
 - Single agent connection at a time — a new agent replaces the current one.
 - `perf_event_paranoid > 1` may restrict the set of usable events (the agent
   warns at startup).
-- Capability probing adds ~8–14 s to first-connection startup (events,
+- Capability probing adds ~10-20 s on a typical target, longer on slow or hybrid-CPU hardware to first-connection startup (events,
   call-graph modes `fp`/`dwarf`/`lbr`, script fields, pipe mode).
 - In continuous mode, `perf record` flushes its ring buffer in batches, so
   the first chunk or two after `start` may carry only PERF_STAT data before

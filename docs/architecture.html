@@ -110,10 +110,10 @@
         <p>
             One Python process (<code>perflens serve</code>) owns everything on
             the local side. <code>web.py</code> runs a FastAPI/uvicorn HTTP layer
-            for the UI and JSON API; <code>server.py</code> owns the agent side
-            on plain threads &mdash; the TCP listener, the recv loops, and the
-            aggregation rebuild worker. One agent at a time, any number of SSE
-            browser clients.
+            for the UI and JSON API; <code>agentlink.py</code> owns the agent
+            side on plain threads &mdash; the TCP listener and the recv loops
+            &mdash; and <code>state.py</code> runs the aggregation rebuild
+            worker. One agent at a time, any number of SSE browser clients.
         </p>
 
         <h3 id="parser">Parser</h3>

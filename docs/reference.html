@@ -261,7 +261,7 @@ claude mcp add perflens -- perflens mcp</code></pre>
         <p>Some container environments strip the perf capability set. A system-wide <code>perf record -a</code> usually works; the agent's per-PID mode does not in that case.</p>
 
         <h3 id="slow-start">Call-graph probing hangs / slow startup</h3>
-        <p>Capability probing tests <code>fp</code>, <code>dwarf</code>, then <code>lbr</code> in sequence &mdash; this adds ~6&ndash;12 seconds on first connection. One-time cost; subsequent rounds skip probing.</p>
+        <p>Capability probing tests <code>fp</code>, <code>dwarf</code>, then <code>lbr</code> in sequence &mdash; this adds ~10&ndash;20 s on a typical target (longer on slow or hybrid-CPU hardware) on first connection. One-time cost; subsequent rounds skip probing.</p>
 
         <h2 id="layout">Project layout</h2>
 <pre><code>perflens/

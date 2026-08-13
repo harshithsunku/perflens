@@ -4,7 +4,81 @@ Cross-session working state. Update at the start and end of every working
 session. Release history lives in [CHANGELOG.md](CHANGELOG.md); this file
 is what is *currently true* and what is *left to do*.
 
-## Current phase — 0.8.0 released; next line of work is 0.9.0
+## Current phase — 0.9.0 in progress: the hands-on validation pass
+
+**0.9.0 is the validation 0.8.0 shipped without, and it found a real one.**
+The scope decision was taken deliberately (2026-08-13): rather than pick new
+features, drive the profiler by hand first and fix what falls out, because
+*every* defect 0.8.0 actually fixed was found by running something and
+looking at the result. That held again.
+
+**The headline finding: line-level source annotation — the project's
+differentiator — was reporting each function's declaration line instead of
+its hot line, on every modern `perf`.** `SCRIPT_FIELDS` asked for `sym` but
+not `symoff`, so frames arrived as bare symbol names and the server fell
+back to the symbol address. Measured on a live capture: 0 of 57,373 frames
+carried an offset. Both committed fixtures were captured the same way, so
+the entire suite agreed with the broken behaviour — and STATUS's own Phase 5
+note about "real line-level heat, `>> 65.7%` on the hot line" was recording
+the artifact.
+
+Fixed on both sides: the agent now requests `symoff` (exact going forward),
+and the server independently recovers each module's page-aligned load base
+from the raw ip, which was in the data all along — so old agents and every
+already-saved session resolve correctly too. One file went from 2 annotated
+lines to 10; the profile from 76 distinct source lines to 356.
+
+**This required unfreezing the agent**, on an explicit decision. The wire
+protocol did not change, and the server-side recovery means a new server
+works with old agents either way.
+
+Also fixed, all found by hand: `/api/index/status` reporting 0 symbols with
+a startup `--binary` (and `/api/index/files` empty for the same reason);
+every agent reconnect persisting an empty session; session metadata carrying
+a hardcoded `"0.5.0"`; `perflens_source_hotlines` dead-ending on a bare
+filename; and an `OverflowError` that could abort a request from the
+addr2line cache. Full detail in [CHANGELOG.md](CHANGELOG.md).
+
+Current counts: **165 pytest** (was 152), 24 vitest, 10 Playwright.
+
+### Still open for 0.9.0
+
+- [ ] **`uvx perflens` in a container** — the one carried-over item still
+      unverified, because this box has no Docker. Everything else on the
+      0.8.0 carry-over list was driven by hand and passed; see below.
+- [ ] **Docs screenshots need regenerating.** The source-annotation shot
+      now shows the wrong thing — it was captured against the declaration-line
+      bug. `npm run shots` then `npm run shots:live`.
+- [ ] **The version is still 0.8.0.** Bump before shipping; the docs drawer
+      renders it and is one of the screenshots, so bump *before* reshooting.
+- [ ] Two stale remote branches (`origin/stabilize-0.8.0`,
+      `origin/copilot/review-security-issues`) — both fully merged
+      ancestors of master. Left alone deliberately: deleting remote
+      branches is an outward-facing action and was not needed for this work.
+
+### Validated by hand this pass
+
+- [x] **The live loop** — connect, capability probe, continuous collection,
+      pause/resume/stop, process switching, live event selection. 300k+
+      samples across two captures.
+- [x] **Deep recursion** — flamegraph depth capped at exactly 100
+      (`MAX_FLAMEGRAPH_DEPTH`), `truncated` markers present, `/api/snapshot`
+      returns 200. The 0.8.0 fix holds under a real 25-thread capture.
+- [x] **Source annotation against a real build** — this is what turned up
+      the headline defect.
+- [x] **Session save → replay → diff across two separate captures** —
+      `perflens_compare` returns real per-function deltas in percentage
+      points, correctly normalized for differing sample counts.
+- [x] **The MCP tools driven as an agent would** — all 19 registered;
+      `perflens_status` now reports source mapping honestly, and
+      `perflens_source_hotlines` returns the inner loop with context.
+
+Note for the next session: **a hybrid-CPU dev box is misleading for
+timing.** The capability probe took ~43 s here against a documented ~10-20 s;
+that is this hardware, not a regression. Use the reference devices for
+anything timing-sensitive, as this file has always said.
+
+## Previous phase — 0.8.0 released
 
 **The feature freeze that governed 0.8.0 is discharged.** It was declared on
 2026-08-13 with the MCP server as the last capability added, and held until
@@ -87,17 +161,22 @@ Two things that bite if forgotten:
 
 ## Carried into 0.9.0 — shipped but not hand-validated
 
-**Read this first when picking up 0.9.0.** 0.8.0 was released on green
-automated suites and a scripted verification pass. It was *not* driven by
-hand on real hardware first — that was a deliberate call to ship a coherent
-release rather than hold a half-finished branch, with the validation moving
-to 0.9.0.
+**Worked through in 0.9.0; kept for the reasoning.** 0.8.0 was released on
+green automated suites and a scripted verification pass. It was *not* driven
+by hand on real hardware first — a deliberate call to ship a coherent release
+rather than hold a half-finished branch, with the validation moving to 0.9.0.
 
 That matters because the automated suites cover what someone thought to
 assert, and **every defect this release fixed was found by running something
 and looking at the result, not by an assertion** — the deep-stack 500, four
 identical screenshots, an empty flame graph, an MCP tool giving false advice.
 Assume the same is true of what is still hiding.
+
+**That prediction was correct.** Working this list in 0.9.0 turned up the
+declaration-line annotation bug, which had been shipping since the `-F`
+normalization was added and which no assertion could have caught, because
+the fixtures carry the same defect. See the current-phase section at the top
+for what is validated and what is still open.
 
 A local session needs no remote device — `tools/live-capture.sh` starts the
 workload, server and agent against `127.0.0.1` and waits for a sample floor:
@@ -330,16 +409,17 @@ Ordered roughly by user impact.
       too, warn only when nothing is resolvable) rather than by changing
       startup behaviour late in a stabilization release. **The underlying
       counters are still wrong** — see below.
-- [ ] **`/api/index/status` undercounts when `--binary` is passed at
-      startup.** `symbols_loaded` and `source_files_found` stay 0 while
-      `source_index_files` is populated and annotation works, because only
-      `pre_index()` sets them (`source_mapper.py:850-875`) and it runs on the
-      runtime-configure path. Reproduce: `perflens serve --binary X
-      --source-dir Y`, then `curl /api/index/status`. Cosmetic for the UI,
-      but it is what made the MCP status tool lie. Fixing means either
-      pre-indexing at startup (changes startup cost) or reporting real cache
-      state; both are behaviour changes that wanted more room than the end
-      of this release had.
+- [x] **`/api/index/status` undercounts when `--binary` is passed at
+      startup** — **fixed in 0.9.0.** `symbols_loaded` and
+      `source_files_found` stayed 0 while `source_index_files` was populated
+      and annotation worked, because only `pre_index()` set them and it ran
+      on the runtime-configure path. `build_context()` now runs the same
+      eager pass in a daemon thread when `cfg.binary_path` is set, so
+      `serve` still comes up immediately. Reproducing it live also confirmed
+      an undocumented second consequence: `/api/index/files` was empty for
+      the same reason, since `_dwarf_source_files` is written by
+      `pre_index()` too. Verified: 289 symbols, 35 source files, 35 DWARF
+      files on a startup-`--binary` server.
       Optional extra, still open: an MCP evaluation set (10 Q/A against the
       committed fixtures, per the mcp-builder format) to catch regressions
       in tool usefulness rather than tool correctness.
@@ -429,7 +509,7 @@ the order matters in two places, flagged inline.
 - Per-thread views are live-only — a saved session's replay carries the
   thread list but no per-thread aggregates.
 - Live `perf_stat` has no REST endpoint; it is read from the SSE head.
-- Capability probing adds ~8–14 s to first-connection startup.
+- Capability probing adds ~10-20 s on a typical target, longer on slow or hybrid-CPU hardware to first-connection startup.
 - In continuous pipe mode the first chunk after `start` may carry only
   PERF_STAT data before samples begin flowing.
 - `addr2line` source mapping needs an unstripped `-g` build.
@@ -502,8 +582,8 @@ Condensed; anything older is in the CHANGELOG and git history.
   owner decisions taken after hands-on validation, not the tail end of the
   automated work — the PyPI publish cannot be undone, and every defect this
   release actually fixed was found by *running* something rather than by an
-  assertion. See [Before merging](#before-merging) for what is worth
-  driving by hand.
+  assertion. See [Carried into 0.9.0](#carried-into-090--shipped-but-not-hand-validated)
+  for what is worth driving by hand.
 - **2026-08-13** — Phase 5: verification. The wheel was proven to stand
   alone from an empty directory, and the MCP tools were driven against a
   live 25-thread capture — which is the only way the per-thread and

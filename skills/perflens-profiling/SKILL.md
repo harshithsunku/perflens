@@ -24,9 +24,11 @@ whether a device agent is connected, and whether symbols are loaded. Every
 other tool takes a `source` argument — `"live"` or a session id from
 `perflens_list_sessions` — and guessing it wrong wastes a turn.
 
-If it reports no symbols loaded, say so early: without `--binary` pointing
-at an unstripped build, you will get addresses and library names but no
-source lines, and no amount of further tool calls will fix that.
+Read the whole "Source mapping" line before concluding anything from it.
+Only when it reports nothing resolvable at all — no symbols *and* no source
+index — is line-level annotation genuinely unavailable, and then no further
+tool call will fix it: the server needs `--binary` pointing at an unstripped
+build. A zero symbol count on its own does not mean that.
 
 ## Pick the event that matches the question
 
@@ -98,7 +100,8 @@ When the user wants a fresh profile of something running on a device:
 
 1. `perflens_agent_connect(host, port)` if the agent was started with
    `--listen`. Skip this when it was started with `--server`, since it
-   connects in by itself. Expect ~15 seconds: the agent probes which perf
+   connects in by itself. Expect ~10-20 s, longer on slow or hybrid-CPU
+   hardware: the agent probes which perf
    events and call-graph modes work on that kernel before reporting ready.
 2. `perflens_list_processes` to find the pid. This round-trips to the
    device and can take a while on a busy target.

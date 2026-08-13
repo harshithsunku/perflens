@@ -14,6 +14,13 @@ Author-side helpers. Not needed for running PerfLens itself.
 The capture harness is `frontend/docs-shots/`, three Playwright projects
 that reuse the E2E server bootstrap. No extra browser dependency.
 
+**Steps 1 and 2 are a pair — never commit the result of step 1 alone.**
+`shots` overwrites the committed assets in place, and the fixture has no
+resolvable binary, so its function table and flame graph render the hot path
+as `[unknown]` at 73%. Running it as a smoke test (which is all CI does — CI
+commits nothing) and then staging `docs/screenshots/` silently downgrades
+seven shots. `git checkout -- docs/screenshots/` puts them back.
+
 ```bash
 # 1. Deterministic set — the full 12 shots from a committed fixture.
 #    No perf, no agent, no device. This is what CI smoke-runs.

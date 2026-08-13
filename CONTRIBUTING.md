@@ -110,7 +110,7 @@ Before tagging, bump the version in **four** places — they must agree with eac
 
 Then regenerate the schema (`python tools/export_openapi.py && npm --prefix frontend run typegen`) and rebuild the agent (`make -C agent-c clean && make -C agent-c`), so nothing still carries the old number.
 
-Don't hand-maintain this list — run `python tools/check_version.py`, which CI also runs. It asserts all four agree and that no literal `vX.Y.Z` has crept back into `frontend/src/`. Also confirm `CHANGELOG.md` has a literal `## [<version>]` heading: the release workflow awk-extracts that section for the GitHub Release body and silently produces empty notes if it can't find one.
+Don't hand-maintain this list — run `python tools/check_version.py`, which CI also runs. It asserts all seven version locations agree (the four you edit, plus the generated schema and the two `package-lock.json` keys) and that no literal `vX.Y.Z` has crept back into `frontend/src/`. Also confirm `CHANGELOG.md` has a literal `## [<version>]` heading: the release workflow awk-extracts that section for the GitHub Release body and silently produces empty notes if it can't find one.
 
 ## License
 
