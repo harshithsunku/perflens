@@ -98,8 +98,15 @@
 #define JSON_BUF_SIZE    (128 * 1024)
 
 /* Normalized field set for 'perf script -F'. Ensures consistent output
- * format across kernel versions. Requires perf >= ~3.12. */
-#define SCRIPT_FIELDS    "comm,tid,pid,time,period,event,ip,sym,dso"
+ * format across kernel versions. Requires perf >= ~3.12.
+ *
+ * 'symoff' is load-bearing: without it perf prints a bare symbol name, and
+ * the server can only place a sample at its function's declaration line.
+ * With it every frame carries 'func+0x<offset>', which resolves exactly.
+ * If a perf is too old to know the field, the probe rejects the whole list
+ * and falls back to the default output format -- which prints the offset
+ * anyway, so both branches keep line-level annotation working. */
+#define SCRIPT_FIELDS    "comm,tid,pid,time,period,event,ip,sym,symoff,dso"
 
 /* --------------------------------------------------------------------------
  * Shared types

@@ -104,7 +104,10 @@ class SymbolCache:
                     'INSERT OR REPLACE INTO addr2line VALUES (?,?,?,?)',
                     [(bkey, v, f, ln) for v, (f, ln) in entries.items()])
                 self._conn.commit()
-        except sqlite3.Error:
+        except (sqlite3.Error, OverflowError):
+            # OverflowError: an address wider than a signed 64-bit integer
+            # (a kernel address attributed to a user-space binary, say).
+            # Caching is best-effort -- never fail the request over it.
             pass
 
     # -- inline chains ----------------------------------------------------

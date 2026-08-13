@@ -105,6 +105,112 @@ def test_persistent_symbol_cache(fixture_binary, perflens_home):
     mapper2.close()
 
 
+def ip_samples_for(binary, base, addrs, func):
+    """Frames as `perf script` prints them WITHOUT the symoff field: a bare
+    symbol name and the raw runtime ip, no `+0x<offset>`."""
+    return [{'comm': 'w', 'pid': 1, 'tid': 1, 'event_count': 1,
+             'event_type': 'cycles',
+             'frames': [{'addr': format(base + a, 'x'), 'func': func,
+                         'offset': '', 'module': binary}]}
+            for a in addrs]
+
+
+def offset_samples_for(binary, start, addrs, func):
+    """The same frames as `perf script` prints them WITH symoff."""
+    return [{'comm': 'w', 'pid': 1, 'tid': 1, 'event_count': 1,
+             'event_type': 'cycles',
+             'frames': [{'addr': '0', 'func': func,
+                         'offset': hex(a - start), 'module': binary}]}
+            for a in addrs]
+
+
+def spread_over(mapper, binary, func):
+    """A page-aligned load base and several file addresses inside `func`."""
+    from perflens.source_mapper import PAGE_SIZE
+    start = mapper._load_symbols(binary)[func]
+    end = mapper._symbol_spans(binary)[start]
+    span = min(end - start, PAGE_SIZE)
+    step = max(span // 8, 1)
+    addrs = [start + i * step for i in range(8) if i * step < span]
+    return 0x7F0000000000, start, addrs
+
+
+def test_ip_recovery_matches_the_symoff_path(fixture_binary, perflens_home):
+    """Frames with no `symoff` must resolve exactly like frames that have it.
+
+    Agents built before symoff was requested -- and every session already on
+    disk -- carry only the raw ip. Falling back to the symbol address put
+    every sample in a function on its declaration line; the load base is
+    recovered from the ip instead, and must agree with the exact path.
+    """
+    probe = make_mapper(fixture_binary, perflens_home)
+    base, start, addrs = spread_over(probe, fixture_binary, 'cpu_intensive')
+    probe.close()
+    assert len(addrs) >= 4, 'need enough frames to pin down a load base'
+
+    by_ip = make_mapper(fixture_binary, perflens_home)
+    ip_lines = by_ip.map_samples_to_lines(
+        ip_samples_for(fixture_binary, base, addrs, 'cpu_intensive'))
+    assert by_ip._load_base.get(fixture_binary) == base
+    by_ip.close()
+
+    by_offset = make_mapper(fixture_binary, perflens_home)
+    off_lines = by_offset.map_samples_to_lines(
+        offset_samples_for(fixture_binary, start, addrs, 'cpu_intensive'))
+    by_offset.close()
+
+    assert ip_lines == off_lines, 'ip recovery disagrees with symoff'
+    (_fpath, lines), = ip_lines.items()
+    assert len(lines) > 1, 'all samples collapsed onto one line'
+
+
+def test_ip_recovery_rejects_addresses_outside_the_symbol(fixture_binary,
+                                                          perflens_home):
+    """--binary makes every frame claim that binary, so a kernel or libc ip
+    can arrive attributed to it. Subtracting the base would then yield an
+    address belonging to no symbol -- and for a kernel ip, one too wide for
+    SQLite, which used to abort the whole request with OverflowError.
+
+    Such a frame falls back to the symbol address, exactly as before ip
+    recovery existed. What must never happen is a bogus address reaching the
+    resolver or the cache.
+    """
+    mapper = make_mapper(fixture_binary, perflens_home)
+    base, start, addrs = spread_over(mapper, fixture_binary, 'cpu_intensive')
+    end = mapper._symbol_spans(fixture_binary)[start]
+
+    samples = ip_samples_for(fixture_binary, base, addrs, 'cpu_intensive')
+    samples += [{'comm': 'w', 'pid': 1, 'tid': 1, 'event_count': 1,
+                 'event_type': 'cycles',
+                 'frames': [{'addr': 'ffffffff81234567',
+                             'func': 'cpu_intensive',
+                             'offset': '', 'module': fixture_binary}]}]
+
+    line_data = mapper.map_samples_to_lines(samples)
+    assert line_data, 'the well-formed frames should still resolve'
+
+    kernel_ip = 0xffffffff81234567
+    assert mapper._vaddr_from_ip(samples[-1]['frames'][0],
+                                 fixture_binary, 'cpu_intensive') is None
+    for cached_binary, vaddr in mapper._addr2line_cache:
+        if cached_binary == fixture_binary:
+            assert vaddr < end, 'an address outside the symbol was resolved'
+            assert vaddr != kernel_ip - base, 'raw kernel ip reached the cache'
+    mapper.close()
+
+
+def test_missing_symoff_without_a_derivable_base_still_maps_the_file(
+        fixture_binary, perflens_home):
+    """With too few frames to pin a base down, fall back to the symbol
+    address: the line is the function's first one, but the file is right."""
+    mapper = make_mapper(fixture_binary, perflens_home)
+    line_data = mapper.map_samples_to_lines(
+        samples_for(fixture_binary, func='cpu_intensive', offset='', n=1))
+    assert mapper._load_base.get(fixture_binary) is None
+    assert line_data, 'fallback lost the file entirely'
+    mapper.close()
+
+
 def test_path_map_remaps_compile_prefix(fixture_binary, perflens_home,
                                         tmp_path):
     """A path_map entry rewrites DWARF compile-time paths to local ones."""

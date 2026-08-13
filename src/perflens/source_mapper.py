@@ -14,9 +14,20 @@ import re
 import subprocess
 import sys
 import threading
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 from perflens import symcache
+
+# Load-base recovery (see SourceMapper._prime_module_bases). Bases are
+# page-aligned by the loader, which is what makes a single frame enough to
+# pin one down; the vote thresholds only guard against a stray symbol-name
+# collision, and the cap keeps priming O(1) on long sessions.
+PAGE_SIZE = 0x1000
+BASE_VOTE_CAP = 512
+BASE_MIN_VOTES = 4
+BASE_MIN_SHARE = 0.75
+BASE_SCAN_SAMPLES = 20000
+LAST_SYMBOL_SPAN = 1 << 20
 
 
 class MapFileParser:
@@ -257,6 +268,13 @@ class SourceMapper:
         self._symbol_cache = {}
         # Cache: (binary, addr) -> (file, line)
         self._addr2line_cache = {}
+        # Load-base recovery for perf output without `symoff` (see
+        # _prime_module_bases): binary -> page-aligned base, and the set of
+        # binaries we already tried and could not pin down.
+        self._load_base = {}
+        self._base_unresolvable = set()
+        # binary -> {symbol start: end}, memoized (see _symbol_spans)
+        self._sym_spans = {}
         # Persistent addr2line pipes per binary
         self._pipes = {}
         # Inline addr2line pipes per binary (use -i flag)
@@ -412,10 +430,165 @@ class SourceMapper:
         self._symbol_cache[binary] = symbols
         return symbols
 
+    def _symbol_spans(self, binary):
+        """{symbol start -> end} for a binary, memoized.
+
+        readelf gives us addresses but the symbol table we persist carries no
+        sizes, so a symbol's end is taken as the next symbol's start. That is
+        an approximation, but it only ever has to be good enough to bound the
+        load base in _base_candidate().
+        """
+        spans = self._sym_spans.get(binary)
+        if spans is not None:
+            return spans
+        addrs = sorted(set(self._load_symbols(binary).values()))
+        spans = {}
+        for i, addr in enumerate(addrs):
+            # The last symbol has no successor to bound it; be generous, since
+            # this bound only gates _base_candidate (which ignores spans wider
+            # than a page anyway) and the sanity check in _compute_vaddr.
+            nxt = addrs[i + 1] if i + 1 < len(addrs) else addr + LAST_SYMBOL_SPAN
+            spans[addr] = nxt
+        self._sym_spans[binary] = spans
+        return spans
+
+    def _base_candidate(self, frame, binary):
+        """The page-aligned load base implied by a single frame, or None.
+
+        perf reports the raw instruction pointer, which for a PIE binary is
+        `base + file_vaddr`. The base is page-aligned, and the file_vaddr must
+        lie inside the frame's symbol, so
+
+            base == floor_to_page(ip - symbol_start)
+
+        is the only solution whenever the symbol spans at most one page. We
+        only vote with those frames; larger symbols admit several candidates
+        and would just add noise.
+        """
+        addr_str = frame.get('addr') or ''
+        try:
+            ip = int(addr_str, 16)
+        except (TypeError, ValueError):
+            return None
+
+        symbols = self._load_symbols(binary)
+        start = symbols.get(frame.get('func') or '')
+        if start is None or start <= 0:
+            return None
+
+        end = self._symbol_spans(binary).get(start, start + PAGE_SIZE)
+        if end - start > PAGE_SIZE:
+            return None
+
+        base = (ip - start) & ~(PAGE_SIZE - 1)
+        # base must also satisfy file_vaddr < end, i.e. base > ip - end
+        if base <= ip - end or base < 0:
+            return None
+        return base
+
+    def _prime_module_bases(self, samples):
+        """Work out where each module was loaded, so frames without a
+        `symoff` can still be resolved to a real line.
+
+        `perf script -F ...,sym,dso` prints a bare symbol name; only the
+        `symoff` field adds `+0x<offset>`. Agents built before that field was
+        requested — and every session already saved to disk — therefore carry
+        no offset, and _compute_vaddr used to fall back to the symbol address,
+        which resolves every sample in a function to its declaration line.
+
+        The instruction pointer is in the data either way, so recovering the
+        load base recovers real line-level annotation. Votes are taken across
+        the corpus rather than trusting one frame, because a leaf symbol name
+        can collide with an unrelated module's when --binary overrides the
+        module path.
+        """
+        # Called once per chunk, so it must not walk a large corpus after
+        # there is nothing left to learn. With --binary there is exactly one
+        # module, and once it is decided this is a single dict lookup.
+        if self.binary_path and (self.binary_path in self._load_base
+                                 or self.binary_path in self._base_unresolvable):
+            return
+
+        votes = defaultdict(Counter)
+        for sample in samples[:BASE_SCAN_SAMPLES]:
+            for frame in sample['frames']:
+                if frame.get('offset'):
+                    continue  # exact path, no base needed
+                binary = (self.binary_path
+                          or self._resolve_module_path(frame.get('module', '')))
+                if (not binary or binary in self._load_base
+                        or binary in self._base_unresolvable):
+                    continue
+                tally = votes[binary]
+                if sum(tally.values()) >= BASE_VOTE_CAP:
+                    continue
+                candidate = self._base_candidate(frame, binary)
+                if candidate is not None:
+                    tally[candidate] += 1
+
+        if not votes:
+            return  # nothing to decide; try again on the next chunk
+
+        for binary, tally in votes.items():
+            total = sum(tally.values())
+            if not total:
+                self._base_unresolvable.add(binary)
+                continue
+            base, hits = tally.most_common(1)[0]
+            if hits >= BASE_MIN_VOTES and hits >= total * BASE_MIN_SHARE:
+                self._load_base[binary] = base
+                print(f"[source_mapper] Recovered load base 0x{base:x} for "
+                      f"{os.path.basename(binary or '?')} "
+                      f"({hits}/{total} frames agree) — perf output carries "
+                      f"no symoff, resolving line numbers from ip",
+                      file=sys.stderr)
+            else:
+                self._base_unresolvable.add(binary)
+
+    def _vaddr_from_ip(self, frame, binary, func):
+        """File virtual address recovered from the raw ip, or None.
+
+        The result must land inside the very symbol perf named, which is what
+        makes this safe when --binary overrides the module path: frames from
+        libc or the kernel are then attributed to the main binary, and
+        subtracting its base would otherwise yield an address belonging to
+        nothing (or one too large for the cache to store).
+        """
+        base = self._load_base.get(binary)
+        if base is None:
+            return None
+        start = self._load_symbols(binary).get(func)
+        if start is None:
+            return None
+        try:
+            vaddr = int(frame['addr'], 16) - base
+        except (KeyError, TypeError, ValueError):
+            return None
+        end = self._symbol_spans(binary).get(start, start + PAGE_SIZE)
+        if start <= vaddr < end:
+            return vaddr
+        return None
+
     def _compute_vaddr(self, frame, binary):
-        """Compute virtual address from function+offset."""
+        """Compute the file virtual address for a frame.
+
+        Two routes, in order of precision:
+
+        1. `func+0x<offset>`, which `perf script` prints when asked for the
+           `symoff` field. Exact and independent of where the module landed.
+        2. The raw ip minus the module's load base, for output that has no
+           offset (see _prime_module_bases).
+
+        The symbol address alone is the last resort: it collapses every
+        sample in a function onto that function's declaration line.
+        """
         func = frame['func']
         offset_str = frame.get('offset', '')
+
+        if not offset_str:
+            vaddr = self._vaddr_from_ip(frame, binary, func)
+            if vaddr is not None:
+                return vaddr
 
         cache_key = (binary, func, offset_str)
         cached = self._vaddr_cache.get(cache_key)
@@ -495,6 +668,10 @@ class SourceMapper:
 
         Returns: {file_path: {line_no: {'samples': int}}}
         """
+        # Step 0: pin down where each module was loaded, so frames without a
+        # symoff resolve to a real line instead of the function's first one.
+        self._prime_module_bases(samples)
+
         # Step 1: Collect all unique addresses per binary
         addrs_per_binary = defaultdict(set)
         frame_addrs = []  # (sample_idx, binary, vaddr)
@@ -765,6 +942,11 @@ class SourceMapper:
         """
         if not self.inline:
             return samples
+
+        # Inline expansion can run before any line mapping, so it needs the
+        # load bases primed too — otherwise every frame in a function shares
+        # one address and collapses to a single inline chain.
+        self._prime_module_bases(samples)
 
         # Step 1: Collect unique (binary, vaddr) pairs not yet cached.
         # First touch of a binary bulk-loads its persisted inline chains.
