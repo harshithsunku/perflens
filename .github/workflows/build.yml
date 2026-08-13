@@ -19,24 +19,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
+      # ruff is pinned: an unpinned bump lands new rules and can redden the
+      # release path with no change on our side. Keep in step with the dev
+      # extra in pyproject.toml.
       - name: Install build tooling
-        run: python -m pip install --upgrade pip build twine ruff
+        run: python -m pip install --upgrade pip build twine 'ruff==0.15.22'
 
       - name: Lint (ruff)
-        run: ruff check src/
+        run: ruff check src/ tests/ tools/
 
       - name: Build C agent (needed by the protocol tests)
         run: make -C agent-c
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: '22'
           cache: npm
@@ -51,6 +54,17 @@ jobs:
         run: |
           python -m pip install -e '.[dev]'
           python -m pytest tests/
+
+      # test.yml gates PRs, but the release path never re-verified these —
+      # so a tag could ship a wheel whose schema disagreed with the
+      # committed artifact the frontend types were generated from.
+      - name: Version consistency
+        run: python tools/check_version.py
+
+      - name: OpenAPI schema drift check
+        run: |
+          python tools/export_openapi.py /tmp/openapi.json
+          diff -u frontend/openapi.json /tmp/openapi.json
 
       - name: Build wheel + sdist
         run: python -m build
@@ -94,7 +108,7 @@ jobs:
           kill "$SERVER_PID"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: python-package
           path: dist/*
@@ -121,7 +135,7 @@ jobs:
       id-token: write
     steps:
       - name: Download package
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: python-package
           path: dist
@@ -200,7 +214,7 @@ jobs:
           ls -la dist
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: perflens-tools-${{ matrix.arch }}
           path: dist/perflens-tools-*
@@ -238,7 +252,7 @@ jobs:
             toolchain_asset: 'armeb-linux-musleabihf-cross.tgz'
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install cross-compiler (apt)
         if: matrix.cross_pkg != ''
@@ -292,7 +306,7 @@ jobs:
           (cd build && tar -czf "../dist/${PKG_NAME}.tar.gz" "${PKG_NAME}")
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: perflens-agent-c-${{ matrix.arch }}
           path: |
@@ -310,10 +324,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: artifacts
 
@@ -390,7 +404,7 @@ jobs:
           cat release_notes.md
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           body_path: release_notes.md
           files: release/perflens-*

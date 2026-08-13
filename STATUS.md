@@ -134,33 +134,48 @@ Ordered roughly by user impact.
       differential view and the GIF need live state and come from a local
       `tests/matrixlab` capture. Add the CI smoke job — it is what stops
       the next UI rewrite from silently orphaning the harness again.
-- [ ] **Phase 2 — server dependencies are floors only** (`fastapi>=0.110`,
-      `uvicorn>=0.29`, `orjson>=3.9`, `zstandard>=0.21`, `mcp>=2,<3`). CI
-      installs the latest each run, so a FastAPI or Pydantic release can
-      shift the generated OpenAPI schema and fail the drift check without
-      any change on our side. **Decision: add upper bounds *and* keep the
-      committed schema.** They solve different problems — bounds are about
-      whether `uvx perflens` still works in 18 months; the drift check is
-      about CI brittleness. `frontend/openapi.json` stays committed because
-      `npm run typegen` consumes it into the shipped bundle; generating it
-      in CI would make the frontend's types depend on CI's resolver.
-- [ ] **Phase 2 — Node 20 deprecation.** 17 call sites across both
-      workflows: `checkout` v4→v5, `setup-python` v5→v6, `setup-node`
-      v4→v5, `upload-artifact` v4→v5, `download-artifact` v4→v5,
-      `softprops/action-gh-release` v2→v3. `pypa/gh-action-pypi-publish` is
-      a rolling ref and needs no bump. upload/download **must move in one
-      commit** — v5 artifacts are unreadable by a v4 download, and they
-      cross jobs (`python-package` uploads, `publish-pypi` and `release`
-      download).
-- [ ] **Phase 2 — three CI gaps found while auditing the workflows.**
-      (1) `ruff` runs only in `build.yml`, which has no `pull_request`
-      trigger — **no PR has ever been linted**. Move it into `test.yml` and
-      widen to `src/ tests/ tools/` (verified clean already). (2) The
-      typegen drift check `CONTRIBUTING.md` claims CI performs does not
-      exist. (3) The OpenAPI drift check is missing from `build.yml`'s
-      release path, so a tag can ship a wheel whose schema disagrees with
-      the committed artifact. Do *not* give `build.yml` a `pull_request`
-      trigger — it compiles binutils and five agent architectures.
+- [x] **Phase 2 — dependency upper bounds** (2026-08-13) —
+      `fastapi<1.0`, `uvicorn<1.0`, `orjson<4`, `zstandard<1.0`,
+      `httpx<1.0` (`mcp>=2,<3` was already bounded). Floors alone let a
+      future major resolve into a fresh `uvx perflens` and break it with no
+      change on our side, which defeats a long-term release; re-resolving
+      under the bounds changed nothing (fastapi 0.139, pydantic 2.13,
+      uvicorn 0.51, orjson 3.11, zstandard 0.25), so they document what is
+      tested rather than restrict it. `starlette` and `pydantic` are left
+      unconstrained on purpose — fastapi pins them transitively and a second
+      constraint only creates resolver conflicts. **Cost, recorded
+      deliberately:** when fastapi 1.0 ships, installs pin to the last 0.x
+      until someone cuts a release. `ruff` is pinned exactly (`==0.15.22`)
+      in both `pyproject.toml` and `build.yml`.
+      `frontend/openapi.json` stays committed: `npm run typegen` consumes it
+      into the shipped bundle, so generating it in CI would make the
+      frontend's types depend on CI's resolver.
+- [x] **Phase 2 — Node 20 deprecation** (2026-08-13) — 17 call sites:
+      `checkout` v4→v5 (×5), `setup-python` v5→v6 (×3), `setup-node`
+      v4→v5 (×2), `upload-artifact` v4→v5 (×4), `download-artifact` v4→v5
+      (×2), `softprops/action-gh-release` v2→v3 (×1).
+      `pypa/gh-action-pypi-publish@release/v1` is a rolling ref, no bump.
+      upload/download moved in one commit — v5 artifacts are unreadable by
+      a v4 download, and they cross jobs (`python-package` uploads,
+      `publish-pypi` and `release` download).
+      **Residual risk:** `build.yml`'s two `download-artifact` sites are
+      tag-gated, so the v5 download path is first exercised by the `v0.8.0`
+      tag itself. There is no safe pre-flight — an `rc` tag would publish
+      the real 0.8.0 to PyPI, since `VERSION` already reads 0.8.0 by then.
+      Failure mode is a red `release` job on an already-published version,
+      recoverable by fixing the workflow and re-running the job.
+- [x] **Phase 2 — three CI gaps closed** (2026-08-13), all found by
+      auditing the workflows rather than by a failure.
+      (1) `ruff` ran only in `build.yml`, which has no `pull_request`
+      trigger — **no PR had ever been linted**. Moved into `test.yml` and
+      widened to `src/ tests/ tools/`, which was already clean.
+      (2) The typegen drift check `CONTRIBUTING.md` claimed CI performed
+      did not exist; added, and verified locally to be in sync.
+      (3) The OpenAPI drift and version checks were missing from
+      `build.yml`'s release path, so a tag could ship a wheel whose schema
+      disagreed with the committed artifact the TS types came from.
+      `build.yml` deliberately did **not** get a `pull_request` trigger —
+      it compiles binutils and five agent architectures.
 - [x] **Starlette deprecation — resolved by the dependency graph, not by us**
       (2026-08-13). `TestClient` warned that `httpx` support was deprecated
       in favour of `httpx2`. But `mcp>=2` requires `httpx2>=2.5`, and
@@ -287,6 +302,12 @@ Condensed; anything older is in the CHANGELOG and git history.
   was brought to API v2. Worth remembering: docs staleness clusters around
   *renames* — the API v2 commit renamed every endpoint, and four files
   kept the old names for weeks because nothing tests prose.
+- **2026-08-13** — Phase 2: CI and dependency hardening. 17 action call
+  sites off Node 20, upper bounds on every runtime dependency, ruff pinned,
+  and three CI gaps closed. The one worth remembering: `build.yml` has no
+  `pull_request` trigger, so putting a check there means it only runs
+  *after* merge — lint had been in that position since it was added. When
+  adding a gate, check which workflow actually gates PRs.
 - **2026-08-13** — Phase 1 of the 0.8.0 stabilization, on branch
   `stabilize-0.8.0`: fixture IPs sanitized, compat shims and orphans
   deleted, version drift closed mechanically, both fixture materializers
