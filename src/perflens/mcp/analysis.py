@@ -14,6 +14,31 @@ READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False,
                             idempotent_hint=True, open_world_hint=False)
 
 
+async def _resolve_source_path(client, file, event_name):
+    """Map a source file an agent named onto the path the profile knows.
+
+    /api/source keys on the compile-time path from DWARF, but agents reach
+    for the basename they saw in a function table. Match on basename when it
+    is unambiguous; otherwise fail with the candidates rather than a 404.
+    """
+    _event, entry, _meta = await client.event_entry(LIVE, event_name)
+    known = [f.get('path', '') for f in (entry.get('source_files') or [])
+             if f.get('path')]
+    wanted = file.rsplit('/', 1)[-1]
+    matches = [p for p in known if p.rsplit('/', 1)[-1] == wanted]
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        listed = ', '.join(sorted(known)[:5]) or '(none)'
+        raise PerfLensError(
+            f'No annotated source for {file!r} in the live profile. Files '
+            f'with annotation include: {listed}. Call '
+            f'perflens_list_source_files for the full list.')
+    raise PerfLensError(
+        f'{wanted!r} is ambiguous — it matches {", ".join(sorted(matches))}. '
+        f'Pass the full path.')
+
+
 def register(mcp, client):
     """Register the orientation + analysis tools on `mcp`."""
 
@@ -297,7 +322,16 @@ def register(mcp, client):
             if event_name is None:
                 per_event, _meta = await client.per_event(LIVE)
                 event_name = pick_event(per_event)
-            payload = await client.source(file, event_name, tid or None)
+            try:
+                payload = await client.source(file, event_name, tid or None)
+            except PerfLensError:
+                # /api/source keys on the path DWARF recorded, so a bare
+                # basename -- the natural thing for an agent to pass, and what
+                # the function tables show -- misses. Resolve it, or say which
+                # files would work, rather than dead-ending on a 404.
+                resolved = await _resolve_source_path(client, file, event_name)
+                payload = await client.source(resolved, event_name, tid or None)
+                file = resolved
             lines = payload.get('lines') or []
         else:
             event_name, entry, _meta = await client.event_entry(source, event or None)

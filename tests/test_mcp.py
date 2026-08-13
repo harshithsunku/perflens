@@ -538,3 +538,56 @@ def test_unreachable_server_names_the_command(core):
         finally:
             await api.aclose()
     run(go())
+
+
+# ---------------------------------------------------------------------------
+# Source path resolution
+# ---------------------------------------------------------------------------
+
+class _StubClient:
+    """Just enough of PerfLensClient for _resolve_source_path."""
+
+    def __init__(self, paths):
+        self._paths = paths
+
+    async def event_entry(self, source, event):
+        return event, {'source_files': [{'path': p} for p in self._paths]}, {}
+
+
+def test_source_hotlines_resolves_a_bare_basename():
+    """/api/source keys on the compile-time path from DWARF, but agents pass
+    the basename they saw in a function table."""
+    from perflens.mcp.analysis import _resolve_source_path
+
+    async def go():
+        client = _StubClient(['/build/src/matrix/matrix_multiply.c',
+                              '/build/src/sort/quicksort.c'])
+        got = await _resolve_source_path(client, 'matrix_multiply.c', 'cycles')
+        assert got == '/build/src/matrix/matrix_multiply.c'
+    run(go())
+
+
+def test_source_hotlines_names_the_candidates_when_nothing_matches():
+    from perflens.mcp.analysis import _resolve_source_path
+    from perflens.mcp.client import PerfLensError
+
+    async def go():
+        client = _StubClient(['/build/src/sort/quicksort.c'])
+        with pytest.raises(PerfLensError) as excinfo:
+            await _resolve_source_path(client, 'nope.c', 'cycles')
+        message = str(excinfo.value)
+        assert 'quicksort.c' in message
+        assert 'perflens_list_source_files' in message
+    run(go())
+
+
+def test_source_hotlines_reports_an_ambiguous_basename():
+    from perflens.mcp.analysis import _resolve_source_path
+    from perflens.mcp.client import PerfLensError
+
+    async def go():
+        client = _StubClient(['/build/a/util.c', '/build/b/util.c'])
+        with pytest.raises(PerfLensError) as excinfo:
+            await _resolve_source_path(client, 'util.c', 'cycles')
+        assert 'ambiguous' in str(excinfo.value)
+    run(go())
