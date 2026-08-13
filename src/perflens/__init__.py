@@ -5,4 +5,4 @@ samples over TCP; this package is the receiving server: parsing,
 aggregation, source mapping, and the browser UI.
 """
 
-__version__ = '0.7.0'
+__version__ = '0.8.0'

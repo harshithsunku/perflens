@@ -18,9 +18,13 @@ tag. The version bump sits *before* the docs assets on purpose — the docs
 drawer renders the version, and it is one of the screenshots.
 
 - **Published:** 0.7.0 (PyPI, tag `v0.7.0`).
-- **Version:** 0.7.0 until Phase 3. `tools/check_version.py` now enforces
-  agreement across all four locations plus the generated schema — run it
-  instead of hand-checking.
+- **Version: 0.8.0 on the branch, not yet tagged.** Bumped in Phase 3, ahead
+  of the docs assets on purpose — the docs drawer renders the version and is
+  one of the screenshots, so shooting at 0.7.0 would have baked a stale
+  number into a committed PNG. `tools/check_version.py` enforces agreement
+  across all seven locations; run it instead of hand-checking.
+  `CHANGELOG.md` has its `## [0.8.0]` heading, which the release workflow
+  awk-extracts for the GitHub Release body.
 - **Unreleased on master** — a large body of work sits between the `v0.7.0`
   tag and HEAD:
   - `cfbe5c8` server split into `AppContext` modules + typed Pydantic API
@@ -302,6 +306,12 @@ Condensed; anything older is in the CHANGELOG and git history.
   was brought to API v2. Worth remembering: docs staleness clusters around
   *renames* — the API v2 commit renamed every endpoint, and four files
   kept the old names for weeks because nothing tests prose.
+- **2026-08-13** — Phase 3: version bumped to 0.8.0 across all seven
+  locations, CHANGELOG restructured into a real `## [0.8.0]` entry with a
+  `### Removed` note for `perflens.server`. The first PR CI run also
+  confirmed the Phase 2 gates actually execute — lint, version consistency
+  and typegen drift all ran green on `pull_request`, which none of them had
+  ever done before.
 - **2026-08-13** — Phase 2: CI and dependency hardening. 17 action call
   sites off Node 20, upper bounds on every runtime dependency, ruff pinned,
   and three CI gaps closed. The one worth remembering: `build.yml` has no

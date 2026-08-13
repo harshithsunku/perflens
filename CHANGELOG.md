@@ -7,8 +7,28 @@ releases may break APIs between minor versions when needed.
 
 ## [Unreleased]
 
-The feature set is frozen as of 2026-08-13; the version stays at 0.7.0
-until stabilization is complete (see [STATUS.md](STATUS.md)).
+## [0.8.0] — 2026-08-13
+
+A stabilization release. The feature set was frozen on 2026-08-13 with the
+MCP server as the last capability added; everything since has been hygiene,
+CI hardening and documentation truth. It also publishes the large body of
+work that accumulated after 0.7.0 — the server module split, the React
+frontend, and API v2.
+
+**Upgrading:** API v2 renamed every REST endpoint (see below), and
+`perflens.server` has been removed. The web UI and the agent wire protocol
+are unaffected.
+
+### Removed
+
+- **`perflens.server`** — a compatibility shim introduced in the 0.6.0-era
+  restructure and marked "kept for one release"; it has now outlived two.
+  Import from the modules that actually hold the code: `perflens.app`
+  (`AppContext`, `build_context`, `main`), `perflens.config`
+  (`ServerConfig`), `perflens.state` (`ProfilingState`, `MetricsState`).
+  This is a breaking change to a public import path. The repo-only
+  `server/perflens_server.py` wrapper, the orphaned `run_server.sh`, and an
+  empty `requirements-server.txt` went with it.
 
 ### Added
 
@@ -66,6 +86,30 @@ until stabilization is complete (see [STATUS.md](STATUS.md)).
   three version locations now agree.
 - The test suite no longer behaves differently depending on whether the
   frontend happened to be built locally.
+- **The docs drawer displayed a version the build was not.** It carried a
+  hand-typed `v0.8.0` string inside a package that shipped as 0.7.0, wired
+  to nothing and absent from the release checklist. It is now injected from
+  the canonical `VERSION` file at build time, and `tools/check_version.py`
+  asserts every location agrees — including that no version literal has
+  crept back into the frontend source. Wired into CI.
+- **The committed test fixtures carried device IP addresses** in their
+  `session_id` and `agent` metadata, against this project's own rule that
+  no addresses appear anywhere in the repo. Renamed to generic identifiers.
+- **Replaying a saved session showed no hardware counters.** Both fixture
+  materializers discarded the captured metadata and wrote a stub with
+  `total_samples: 0` and an empty `perf_stat`, so a replayed session
+  rendered a single empty stat card instead of the full counter set.
+
+### Changed
+
+- Every runtime dependency gained an upper bound (`fastapi<1.0`,
+  `uvicorn<1.0`, `orjson<4`, `zstandard<1.0`, `httpx<1.0`). Floors alone
+  allowed a future major release to resolve into a fresh `uvx perflens`
+  install and break it with no change here. Note the consequence: when
+  FastAPI 1.0 ships, installs pin to the last 0.x until a new release.
+- CI actions moved off the deprecated Node 20 runtime, lint now runs on
+  pull requests (it had only ever run post-merge), and the release path
+  verifies the schema and version before building.
 
 ## [0.7.0] — 2026-07-18
 
