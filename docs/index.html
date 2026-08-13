@@ -148,6 +148,11 @@
                 <p>Every session is saved as raw chunks on disk. Replay any past session lazily through the UI &mdash; or import a <code>perf.data</code> file directly with <code>--import</code>.</p>
             </div>
             <div class="feature">
+                <div class="feature-icon">&#129302;</div>
+                <h3>MCP server for AI agents</h3>
+                <p><code>perflens mcp</code> exposes the profile to any MCP client &mdash; hot functions, hot stacks, IPC and miss rates, source hot lines, session comparison, per-thread breakdowns &mdash; so an agent can find the bottleneck and, when asked, drive a live run on the device. See the <a href="reference.html#mcp">Reference</a>.</p>
+            </div>
+            <div class="feature">
                 <div class="feature-icon">&#128261;</div>
                 <h3>Two connect modes</h3>
                 <p><code>--server</code>: agent dials out to the server (reconnects with backoff). <code>--listen</code>: agent waits, server connects in through the UI's Live Debug wizard.</p>
@@ -379,7 +384,7 @@ uv venv && uv pip install -e .
         <div class="features" style="margin-top: 28px;">
             <div class="feature">
                 <h3>Simplicity first</h3>
-                <p>A small, deliberate user-space stack &mdash; FastAPI/uvicorn/orjson/zstandard, installed with <code>uvx</code>. Plain HTML + vanilla JS + CSS on the UI. No bundler, no npm, no Docker.</p>
+                <p>A small, deliberate user-space stack &mdash; FastAPI/uvicorn/orjson/zstandard, installed with <code>uvx</code>. The React UI ships prebuilt inside the wheel, so Node is a build-time dependency only. No sudo, no Docker.</p>
             </div>
             <div class="feature">
                 <h3>Defensive parsing</h3>

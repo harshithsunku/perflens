@@ -166,7 +166,7 @@
             you click a session, and the server re-parses the raw chunks on demand.
             A standalone <code>perf.data</code> file can also be imported &mdash;
             with <code>--import</code> at startup or uploaded through
-            <code>/api/import</code> &mdash; the server runs <code>perf script</code>
+            <code>/api/sessions/import</code> &mdash; the server runs <code>perf script</code>
             against it once and exposes the result as a session.
         </p>
 
@@ -227,16 +227,16 @@ sock.sendall(header + payload)</code></pre>
         <p>
             The server pushes updates to the UI through a Server-Sent Events
             stream at <code>/api/stream</code>: <code>status</code>,
-            <code>agent_connected</code>, <code>event_types</code>,
-            <code>data_version</code> (bumped per chunk), <code>perf_stat</code>,
-            and <code>metrics_&lt;type&gt;</code>. When <code>data_version</code>
-            bumps, the browser fetches the cached gzip snapshot from
-            <code>/api/per-event</code> and rerenders. There is no polling.
+            <code>agent</code>, <code>data_version</code> (bumped per chunk, and
+            carrying the event-type list), <code>perf_stat</code>, and
+            <code>metrics</code>. When <code>data_version</code> bumps, the browser
+            fetches the cached gzip snapshot for the event it is viewing from
+            <code>/api/snapshot</code> and rerenders. There is no polling.
         </p>
         <p>
             Per-thread analysis, source views, and exports are pull-based: the UI hits
-            <code>/api/thread-view</code>, <code>/api/source</code>, or the
-            <code>/api/export/&hellip;</code> endpoints on demand &mdash; see the
+            <code>/api/threads/&lt;tid&gt;</code>, <code>/api/source</code>, or the
+            export endpoints on demand &mdash; see the
             <a href="reference.html">Reference</a> for the full list.
         </p>
 

@@ -109,33 +109,39 @@
             <thead><tr><th>Endpoint</th><th>Method</th><th>Description</th></tr></thead>
             <tbody>
                 <tr><td><code>/api/status</code></td><td>GET</td><td>Server + agent connection state, sample totals.</td></tr>
-                <tr><td><code>/api/stream</code></td><td>GET</td><td>Server-Sent Events: <code>status</code>, <code>agent_connected</code>, <code>event_types</code>, <code>data_version</code> (per chunk), <code>perf_stat</code>, <code>metrics_&lt;type&gt;</code>.</td></tr>
-                <tr><td><code>/api/per-event?event=</code></td><td>GET</td><td>Cached per-event snapshot (gzip); clients fetch it when SSE <code>data_version</code> bumps.</td></tr>
-                <tr><td><code>/api/sessions</code></td><td>GET</td><td>List saved sessions (metadata only).</td></tr>
+                <tr><td><code>/api/stream</code></td><td>GET</td><td>Server-Sent Events: <code>status</code>, <code>agent</code>, <code>data_version</code> (carries the event-type list), <code>perf_stat</code>, <code>metrics</code> (discriminated by payload type).</td></tr>
+                <tr><td><code>/api/snapshot?event=</code></td><td>GET</td><td>Cached per-event snapshot (gzip); clients fetch it when SSE <code>data_version</code> bumps. Omit <code>event</code> for every event at once.</td></tr>
+                <tr><td><code>/api/sessions?offset=&amp;limit=</code></td><td>GET</td><td>List saved sessions, paginated (metadata only).</td></tr>
                 <tr><td><code>/api/sessions/&lt;id&gt;</code></td><td>GET</td><td>Lazy-replay a session (parses raw chunks on demand, cached).</td></tr>
-                <tr><td><code>/api/export/session/&lt;id&gt;?format=</code></td><td>GET</td><td>Export session as collapsed-stack text or JSON.</td></tr>
-                <tr><td><code>/api/export/flamegraph?event=&amp;session=</code></td><td>GET</td><td>Download a standalone SVG flame graph.</td></tr>
+                <tr><td><code>/api/sessions/&lt;id&gt;</code></td><td>DELETE</td><td>Delete a saved session.</td></tr>
+                <tr><td><code>/api/sessions/&lt;id&gt;/export?format=&amp;event=</code></td><td>GET</td><td>Export a session: <code>collapsed</code> stacks, full <code>json</code>, or an <code>svg</code> flame graph.</td></tr>
+                <tr><td><code>/api/sessions/import</code></td><td>POST</td><td>Import an uploaded <code>perf.data</code> file as a session (needs <code>perf</code> on the server).</td></tr>
+                <tr><td><code>/api/live/export?format=&amp;event=</code></td><td>GET</td><td>Export the live in-memory profile in the same three formats.</td></tr>
                 <tr><td><code>/api/source?file=&amp;event=&amp;tid=</code></td><td>GET</td><td>Annotated source for a single file (optionally per-thread).</td></tr>
-                <tr><td><code>/api/thread-view?event=&amp;tid=</code></td><td>GET</td><td>Per-thread flame graph + function summary.</td></tr>
-                <tr><td><code>/api/thread-summary?event=</code></td><td>GET</td><td>Thread overview with sample counts and top functions.</td></tr>
-                <tr><td><code>/api/time-window?event=&amp;start=&amp;end=</code></td><td>GET</td><td>Flame graph + function summary for samples received in a time range (timeline scrubbing).</td></tr>
+                <tr><td><code>/api/threads?event=</code></td><td>GET</td><td>Thread overview with sample counts and top functions.</td></tr>
+                <tr><td><code>/api/threads/&lt;tid&gt;?event=</code></td><td>GET</td><td>Per-thread flame graph + function summary.</td></tr>
+                <tr><td><code>/api/window?event=&amp;start=&amp;end=&amp;tid=</code></td><td>GET</td><td>Flame graph + function summary for samples received in a time range (timeline scrubbing).</td></tr>
                 <tr><td><code>/api/index/status</code></td><td>GET</td><td>Source-index / DWARF file-list state (truncated preview).</td></tr>
                 <tr><td><code>/api/index/files?offset=&amp;limit=&amp;q=</code></td><td>GET</td><td>Paginated DWARF source-file list.</td></tr>
                 <tr><td><code>/api/metrics/current</code></td><td>GET</td><td>Latest device-health snapshot per type.</td></tr>
                 <tr><td><code>/api/metrics/history?type=&amp;start=</code></td><td>GET</td><td>Health metrics time series.</td></tr>
-                <tr><td><code>/api/connect</code></td><td>POST</td><td>Connect out to a <code>--listen</code> agent (<code>{"host": ..., "port": ...}</code>).</td></tr>
-                <tr><td><code>/api/agent/command</code></td><td>POST</td><td>Relay a command to the connected agent (<code>start</code>, <code>stop</code>, <code>pause</code>, <code>resume</code>, <code>configure</code>, <code>configure_metrics</code>, <code>list_processes</code>, <code>reprobe</code>).</td></tr>
-                <tr><td><code>/api/wizard/state</code></td><td>GET/POST</td><td>Persisted Live Debug wizard state.</td></tr>
+                <tr><td><code>/api/agent</code></td><td>GET</td><td>Agent connection info (address + hello/platform).</td></tr>
+                <tr><td><code>/api/agent</code></td><td>DELETE</td><td>Disconnect the active agent (triggers a normal session save).</td></tr>
+                <tr><td><code>/api/agent/connect</code></td><td>POST</td><td>Connect out to a <code>--listen</code> agent (<code>{"host": &hellip;, "port": &hellip;}</code>).</td></tr>
+                <tr><td><code>/api/agent/command</code></td><td>POST</td><td>Relay a command to the connected agent (<code>start</code>, <code>stop</code>, <code>pause</code>, <code>resume</code>, <code>configure</code>, <code>configure_metrics</code>, <code>list_processes</code>, <code>reprobe</code>, <code>verify_pid</code>, <code>verify_perf</code>, <code>ping</code>, <code>status</code>, <code>update</code>).</td></tr>
+                <tr><td><code>/api/wizard</code></td><td>GET/PUT</td><td>Persisted Live Debug wizard state.</td></tr>
                 <tr><td><code>/api/browse?path=</code></td><td>GET</td><td>File picker listing (confined to <code>--browse-root</code>).</td></tr>
-                <tr><td><code>/api/config/binary</code></td><td>POST</td><td>Set the unstripped binary at runtime.</td></tr>
-                <tr><td><code>/api/config/source</code></td><td>POST</td><td>Set the source directory at runtime.</td></tr>
-                <tr><td><code>/api/config/pathmap</code></td><td>POST</td><td>Set compile-time path rewrites at runtime.</td></tr>
-                <tr><td><code>/api/config/toolchain</code></td><td>POST</td><td>Set <code>--toolchain-prefix</code> / <code>--sysroot</code> at runtime.</td></tr>
-                <tr><td><code>/api/import</code></td><td>POST</td><td>Import an uploaded <code>perf.data</code> file as a session (needs <code>perf</code> on the server).</td></tr>
-                <tr><td><code>/api/stop</code></td><td>GET</td><td>Disconnect the active agent (triggers a normal session save).</td></tr>
+                <tr><td><code>/api/config</code></td><td>GET/PATCH</td><td>Runtime binary / source dir / path map / toolchain / sysroot config, as one typed model.</td></tr>
                 <tr><td><code>/*</code></td><td>GET</td><td>Static files from <code>ui/</code>.</td></tr>
             </tbody>
         </table>
+
+        <p>
+            Every failure renders as <code>{"error": {"code": &hellip;, "message": &hellip;}}</code>
+            with a real status code &mdash; 400 validation, 403 permission, 404 missing,
+            409 wrong server state, 413 too large, 502 agent transport. The schema is
+            published at <code>/api/openapi.json</code>.
+        </p>
 
         <h2 id="events">Supported perf events</h2>
         <p>
@@ -158,6 +164,47 @@
             </tbody>
         </table>
 
+        <h2 id="mcp">MCP server</h2>
+        <p>
+            <code>perflens mcp</code> serves profiling data to LLM agents over the
+            Model Context Protocol, so an agent can answer &ldquo;why is this slow&rdquo;
+            against real <code>perf</code> data and drive a live run on a device. It is
+            a client of the HTTP API above, so a <code>perflens serve</code> must be
+            running. The SDK is an optional dependency:
+        </p>
+<pre><code>pip install 'perflens[mcp]'          # or: uv tool install 'perflens[mcp]'
+claude mcp add perflens -- perflens mcp</code></pre>
+        <table class="ref">
+            <thead><tr><th>Flag</th><th>Description</th></tr></thead>
+            <tbody>
+                <tr><td><code>--server-url URL</code></td><td>PerfLens HTTP API to query (default <code>$PERFLENS_MCP_URL</code> or <code>http://127.0.0.1:8080</code>).</td></tr>
+                <tr><td><code>--read-only</code></td><td>Omit the agent-control and export tools, so the agent can analyse but cannot touch a device or write files.</td></tr>
+            </tbody>
+        </table>
+        <p>
+            Nineteen tools. Analysis (read-only): <code>perflens_status</code>,
+            <code>perflens_list_sessions</code>, <code>perflens_hot_functions</code>,
+            <code>perflens_hot_stacks</code>, <code>perflens_perf_stat</code>,
+            <code>perflens_list_source_files</code>, <code>perflens_source_hotlines</code>,
+            <code>perflens_compare</code>, <code>perflens_threads</code>,
+            <code>perflens_thread_detail</code>, <code>perflens_device_metrics</code>,
+            <code>perflens_metrics_history</code>. Device control:
+            <code>perflens_agent_info</code>, <code>perflens_agent_connect</code>,
+            <code>perflens_list_processes</code>, <code>perflens_start_profiling</code>,
+            <code>perflens_stop_profiling</code>, <code>perflens_collection_pause</code>.
+            Plus <code>perflens_export</code>, which writes collapsed stacks / JSON / SVG
+            to a file.
+        </p>
+        <p>
+            Profiles are large &mdash; a single event&rsquo;s snapshot runs from kilobytes
+            to megabytes &mdash; so every tool returns a ranked, capped view and tells the
+            agent exactly how to page for more. Config mutation, session deletion and the
+            file browser are deliberately not exposed. The companion skill at
+            <code>skills/perflens-profiling/</code> teaches the profiling method the tools
+            support; install it with
+            <code>cp -r skills/perflens-profiling ~/.claude/skills/</code>.
+        </p>
+
         <h2 id="build">Building release packages</h2>
 <pre><code>./build_package.sh              # server wheel/sdist + native C agent
 ./build_package.sh --server     # Python wheel + sdist only
@@ -173,11 +220,12 @@
         <p>
             <code>.github/workflows/test.yml</code> runs the pytest suite on
             Python 3.10&ndash;3.13 (parser, aggregator differentials against
-            device-captured fixtures, source mapper, HTTP API, provisioning
+            device-captured fixtures, source mapper, HTTP API, MCP tools, provisioning
             against a fake release server, and the C-agent wire protocol driven
             through a fake framing server with a <code>perf</code> shim), plus a
-            puppeteer browser E2E that replays a fixture session through the
-            real UI.
+            frontend job: OpenAPI schema drift check, vitest unit tests, and a
+            self-contained Playwright browser E2E that replays a fixture session
+            through the real UI.
         </p>
         <p>
             <code>.github/workflows/build.yml</code> lints (<code>ruff</code>),
@@ -219,31 +267,38 @@
 <pre><code>perflens/
 ├── install-agent.sh              # curl-able agent installer (no sudo)
 ├── agent-c/
-│   ├── perflens_agent.c          # C agent, static binary, zero deps
+│   ├── src/                      # C agent modules (agent.h + 10 .c files)
 │   ├── Makefile                  # native + cross-compile targets
 │   └── vendor/zstd/              # vendored zstd amalgamation
 ├── pyproject.toml                # pip/uv package (console script: perflens)
 ├── src/perflens/                 # the server package
-│   ├── server.py                 # agent TCP protocol + state + sessions
+│   ├── app.py                    # AppContext + lifecycle + main()
+│   ├── config.py                 # ServerConfig, CLI parsing, tool probing
+│   ├── state.py                  # profiling/metrics state + rebuild worker
+│   ├── agentlink.py              # agent TCP wire protocol + session
+│   ├── sessions.py               # persistence, replay, perf.data import
 │   ├── web.py                    # FastAPI/uvicorn HTTP layer + SSE hub
-│   ├── cli.py                    # perflens serve/import/push-agent/provision
+│   ├── api/                      # Pydantic v2 schemas + response helpers
+│   ├── mcp/                      # MCP server (optional [mcp] extra)
+│   ├── cli.py                    # serve/import/push-agent/provision/mcp
 │   ├── parser.py                 # perf script / perf stat parser
 │   ├── aggregator.py             # incremental per-event aggregation
 │   ├── source_mapper.py          # addr2line pipeline + path remap
 │   ├── symcache.py               # persistent caches (~/.perflens/cache)
 │   ├── provision.py              # user-space static-tools download
-│   └── ui/                       # single-page app (ships in the wheel)
-│       ├── index.html
-│       ├── app.js                # all UI logic (vanilla JS)
-│       └── style.css             # dark + light themes
+│   └── ui/                       # built React app (Vite output, ships in the wheel)
+├── frontend/                     # React 19 + TypeScript + Vite SPA source
+│   ├── src/                      # api client, stores, flamegraph, components
+│   ├── e2e/                      # Playwright browser E2E (self-contained)
+│   └── openapi.json              # committed schema (CI drift-checked)
+├── skills/perflens-profiling/    # agent skill for the MCP server
 ├── tests/
-│   ├── test_*.py                 # pytest suite (parser, aggregator, HTTP, agent, ...)
-│   ├── e2e_ui.mjs                # puppeteer browser E2E (self-contained)
+│   ├── test_*.py                 # pytest (parser, aggregator, HTTP, MCP, agent, ...)
 │   ├── fixtures/                 # gzipped perf sessions from real devices
 │   ├── sample_workload.c
 │   └── Makefile
 ├── build_package.sh
-├── .github/workflows/test.yml    # pytest matrix + browser e2e
+├── .github/workflows/test.yml    # pytest matrix + vitest + playwright e2e
 └── .github/workflows/build.yml   # lint + test + wheel + agents + release</code></pre>
     </main>
 
@@ -254,6 +309,7 @@
             <li><a href="#agent-cli">Agent CLI</a></li>
             <li><a href="#http-api">HTTP API</a></li>
             <li><a href="#events">Perf events</a></li>
+            <li><a href="#mcp">MCP server</a></li>
             <li><a href="#build">Build packages</a></li>
             <li><a href="#ci">CI</a></li>
             <li><a href="#trouble">Troubleshooting</a></li>

@@ -53,14 +53,31 @@ Two things that bite if forgotten:
 
 Ordered roughly by user impact.
 
-- [ ] **The published docs site documents the v1 API.**
-      `docs/reference.html` still lists `/api/per-event`,
+- [x] **Docs site brought to API v2** (2026-08-13) — `docs/reference.html`
+      had documented the pre-v2 surface (`/api/per-event`,
       `/api/thread-summary`, `/api/thread-view`, `/api/time-window`,
-      `/api/connect`, `/api/stop`, `/api/export`, `/api/import` — every one
-      renamed by API v2 in `eb7664a`. `docs/architecture.html` has the same
-      problem. This is the most visible piece of staleness in the project:
-      anyone following the site's reference gets 404s. Regenerate against
-      the committed `frontend/openapi.json`, and add the MCP server.
+      `/api/connect`, `/api/stop`, `/api/export/*`, `/api/import`,
+      `/api/config/*`, `/api/wizard/state`), so anyone following it got
+      404s. All 24 endpoints now match `web.py`, with the error-model note
+      and a pointer to `/api/openapi.json`; new MCP section; project layout
+      and CI paragraph corrected. `architecture.html` SSE/endpoint wording
+      updated; `index.html` no longer claims a vanilla-JS UI and gained an
+      MCP feature card.
+- [ ] **The docs site's screenshots and demo GIF show the old UI.**
+      `docs/screenshots/*.png` and `docs/demo.gif` were captured
+      2026-05-17, two months before the React rewrite — so the landing page
+      advertises a UI that no longer exists, missing the differential view,
+      timeline scrubbing and keyboard shortcuts along the way. Regenerating
+      needs a live server + agent + workload (see `tools/README.md`), and
+      the capture scripts were written against the old vanilla-JS DOM;
+      expect to port them to the React app's `data-testid` contract rather
+      than just re-running them.
+- [ ] **Decide about the IPs in git history.** The device addresses and ssh
+      targets removed from STATUS.md on 2026-08-13 are still reachable in
+      earlier commits, against the project's no-IPs rule. Clearing them
+      needs a history rewrite (`git filter-repo` + force-push), which
+      breaks existing clones — a deliberate call, not a drive-by fix. They
+      are private-range addresses, so the practical exposure is low.
 - [ ] **Server dependencies are floors only** (`fastapi>=0.110`,
       `uvicorn>=0.29`, `orjson>=3.9`, `zstandard>=0.21`, `mcp>=2,<3`). CI
       installs the latest each run, so a FastAPI or Pydantic release can
@@ -160,6 +177,15 @@ Condensed; anything older is in the CHANGELOG and git history.
   build artifact, and the 413 reason phrase changed under Python 3.13.
   Method worth reusing: reproduce the CI *environment* locally (move
   `src/perflens/ui` aside) rather than trusting a green local suite.
+- **2026-08-13** — Documentation sweep. All eight tracked `.md` files
+  audited: none redundant, but STATUS.md was ~80% obsolete (and carried
+  device IPs, against this project's own rule), CONTRIBUTING still
+  described a vanilla-JS UI and a deleted root `package.json`, README
+  pointed at a puppeteer E2E that no longer exists, and `tools/README`
+  documented an `npm install` that cannot work. Then the GitHub Pages site
+  was brought to API v2. Worth remembering: docs staleness clusters around
+  *renames* — the API v2 commit renamed every endpoint, and four files
+  kept the old names for weeks because nothing tests prose.
 - **2026-08-13** — MCP server + companion skill (`4a966c7`), then feature
   freeze declared and the version held at 0.7.0 (`531f27b`). Notes: the MCP
   Python SDK is on **2.x** (`MCPServer`, not 1.x's `FastMCP`;
