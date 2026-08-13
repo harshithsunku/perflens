@@ -381,6 +381,27 @@ verifiable against them. Steps 5–6 are deliberately not done.
    Currently extracts 125 lines across Removed / Added / Fixed / Changed.
 5. ⬜ **Merge the PR** — only after [Before merging](#before-merging) has
    actually been worked through by hand.
+
+   **Merging does not publish the package.** `build.yml` runs on a push to
+   master, but `publish-pypi` and `release` are both guarded by
+   `if: startsWith(github.ref, 'refs/tags/v')`, so on a branch push they are
+   skipped. What the merge *does* do is run the full build — wheel, five
+   agent architectures, binutils bundles, wheel smoke-run — which is the
+   closest pre-flight to a real release that exists, and the first time the
+   bumped action versions run outside a pull request.
+
+   **Merging does republish the docs site.** GitHub Pages is configured as
+   `branch=master, path=/docs` (legacy build), so
+   <https://harshithsunku.github.io/perflens/> updates on merge, not on tag.
+   The new screenshots and prose go public at that moment. That is the
+   desired outcome here — the currently-live site still shows pre-React
+   screenshots — but it is the one outward-facing effect of merging, so
+   don't merge expecting nothing to change for other people.
+
+   Note the site will then describe 0.8.0 while `uvx perflens` still installs
+   0.7.0, which predates API v2. That gap already exists on master (`6240168`
+   brought the site to API v2 before the freeze); tagging is what closes it,
+   so a long delay between merge and tag widens a mismatch users can see.
 6. ⬜ **Tag `v0.8.0`** — drives the GitHub Release and the PyPI publish via
    Trusted Publishing. **This is the irreversible step:** the publish uses
    `skip-existing: true`, so a botched 0.8.0 can be yanked but never
