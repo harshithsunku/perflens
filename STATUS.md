@@ -43,9 +43,32 @@ Current counts: **165 pytest** (was 152), 24 vitest, 10 Playwright.
 
 ### Still open for 0.9.0
 
-- [ ] **`uvx perflens` in a container** — the one carried-over item still
-      unverified, because this box has no Docker. Everything else on the
-      0.8.0 carry-over list was driven by hand and passed; see below.
+- [x] **The wheel does not depend on system binutils** — the caveat left
+      open at 0.8.0, closed **without Docker** and more directly than a
+      container would have closed it. A container proves nothing here
+      unless its base image happens to lack binutils; what actually needed
+      proving is behaviour when `addr2line`/`readelf` are absent, and that
+      is testable by stripping `PATH`.
+
+      Built the wheel, installed it with `uv` into a fresh 3.12 venv in an
+      empty directory (no repo, no Node), and ran it with a `PATH`
+      containing ordinary shell utilities and **no binutils, no perf, no
+      zstd**. The server detected the tools missing, auto-provisioned the
+      static bundle into `~/.perflens/bin`, and came up. `/api/status` ok,
+      UI served from inside the wheel, `/api/openapi.json` 0.8.0, an
+      unmatched path 404s (the `598e90b` regression still holds), and all
+      eight `/api/index/status` keys present.
+
+      The provisioned toolchain then did real work — 289 symbols through
+      the provisioned `readelf`, addresses resolved to five distinct source
+      lines through the provisioned `addr2line`. That also exercises the
+      provisioning path against the **real** GitHub release, which the test
+      suite only covers against a fake release server.
+
+      `uvx --from <wheel> perflens serve` verified separately. The clean env
+      resolved fastapi 0.141.1 / starlette 1.6.0 / uvicorn 0.52.2 — newer
+      than the dev venv and inside the upper bounds, so the caps were
+      exercised rather than merely declared.
 - [ ] **Docs screenshots need regenerating.** The source-annotation shot
       now shows the wrong thing — it was captured against the declaration-line
       bug. `npm run shots` then `npm run shots:live`.
