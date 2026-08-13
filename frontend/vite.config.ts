@@ -2,7 +2,6 @@
 import { readFileSync } from 'node:fs';
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
-import tailwindcss from '@tailwindcss/vite';
 
 // The repo-root VERSION file is the single source of truth: the agent bakes it
 // in via agent-c/Makefile, the Python package reads it, and the UI shows it in
@@ -16,7 +15,7 @@ export default defineConfig({
   define: {
     __PERFLENS_VERSION__: JSON.stringify(VERSION),
   },
-  plugins: [react(), tailwindcss()],
+  plugins: [react()],
   build: {
     outDir: '../src/perflens/ui',
     emptyOutDir: true,
