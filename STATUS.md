@@ -119,25 +119,54 @@ Ordered roughly by user impact.
       and CI paragraph corrected. `architecture.html` SSE/endpoint wording
       updated; `index.html` no longer claims a vanilla-JS UI and gained an
       MCP feature card.
-- [ ] **Phase 4 — the docs site's screenshots and demo GIF show the old UI.**
-      `docs/screenshots/*.png` and `docs/demo.gif` were captured
-      2026-05-17, two months before the React rewrite — so the landing page
-      advertises a UI that no longer exists, missing the differential view,
-      timeline scrubbing and keyboard shortcuts along the way.
-      The capture scripts were **deleted, not ported** (2026-08-13): every
-      hook they used was gone (`showView()`, `switchToTab()`,
-      `renderCurrentEvent()`, `.fn-source-link`, a non-bubbling
-      `new Event('change')`, direct `data-theme` mutation that leaves the
-      zustand store dark), and `typeof` guards meant they kept *reporting
-      success* while capturing the landing page. That silent-success
-      property is why they rotted unnoticed for two months.
-      Replacement plan: Playwright projects in `frontend/docs-shots/`
-      reusing `e2e/start-server.mjs` and `tools/encode-demo-gif.sh`.
-      ~10 shots come from deterministic fixture replay (no `perf` needed,
-      CI-smokeable); threads, source annotation, timeline scrubbing, the
-      differential view and the GIF need live state and come from a local
-      `tests/matrixlab` capture. Add the CI smoke job — it is what stops
-      the next UI rewrite from silently orphaning the harness again.
+- [x] **Phase 4 — docs screenshots and demo GIF regenerated on the React
+      UI** (2026-08-13). The old assets were captured 2026-05-17, two months
+      before the React rewrite, so the landing page advertised a UI that no
+      longer existed. 12 stills (was 7) plus a re-recorded GIF.
+      The puppeteer scripts were **deleted, not ported**: every hook they
+      used was gone (`showView()`, `switchToTab()`, `renderCurrentEvent()`,
+      `.fn-source-link`, a non-bubbling `new Event('change')`, direct
+      `data-theme` mutation that leaves the zustand store on dark so the SVG
+      renders dark on a light page) — and `typeof` guards meant they kept
+      *reporting success* while capturing the landing page. That
+      silent-success property is why they rotted unnoticed.
+      Replaced by Playwright projects in `frontend/docs-shots/`, reusing
+      `e2e/start-server.mjs` and `tools/encode-demo-gif.sh` unchanged.
+      - `npm run shots` (docs-replay) captures the **full** set from a
+        committed fixture — no `perf`, no agent, no device.
+        `npm run shots:live` then overwrites the data-heavy subset from a
+        real `tests/matrixlab` run (25 threads) via `tools/live-capture.sh`.
+        Replay owns the whole set on purpose: it is what CI can execute.
+      - **`test.yml` now smoke-runs the replay project on every PR** and
+        asserts ≥8 PNGs over 20 KB. Nothing is committed by CI. This is the
+        item that stops the next UI rewrite from silently orphaning the
+        harness — the specs' assertions catch a broken harness, and the size
+        check catches the subtler case of tests passing while images come
+        out blank.
+      - Live is needed for: threads (`/api/threads` reads live
+        `all_samples`), source annotation (needs a locally built `-g`
+        binary), and the GIF (a replay is a fixed dataset, so every frame
+        would be identical). The function table and flame graph are shot
+        live too — the fixture has no resolvable binary, so replaying it
+        renders the hot path as `[unknown]` at 73%, which is accurate but a
+        poor advertisement for a symbol-resolving profiler.
+      - `npm run e2e` is now pinned to `--project=chromium`; without that,
+        CI would start running the docs projects and fail on missing `perf`.
+      Three things worth carrying forward, all found by *looking at the
+      output* rather than by a failing assertion:
+      1. Gating on data readiness is not gating on visibility. The first
+         run produced four identical screenshots because the stat bar plus
+         the health strip are taller than a 900px viewport and the content
+         each shot was named after sat below the fold. Hence
+         `focusContent()` and `collapseMetrics()`.
+      2. `window.__perflens` is a live getter over the current layout, so it
+         reports the *previous* event's rects mid-switch. Trusting it alone
+         committed a screenshot of an empty flame graph; `flamegraphReady()`
+         now gates on rendered SVG nodes.
+      3. `perf record` batches ring-buffer flushes, so chunks land every
+         2-4s no matter what `duration` says. GIF frames at the old 450ms
+         interval yielded 5 distinct images out of 32; at ~900ms it is 7 of
+         21, and the landing-page caption no longer claims counts "climb".
 - [x] **Phase 2 — dependency upper bounds** (2026-08-13) —
       `fastapi<1.0`, `uvicorn<1.0`, `orjson<4`, `zstandard<1.0`,
       `httpx<1.0` (`mcp>=2,<3` was already bounded). Floors alone let a
@@ -306,6 +335,19 @@ Condensed; anything older is in the CHANGELOG and git history.
   was brought to API v2. Worth remembering: docs staleness clusters around
   *renames* — the API v2 commit renamed every endpoint, and four files
   kept the old names for weeks because nothing tests prose.
+- **2026-08-13** — Phase 4: docs assets regenerated on a new Playwright
+  harness, and a real bug fell out of it. Standing up a live 25-thread
+  `matrixlab` capture made `/api/snapshot` return **500**: orjson cannot
+  encode past a fixed nesting depth (254 containers), a flamegraph level
+  costs two of them, so a stack deeper than ~126 frames could not be
+  serialized at all — and the failure blanked the entire UI rather than
+  rendering one deep stack short. `_copy_tree` had already been made
+  iterative for Python's own recursion limit; the *serializer* limit is a
+  separate constraint nobody had hit, because the committed fixtures are
+  shallow. Capped at `MAX_FLAMEGRAPH_DEPTH`, cut points marked
+  `truncated`, three regression tests. The general lesson: the fixtures are
+  a single-threaded 12k-sample profile, and several classes of defect only
+  appear under a genuinely heavy one.
 - **2026-08-13** — Phase 3: version bumped to 0.8.0 across all seven
   locations, CHANGELOG restructured into a real `## [0.8.0]` entry with a
   `### Removed` note for `perflens.server`. The first PR CI run also

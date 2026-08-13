@@ -86,6 +86,15 @@ are unaffected.
   three version locations now agree.
 - The test suite no longer behaves differently depending on whether the
   frontend happened to be built locally.
+- **Deep call stacks returned 500 from `/api/snapshot`, blanking the UI.**
+  orjson refuses to encode past a fixed nesting depth (254 containers), and
+  a flame graph level costs two of them — the node and its children list —
+  so a profile containing a stack deeper than ~126 frames could not be
+  serialized at all. Deeply recursive workloads really do produce such
+  stacks. Flame graph depth is now capped, with the cut point marked
+  `truncated`, so one very deep stack renders short instead of taking the
+  whole view down. Found by profiling a 25-thread local workload; the
+  committed test fixtures are too shallow to reach it.
 - **The docs drawer displayed a version the build was not.** It carried a
   hand-typed `v0.8.0` string inside a package that shipped as 0.7.0, wired
   to nothing and absent from the release checklist. It is now injected from
@@ -102,6 +111,13 @@ are unaffected.
 
 ### Changed
 
+- **Docs screenshots and the demo GIF are regenerated from the React UI**
+  and now cover the differential view, timeline scrubbing, keyboard
+  shortcuts, flame graph search and zoom, export, and the in-app docs
+  drawer — twelve stills, up from seven captured before the rewrite. They
+  come from a Playwright harness (`frontend/docs-shots/`) that CI
+  smoke-runs on every pull request, so it cannot silently rot the way the
+  puppeteer scripts it replaces did.
 - Every runtime dependency gained an upper bound (`fastapi<1.0`,
   `uvicorn<1.0`, `orjson<4`, `zstandard<1.0`, `httpx<1.0`). Floors alone
   allowed a future major release to resolve into a fresh `uvx perflens`

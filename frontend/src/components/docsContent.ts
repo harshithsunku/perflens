@@ -1,5 +1,5 @@
 // Static documentation content (trusted, authored HTML — no user input).
-// Ported from the vanilla UI's docs drawer.
+// In-app documentation drawer content.
 
 export const DOCS_TABS: { id: string; label: string }[] = [
   { id: 'start', label: 'Getting Started' },
@@ -14,7 +14,7 @@ export const DOCS_HTML: Record<string, string> = {
 <section class="docs-section">
   <h3>Overview</h3>
   <p>PerfLens is a remote Linux performance profiler with a real-time web UI. Drop the agent on any Linux device (ARM or x86), point it at a PID, and watch flame graphs, function tables, <code>perf stat</code> metrics, and line-level annotated source update live in your browser.</p>
-  <p>No frontend frameworks at runtime, no Docker, no sudo. The server is a small Python package (fastapi, uvicorn, orjson, zstandard) that installs entirely user-space; the agent is a single static C binary with zero dependencies.</p>
+  <p>No Node, no Docker, no sudo to run it. The server is a small Python package (fastapi, uvicorn, orjson, zstandard) that installs entirely user-space and ships the web UI prebuilt; the agent is a single static C binary with zero dependencies.</p>
 </section>
 <section class="docs-section">
   <h3>Quick Start</h3>

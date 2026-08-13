@@ -15,6 +15,8 @@ views), accumulator totals never evict.
 import threading
 from collections import defaultdict
 
+from perflens.parser import MAX_FLAMEGRAPH_DEPTH
+
 
 class EventAccumulator:
     """Running function summary + flamegraph tree for one event type."""
@@ -167,14 +169,24 @@ class EventAccumulator:
         return self._snapshot
 
 
-def _copy_tree(root):
+def _copy_tree(root, max_depth=MAX_FLAMEGRAPH_DEPTH):
     """Copy the mutable flamegraph tree into the serializable shape
     (drop _cmap, promote _inlined/_module), iteratively — perf stacks plus
-    inline expansion can exceed Python's recursion limit."""
+    inline expansion can exceed Python's recursion limit.
+
+    Depth is capped for a second, independent reason: orjson cannot encode
+    past a fixed nesting depth, so an uncapped deep tree made /api/snapshot
+    return 500 and blanked the whole UI. See MAX_FLAMEGRAPH_DEPTH.
+    """
     out_root = {'name': root['name'], 'value': root['value'], 'children': []}
-    stack = [(root, out_root)]
+    stack = [(root, out_root, 0)]
     while stack:
-        src, dst = stack.pop()
+        src, dst, depth = stack.pop()
+        if not src['children']:
+            continue
+        if depth >= max_depth:
+            dst['truncated'] = True
+            continue
         for child in src['children']:
             out = {'name': child['name'], 'value': child['value'],
                    'children': []}
@@ -183,7 +195,7 @@ def _copy_tree(root):
             if child.get('_module'):
                 out['module'] = child['_module']
             dst['children'].append(out)
-            stack.append((child, out))
+            stack.append((child, out, depth + 1))
     return out_root
 
 

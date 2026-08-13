@@ -11,7 +11,8 @@ import sys
 
 import pytest
 
-from perflens.parser import (build_flamegraph_data, build_function_summary,
+from perflens.parser import (MAX_FLAMEGRAPH_DEPTH, build_flamegraph_data,
+                             build_function_summary,
                              filter_samples_by_event, get_event_types)
 from perflens.aggregator import AggregatorSet
 
@@ -111,3 +112,57 @@ def test_reset_clears_state():
     assert aggs.snapshot_per_event(None)
     aggs.reset()
     assert aggs.snapshot_per_event(None) == {}
+
+
+def _deep_sample(depth, event='cycles'):
+    """One sample whose stack is `depth` frames deep."""
+    return {
+        'event_type': event, 'event_count': 1, 'pid': 1, 'tid': 1,
+        'comm': 'deep',
+        'frames': [{'func': f'recurse_{i}', 'module': 'deep',
+                    'addr': hex(i), 'offset': ''}
+                   for i in range(depth)],
+    }
+
+
+@pytest.mark.parametrize('builder', ['aggregator', 'parser'])
+def test_deep_stacks_stay_serializable(builder):
+    """Regression: a deeply recursive workload made /api/snapshot 500.
+
+    orjson refuses to encode past a fixed nesting depth (254 containers).
+    A flamegraph level costs two of them — the node dict and its children
+    list — so a stack deeper than ~126 frames could not be serialized at
+    all, and the whole UI went blank instead of one deep stack rendering
+    short. Found by profiling a 25-thread local workload.
+    """
+    orjson = pytest.importorskip('orjson')
+    samples = [_deep_sample(400)]
+
+    if builder == 'aggregator':
+        aggs = AggregatorSet()
+        aggs.add_chunk(samples, None)
+        tree = aggs.snapshot_per_event(None)['cycles']['flamegraph']
+    else:
+        tree = build_flamegraph_data(samples)
+
+    # The actual failure: this raised TypeError('Recursion limit reached').
+    orjson.dumps(tree, option=orjson.OPT_NON_STR_KEYS)
+
+    depth, node = 0, tree
+    while node.get('children'):
+        node = node['children'][0]
+        depth += 1
+    assert depth <= MAX_FLAMEGRAPH_DEPTH
+    assert node.get('truncated') is True, 'the cut point must be marked'
+
+
+def test_shallow_stacks_are_not_marked_truncated():
+    """The cap must not touch stacks of ordinary depth."""
+    aggs = AggregatorSet()
+    aggs.add_chunk([_deep_sample(12)], None)
+    tree = aggs.snapshot_per_event(None)['cycles']['flamegraph']
+    stack = [tree]
+    while stack:
+        n = stack.pop()
+        assert 'truncated' not in n
+        stack.extend(n.get('children') or [])

@@ -56,8 +56,8 @@
             <p class="hero-lede">
                 Drop a tiny agent on any Linux box, point it at a PID, and watch flame
                 graphs, function tables, <code>perf stat</code> metrics, and line-level
-                annotated source update live &mdash; <strong>no frontend frameworks,
-                no Docker, no sudo.</strong>
+                annotated source update live &mdash; <strong>no Node, no Docker,
+                no sudo.</strong>
             </p>
             <div class="hero-actions">
                 <a class="btn btn-primary" href="#quickstart">Get started &rarr;</a>
@@ -83,7 +83,7 @@
             <img src="demo.gif" alt="Live demo: function table updating in real time, flame graph, then source view" loading="lazy" style="display: block; width: 100%;">
         </div>
         <p style="color: var(--text-tertiary); font-size: 13.5px; margin-top: 14px;">
-            Sample counts climb live as <code>perf record</code> rounds stream in. Flip to flame graph, click a function, land in source with line-level heat. Zero polling &mdash; Server-Sent Events.
+            Counts update as each <code>perf record</code> round streams in. Flip to flame graph, click a function, land in source with line-level heat. Zero polling &mdash; Server-Sent Events.
         </p>
     </div>
 </section>
@@ -166,9 +166,10 @@
         <span class="eyebrow">Tour</span>
         <h2>What you actually see.</h2>
         <p class="section-sub">
-            Every screenshot below is captured from the real UI &mdash; a live profile of a
-            multi-threaded test workload, sampled at 199 Hz, replayed straight from the
-            server.
+            Every screenshot below is captured from the real UI, by a Playwright harness
+            that CI re-runs on every change &mdash; a live 199 Hz profile of
+            <code>tests/matrixlab</code>, a 25-thread test workload, plus deterministic
+            shots replayed from the committed regression fixtures.
         </p>
         <div class="shots">
             <div class="shot">
@@ -211,6 +212,42 @@
                 <div class="shot-caption">
                     <strong>Light theme</strong>
                     Dark or light &mdash; one click. CSS custom properties, no rebuild.
+                </div>
+            </div>
+            <div class="shot">
+                <img src="screenshots/12-flamegraph-zoom.png" alt="Flame graph zoomed into a call path with a breadcrumb trail" loading="lazy">
+                <div class="shot-caption">
+                    <strong>Zoom by ancestry</strong>
+                    Click a frame to focus its call path; breadcrumbs walk back out.
+                </div>
+            </div>
+            <div class="shot">
+                <img src="screenshots/08-flamegraph-search.png" alt="Flame graph with matching frames highlighted and the rest dimmed" loading="lazy">
+                <div class="shot-caption">
+                    <strong>Search the stack</strong>
+                    Matching frames highlight, everything else dims, with a match count.
+                </div>
+            </div>
+            <div class="shot">
+                <img src="screenshots/10-export-menu.png" alt="Export menu offering SVG, collapsed stacks, and JSON" loading="lazy">
+                <div class="shot-caption">
+                    <strong>Export</strong>
+                    Standalone SVG, collapsed stacks for external tooling, or raw JSON.
+                </div>
+            </div>
+            <div class="shot">
+                <img src="screenshots/09-shortcuts.png" alt="Keyboard shortcut help overlay" loading="lazy">
+                <div class="shot-caption">
+                    <strong>Keyboard driven</strong>
+                    <code>1</code>&ndash;<code>5</code> for tabs, <code>/</code> to search,
+                    <code>t</code> for theme, <code>?</code> for this overlay.
+                </div>
+            </div>
+            <div class="shot">
+                <img src="screenshots/11-docs-drawer.png" alt="In-app documentation drawer" loading="lazy">
+                <div class="shot-caption">
+                    <strong>Docs in the app</strong>
+                    Setup, configuration, troubleshooting and architecture without leaving the tab.
                 </div>
             </div>
         </div>

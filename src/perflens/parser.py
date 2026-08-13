@@ -287,6 +287,36 @@ def build_function_summary(samples):
     return {'total_samples': total, 'functions': func_list}
 
 
+# orjson refuses to serialize past a fixed nesting depth (254 containers).
+# A flamegraph level costs two — the node dict and its children list — so
+# anything deeper than ~126 frames fails to encode at all. Deeply recursive
+# workloads really do produce such stacks, and the failure mode was a 500
+# from /api/snapshot, i.e. the entire UI going blank rather than one deep
+# stack rendering short. Cap with headroom and mark where we cut.
+MAX_FLAMEGRAPH_DEPTH = 100
+
+
+def truncate_flamegraph_depth(root, max_depth=MAX_FLAMEGRAPH_DEPTH):
+    """Drop nodes below max_depth, marking each cut node `truncated`.
+
+    Iterative: the trees this guards against are exactly the ones deep
+    enough to blow Python's own recursion limit.
+    """
+    stack = [(root, 0)]
+    while stack:
+        node, depth = stack.pop()
+        children = node.get('children')
+        if not children:
+            continue
+        if depth >= max_depth:
+            node['children'] = []
+            node['truncated'] = True
+            continue
+        for child in children:
+            stack.append((child, depth + 1))
+    return root
+
+
 def build_flamegraph_data(samples):
     """Build hierarchical data for flame graph from stack traces.
 
@@ -325,7 +355,7 @@ def build_flamegraph_data(samples):
             n['module'] = mod
         stack.extend(n['children'])
 
-    return root
+    return truncate_flamegraph_depth(root)
 
 
 def parse_perf_stat(text):

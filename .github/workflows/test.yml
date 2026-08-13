@@ -109,6 +109,25 @@ jobs:
       - name: Run browser E2E (Playwright)
         run: npm --prefix frontend run e2e
 
+      # The docs screenshot harness, exercised but not committed. Its
+      # predecessor was a pair of puppeteer scripts that kept reporting
+      # success while capturing the wrong page for two months after the
+      # React rewrite deleted every global they called. Nothing ran them.
+      # This does, on every PR, with no `perf` required — the replay
+      # project drives the whole UI from a committed fixture.
+      - name: Docs screenshot harness smoke
+        run: OUT_DIR="$RUNNER_TEMP/shots" npm --prefix frontend run shots
+
+      # The specs' own assertions catch a broken harness. This catches the
+      # subtler failure they can't: tests passing while the images come out
+      # blank. Threshold sits below the shot count so one small-but-valid
+      # image can't redden the build on its own.
+      - name: Assert the harness produced real images
+        run: |
+          n=$(find "$RUNNER_TEMP/shots" -name '*.png' -size +20k | wc -l)
+          echo "usable PNGs: $n"
+          [ "$n" -ge 8 ] || { echo "docs harness produced only $n usable PNGs"; exit 1; }
+
       - name: Upload Playwright traces on failure
         if: failure()
         uses: actions/upload-artifact@v5

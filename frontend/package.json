@@ -8,7 +8,9 @@
     "build": "tsc -b && vite build",
     "typegen": "openapi-typescript openapi.json -o src/api/types.gen.ts",
     "test": "vitest run",
-    "e2e": "playwright test"
+    "e2e": "playwright test --project=chromium",
+    "shots": "playwright test --project=docs-replay",
+    "shots:live": "playwright test --project=docs-live --project=docs-gif"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.101.2",

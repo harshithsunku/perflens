@@ -170,9 +170,11 @@ perflens/
 │   ├── src/lib/flamegraph/       # pure layout/zoom/diff/color modules
 │   ├── src/components/, src/views/
 │   ├── e2e/                      # Playwright browser E2E (self-contained)
+│   ├── docs-shots/               # Playwright docs screenshot harness (CI-smoked)
 │   └── openapi.json              # committed schema (CI drift-checked)
 ├── tools/export_openapi.py       # dump OpenAPI schema for TS typegen
 ├── tools/check_version.py        # assert every version location agrees
+├── tools/live-capture.sh         # local live profiling session for docs shots
 ├── docs/
 │   ├── hero.svg
 │   ├── architecture.svg
