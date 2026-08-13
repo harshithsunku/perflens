@@ -65,6 +65,13 @@ Ctx = Depends(get_ctx)
 # Standard OpenAPI error annotation for routes with failure modes
 _ERR = {'model': models.ErrorResponse}
 
+# Python 3.13 renamed 413's reason phrase ("Request Entity Too Large" ->
+# "Content Too Large"), and FastAPI falls back to that phrase when a
+# response carries no description — which would make the exported schema
+# depend on the interpreter version. Pin it.
+_ERR_TOO_LARGE = {'model': models.ErrorResponse,
+                  'description': 'Content Too Large'}
+
 
 # ---------------------------------------------------------------------------
 # SSE hub — bridges worker threads into asyncio client queues
@@ -371,7 +378,7 @@ def api_live_export(format: str = 'collapsed', event: str = 'cycles',
 
 
 @router.post('/api/sessions/import', response_model=models.ImportResponse,
-             responses={400: _ERR, 413: _ERR, 500: _ERR})
+             responses={400: _ERR, 413: _ERR_TOO_LARGE, 500: _ERR})
 async def api_sessions_import(request: Request, ctx=Ctx):
     """Import an uploaded perf.data file as a saved session."""
     try:
@@ -897,10 +904,13 @@ def create_app(ctx):
     if ui_dir and os.path.isfile(os.path.join(ui_dir, 'index.html')):
         app.mount('/', StaticFiles(directory=ui_dir, html=True), name='ui')
     else:
-        # Source checkout without built frontend assets — keep the API
-        # usable and say what's missing instead of 404ing everything.
-        @app.get('/{path:path}')
-        def ui_missing(path: str):
+        # Source checkout without built frontend assets — say what's
+        # missing at /, and let every other path 404 exactly as the static
+        # mount would (the SPA deep-links via URL hash, not paths). Out of
+        # the schema: a dev-only placeholder isn't API surface, and hiding
+        # it keeps the export identical to the assets-present build.
+        @app.get('/', include_in_schema=False)
+        def ui_missing():
             return HTMLResponse(_UI_MISSING_PAGE, status_code=503)
 
     return app

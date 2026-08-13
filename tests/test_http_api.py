@@ -20,19 +20,28 @@ FIXTURE = fixture_session_names()[0]
 
 @pytest.fixture()
 def core(tmp_path, perflens_home):
-    """Build a fresh AppContext (no workers, no source mapper)."""
-    from importlib.resources import files as pkg_files
+    """Build a fresh AppContext (no workers, no source mapper).
+
+    ui_dir is a stand-in for the built frontend, so the suite always
+    exercises the shipped configuration (static assets mounted) whether
+    or not this machine has run `npm --prefix frontend run build`. The
+    two tests that care about the real assets, or about their absence,
+    build their own app.
+    """
     from perflens.app import AppContext
     from perflens.config import ServerConfig
     from perflens.state import MetricsState, ProfilingState
 
     sessions_dir = str(tmp_path / 'sessions')
     os.makedirs(sessions_dir)
+    ui_dir = tmp_path / 'ui'
+    ui_dir.mkdir()
+    (ui_dir / 'index.html').write_text('<!DOCTYPE html><title>stub</title>')
     cfg = ServerConfig(
         source_dir=str(tmp_path),
         sessions_dir=sessions_dir,
         browse_root=str(tmp_path),
-        ui_dir=os.fspath(pkg_files('perflens') / 'ui'),
+        ui_dir=str(ui_dir),
     )
     yield AppContext(config=cfg,
                      state=ProfilingState(max_samples=100000),
@@ -80,21 +89,27 @@ def _ui_built():
 
 @pytest.mark.skipif(not _ui_built(),
                     reason='frontend not built (npm --prefix frontend run build)')
-def test_static_ui_served(client):
-    r = client.get('/')
-    assert r.status_code == 200
-    assert '<title>PerfLens</title>' in r.text
-    # Vite emits hashed bundles under /assets/ — find them via the index
-    import re
-    js = re.search(r'src="(/assets/[^"]+\.js)"', r.text)
-    css = re.search(r'href="(/assets/[^"]+\.css)"', r.text)
-    assert js, 'index.html references no JS bundle'
-    assert css, 'index.html references no CSS bundle'
-    assert client.get(js.group(1)).status_code == 200
-    assert client.get(css.group(1)).headers['content-type'].startswith('text/css')
+def test_static_ui_served(core):
+    """The real Vite output, when built, is served from ui_dir."""
+    from importlib.resources import files as pkg_files
+    from perflens import web
+    core.config.ui_dir = os.fspath(pkg_files('perflens') / 'ui')
+    with TestClient(web.create_app(core)) as client:
+        r = client.get('/')
+        assert r.status_code == 200
+        assert '<title>PerfLens</title>' in r.text
+        # Vite emits hashed bundles under /assets/ — find them via the index
+        import re
+        js = re.search(r'src="(/assets/[^"]+\.js)"', r.text)
+        css = re.search(r'href="(/assets/[^"]+\.css)"', r.text)
+        assert js, 'index.html references no JS bundle'
+        assert css, 'index.html references no CSS bundle'
+        assert client.get(js.group(1)).status_code == 200
+        assert client.get(css.group(1)).headers['content-type'].startswith(
+            'text/css')
 
 
-def test_ui_missing_fallback(client, core, tmp_path):
+def test_ui_missing_fallback(core, tmp_path):
     """A source checkout without built frontend assets serves a friendly
     503 page instead of 404ing, and the API stays functional."""
     from perflens import web
@@ -104,6 +119,12 @@ def test_ui_missing_fallback(client, core, tmp_path):
         assert r.status_code == 503
         assert 'UI not built' in r.text
         assert c.get('/api/status').status_code == 200
+        # The placeholder page covers / only — everything else 404s just
+        # like the static mount does, traversal probes included.
+        for probe in ('/../etc/passwd', '/%2e%2e/%2e%2e/etc/passwd',
+                      '/..%2f..%2fetc%2fpasswd', '/api/sessions/..%2Foutside',
+                      '/assets/app.js', '/api/nope'):
+            assert c.get(probe).status_code == 404, probe
 
 
 def test_snapshot_empty_and_404(client):
