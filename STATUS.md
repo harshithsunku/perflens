@@ -4,18 +4,31 @@ Cross-session working state. Update at the start and end of every working
 session. Release history lives in [CHANGELOG.md](CHANGELOG.md); this file
 is what is *currently true* and what is *left to do*.
 
-## Current phase — stabilization (feature freeze)
+## Current phase — 0.8.0 released; next line of work is 0.9.0
 
-**The feature set is frozen as of 2026-08-13.** The MCP server was the last
-capability added; from here the work is stabilization, verification and
-documentation, not new surface.
+**The feature freeze that governed 0.8.0 is discharged.** It was declared on
+2026-08-13 with the MCP server as the last capability added, and held until
+the stabilization checklist cleared. 0.9.0 is the next line of work and is
+not bound by it — decide its scope deliberately rather than inheriting the
+freeze by default.
 
-**Working branch: `stabilize-0.8.0` ([PR #1](https://github.com/harshithsunku/perflens/pull/1)) —
-all five phases landed, nothing merged.** The branch deliberately stays open
-until it has been *manually* exercised; see [Before merging](#before-merging)
-below. Merging and tagging are owner decisions, not part of the automated
-work, because the tag publishes to PyPI with `skip-existing: true` and that
-version can then only be yanked, never replaced.
+**0.8.0 is released.** `stabilize-0.8.0` fast-forwarded onto master
+([PR #1](https://github.com/harshithsunku/perflens/pull/1), merged
+2026-08-13), tagged `v0.8.0`, published to PyPI and to a GitHub Release with
+16 assets. Verified end to end: `pip install perflens==0.8.0` into a clean
+3.12 interpreter serves the UI from inside the wheel and reports 0.8.0 in
+`/api/openapi.json`.
+
+Fast-forward rather than squash on purpose — the phase table below references
+commits by hash, and squashing would have orphaned every one of them while
+also collapsing seven self-contained messages into one.
+
+The merge was used as the release dress rehearsal, which is worth repeating
+next time: pushing to master runs the whole of `build.yml` (wheel, five agent
+architectures, binutils bundles, wheel smoke-run) with `publish to PyPI` and
+`release` **skipped**, because both are guarded on `refs/tags/v*`. Those two
+jobs showed `skipped` on the master run and `success` on the tag run, so the
+guard is confirmed by observation rather than by reading the YAML.
 
 Phases, in the order they landed (each one its own commit, with STATUS.md
 updated in the same commit so this file is never behind the code):
@@ -32,32 +45,23 @@ The version bump sits *before* the docs assets on purpose: the docs drawer
 renders the version and is one of the screenshots, so shooting at 0.7.0
 would have committed a PNG advertising a version we do not ship.
 
-- **Published:** 0.7.0 (PyPI, tag `v0.7.0`).
-- **Version: 0.8.0 on the branch, not yet tagged.** Bumped in Phase 3, ahead
-  of the docs assets on purpose — the docs drawer renders the version and is
-  one of the screenshots, so shooting at 0.7.0 would have baked a stale
-  number into a committed PNG. `tools/check_version.py` enforces agreement
-  across all seven locations; run it instead of hand-checking.
-  `CHANGELOG.md` has its `## [0.8.0]` heading, which the release workflow
-  awk-extracts for the GitHub Release body.
-- **Unreleased since `v0.7.0`** — everything below ships in 0.8.0. On master
-  already: `cfbe5c8` server split into `AppContext` modules + typed Pydantic
-  API · `bc6e6c5` React 19 + TypeScript + Vite frontend, Playwright E2E ·
-  `eb7664a` **API v2** (REST surface renamed, `{"error": {code, message}}`
-  envelope, SSE consolidated) · `f847309` UX polish · `598e90b` CI fix ·
-  `4a966c7` **MCP server** + `skills/perflens-profiling/`. Then the five
-  stabilization commits in the table above, which are on the branch only.
-- **CI is green** on the branch and on master (pytest 3.10–3.13, frontend
+- **Published:** 0.8.0 (PyPI, tag `v0.8.0`, 2026-08-13). Previous: 0.7.0.
+- **Version:** all seven locations agree on 0.8.0, enforced by
+  `tools/check_version.py` in CI. Nothing is unreleased on master.
+- **0.8.0 contents:** the post-0.7.0 backlog (`cfbe5c8` AppContext split ·
+  `bc6e6c5` React 19 frontend · `eb7664a` API v2 · `f847309` UX polish ·
+  `598e90b` CI fix · `4a966c7` MCP server) plus the five stabilization
+  commits in the table above. Full detail in [CHANGELOG.md](CHANGELOG.md).
+- **CI is green** on master and on the tag (pytest 3.10–3.13, frontend
   vitest + Playwright + OpenAPI drift + docs-shots smoke, wheel + five agent
-  architectures). Current counts: **152 pytest, 24 vitest, 10 Playwright,
-  10 docs shots.**
+  architectures + two tools bundles). Current counts: **152 pytest,
+  24 vitest, 10 Playwright, 10 docs shots.**
 
 ### Start-here for the next session
 
 ```bash
 uv venv .venv && uv pip install -p .venv/bin/python -e '.[dev]'
 make -C agent-c                              # protocol tests need the real binary
-git switch stabilize-0.8.0                   # the work is here, not on master
 .venv/bin/python -m pytest tests/            # 152 tests
 .venv/bin/python tools/check_version.py      # all version locations agree
 .venv/bin/ruff check src/ tests/ tools/
@@ -81,13 +85,19 @@ Two things that bite if forgotten:
   runs in — worth reproducing locally (move the directory aside) before
   trusting a green local suite.
 
-## Before merging
+## Carried into 0.9.0 — shipped but not hand-validated
 
-The automated suites are green, but they cover what someone thought to
-assert. Everything in this release that *broke* was found by running a real
-profile and looking at the result — the deep-stack 500, four identical
-screenshots, an empty flame graph, an MCP tool giving false advice. So the
-branch stays open until it has been driven by hand.
+**Read this first when picking up 0.9.0.** 0.8.0 was released on green
+automated suites and a scripted verification pass. It was *not* driven by
+hand on real hardware first — that was a deliberate call to ship a coherent
+release rather than hold a half-finished branch, with the validation moving
+to 0.9.0.
+
+That matters because the automated suites cover what someone thought to
+assert, and **every defect this release fixed was found by running something
+and looking at the result, not by an assertion** — the deep-stack 500, four
+identical screenshots, an empty flame graph, an MCP tool giving false advice.
+Assume the same is true of what is still hiding.
 
 A local session needs no remote device — `tools/live-capture.sh` starts the
 workload, server and agent against `127.0.0.1` and waits for a sample floor:
@@ -128,9 +138,10 @@ touched it:
       Phase 5 clean-room check (clean interpreter, but no Docker here, so
       independence from system binutils is unproven).
 
-If any of this turns up a problem, fix it on this branch and add a line to
-the session log — the branch is the unit of work, and merging is the last
-step, not the next one.
+Anything this turns up is a 0.9.0 fix (or a 0.8.1 if it is severe enough to
+warrant one). Since 0.8.0 is on PyPI, a bad enough finding can be yanked but
+never replaced at the same version — so triage severity before deciding
+whether it waits for 0.9.0.
 
 ## Stabilization checklist
 
@@ -355,11 +366,10 @@ Explicit decisions, recorded so a later session doesn't re-litigate them.
   old blobs are still in history. "We cleaned the IPs" is not the same as
   "the IPs are gone".
 
-### Release checklist for 0.8.0
+### Release checklist (0.8.0 done — this is the recipe for 0.9.0)
 
-Steps 1–4 are **already done on the branch**; they are kept here because
-they are the recipe for every future release, and because step 5 has to be
-verifiable against them. Steps 5–6 are deliberately not done.
+All six steps ran for 0.8.0. Kept as the recipe for every future release —
+the order matters in two places, flagged inline.
 
 1. ✅ Bump **four** places — `VERSION`, `pyproject.toml`,
    `src/perflens/__init__.py`, `frontend/package.json` (+ the two `version`
@@ -379,8 +389,8 @@ verifiable against them. Steps 5–6 are deliberately not done.
        CHANGELOG.md | head
    ```
    Currently extracts 125 lines across Removed / Added / Fixed / Changed.
-5. ⬜ **Merge the PR** — only after [Before merging](#before-merging) has
-   actually been worked through by hand.
+5. ✅ **Merge the PR.** Fast-forward, not squash — STATUS references
+   phase commits by hash and squashing orphans them.
 
    **Merging does not publish the package.** `build.yml` runs on a push to
    master, but `publish-pypi` and `release` are both guarded by
@@ -402,7 +412,7 @@ verifiable against them. Steps 5–6 are deliberately not done.
    0.7.0, which predates API v2. That gap already exists on master (`6240168`
    brought the site to API v2 before the freeze); tagging is what closes it,
    so a long delay between merge and tag widens a mismatch users can see.
-6. ⬜ **Tag `v0.8.0`** — drives the GitHub Release and the PyPI publish via
+6. ✅ **Tag `v0.8.0`** — drives the GitHub Release and the PyPI publish via
    Trusted Publishing. **This is the irreversible step:** the publish uses
    `skip-existing: true`, so a botched 0.8.0 can be yanked but never
    replaced. One residual risk with no safe pre-flight:
@@ -477,8 +487,18 @@ Condensed; anything older is in the CHANGELOG and git history.
   was brought to API v2. Worth remembering: docs staleness clusters around
   *renames* — the API v2 commit renamed every endpoint, and four files
   kept the old names for weeks because nothing tests prose.
+- **2026-08-13** — **0.8.0 released.** `stabilize-0.8.0` fast-forwarded onto
+  master, tagged, published to PyPI with 16 GitHub Release assets, verified
+  by installing from PyPI into a clean interpreter. Two process notes worth
+  reusing: the merge is a free release rehearsal, because `build.yml` runs in
+  full on a master push while the two publish jobs skip on their
+  `refs/tags/v*` guard — observed as `skipped` on the master run and
+  `success` on the tag run; and fast-forward beat squash here because this
+  file cites phase commits by hash. The one thing knowingly traded away:
+  hands-on validation on real hardware moved to 0.9.0 rather than gating the
+  release — see [Carried into 0.9.0](#carried-into-090--shipped-but-not-hand-validated).
 - **2026-08-13** — All five stabilization phases complete on
-  `stabilize-0.8.0`; branch left open by design. The merge and the tag are
+  `stabilize-0.8.0`; branch left open by design at the time. The merge and the tag are
   owner decisions taken after hands-on validation, not the tail end of the
   automated work — the PyPI publish cannot be undone, and every defect this
   release actually fixed was found by *running* something rather than by an
