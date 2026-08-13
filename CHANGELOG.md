@@ -95,6 +95,13 @@ are unaffected.
   `truncated`, so one very deep stack renders short instead of taking the
   whole view down. Found by profiling a 25-thread local workload; the
   committed test fixtures are too shallow to reach it.
+- **`perflens_status` (MCP) claimed source annotation was unavailable when
+  it wasn't.** It keyed the warning on `symbols_loaded`, which only counts
+  the eager pre-index pass that runs when a binary is configured at runtime
+  — so a server started with `--binary` reported zero while resolving
+  symbols lazily and serving line-level annotation fine. The tool now also
+  reports the source-index size and warns only when nothing is resolvable,
+  so an agent is no longer told to skip a working feature.
 - **The docs drawer displayed a version the build was not.** It carried a
   hand-typed `v0.8.0` string inside a package that shipped as 0.7.0, wired
   to nothing and absent from the release checklist. It is now injected from

@@ -218,16 +218,54 @@ Ordered roughly by user impact.
       `httpx` directly (7 call sites, 5 of them exception handlers), so both
       libraries are installed side by side and the `httpx` bound is what
       keeps that working. No code change made.
-- [ ] **Phase 5 — clean-container `uvx` run** of the built wheel: no Node, no
-      binutils, no repo — confirms the shipped artifact stands alone.
-- [ ] **Phase 5 — MCP against a live local session.** The tools have 28 tests
-      against fixture sessions and were driven end to end over stdio against
-      a live server. The gap that matters is the two tool families the
-      fixtures *structurally* cannot cover: per-thread views (both fixtures
-      are single-threaded) and source annotation (no locally-resolvable
-      binary). A `tests/matrixlab` capture covers both. Optional extra: an
-      evaluation set (10 Q/A against the committed fixtures, per the
-      mcp-builder format) to catch regressions in tool usefulness.
+- [x] **Phase 5 — the shipped wheel stands alone** (2026-08-13). Built
+      `perflens-0.8.0-py3-none-any.whl`, installed it into a fresh 3.12
+      interpreter in an otherwise **empty directory** — no repo, no Node, no
+      `node_modules` — and served from there: `/api/status` ok, the UI came
+      out of the wheel (`<title>PerfLens</title>`), `/api/openapi.json`
+      reported 0.8.0, hashed assets 200, and an unmatched path 404'd rather
+      than 503'd (the regression `598e90b` fixed still holds). The clean env
+      resolved fastapi 0.141 / starlette 1.6 — newer than the dev venv and
+      inside the new upper bounds, so the caps were exercised, not just
+      declared.
+      **Caveat, stated plainly:** this box has no Docker, so it is a clean
+      *interpreter*, not a clean *container*. It does not prove independence
+      from system binutils (`addr2line`/`readelf`), which the server probes
+      at startup and degrades gracefully without. A container run is still
+      worth doing somewhere that has one.
+- [x] **Phase 5 — MCP driven against a live local session** (2026-08-13).
+      All 19 tools registered; 9 driven end to end over a real MCP client
+      session against a live 25-thread `matrixlab` capture — including the
+      two families the fixtures *structurally* cannot cover: per-thread
+      views (`perflens_threads` returned 25 named threads,
+      `perflens_thread_detail` drilled into one) and source annotation
+      (`perflens_source_hotlines` returned real line-level heat, `>> 65.7%`
+      on the hot line). Both are dark to the committed fixtures, which are
+      single-threaded with no locally resolvable binary.
+      One defect found and fixed: `perflens_status` reported
+      *"No symbols loaded: line-level source annotation needs `--binary`"*
+      on a server where source annotation demonstrably worked, which would
+      steer an agent away from a working feature. Root cause is server-side
+      — `symbols_loaded`/`source_files_found` only count the eager
+      `pre_index()` pass, which runs when a binary is configured *at
+      runtime*; passing `--binary` at startup leaves them 0 while resolution
+      happens lazily. Fixed in the MCP layer (report `source_index_files`
+      too, warn only when nothing is resolvable) rather than by changing
+      startup behaviour late in a stabilization release. **The underlying
+      counters are still wrong** — see below.
+- [ ] **`/api/index/status` undercounts when `--binary` is passed at
+      startup.** `symbols_loaded` and `source_files_found` stay 0 while
+      `source_index_files` is populated and annotation works, because only
+      `pre_index()` sets them (`source_mapper.py:850-875`) and it runs on the
+      runtime-configure path. Reproduce: `perflens serve --binary X
+      --source-dir Y`, then `curl /api/index/status`. Cosmetic for the UI,
+      but it is what made the MCP status tool lie. Fixing means either
+      pre-indexing at startup (changes startup cost) or reporting real cache
+      state; both are behaviour changes that wanted more room than the end
+      of this release had.
+      Optional extra, still open: an MCP evaluation set (10 Q/A against the
+      committed fixtures, per the mcp-builder format) to catch regressions
+      in tool usefulness rather than tool correctness.
 
 ### Deferred past 0.8.0
 
@@ -335,6 +373,15 @@ Condensed; anything older is in the CHANGELOG and git history.
   was brought to API v2. Worth remembering: docs staleness clusters around
   *renames* — the API v2 commit renamed every endpoint, and four files
   kept the old names for weeks because nothing tests prose.
+- **2026-08-13** — Phase 5: verification. The wheel was proven to stand
+  alone from an empty directory, and the MCP tools were driven against a
+  live 25-thread capture — which is the only way the per-thread and
+  source-annotation tools get exercised at all, since the fixtures are
+  single-threaded with no resolvable binary. That run also caught
+  `perflens_status` telling an agent source annotation was unavailable on a
+  server where it worked. Recurring theme across Phases 4 and 5, worth
+  keeping: **the committed fixtures are a shallow, single-threaded, 12k-sample
+  profile, and a whole class of defect only appears under a real one.**
 - **2026-08-13** — Phase 4: docs assets regenerated on a new Playwright
   harness, and a real bug fell out of it. Standing up a live 25-thread
   `matrixlab` capture made `/api/snapshot` return **500**: orjson cannot

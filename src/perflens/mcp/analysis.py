@@ -50,6 +50,14 @@ def register(mcp, client):
             'source_mapping': {
                 'symbols_loaded': index.get('symbols_loaded', 0),
                 'source_files_found': index.get('source_files_found', 0),
+                # symbols_loaded/source_files_found only count the eager
+                # pre-index pass, which runs when a binary is configured at
+                # runtime -- not when one is passed as --binary at startup.
+                # In that case they stay 0 while resolution works lazily, so
+                # they cannot be used alone to decide whether source
+                # annotation is available.
+                'source_index_files': index.get('source_index_files', 0),
+                'source_index_ready': bool(index.get('source_index_ready')),
                 'indexing': bool(index.get('indexing')),
             },
         }
@@ -67,13 +75,19 @@ def register(mcp, client):
             f"{', '.join(events) if events else '(none yet)'}",
             f"- Saved sessions: {data['saved_sessions']}",
             f"- Source mapping: {data['source_mapping']['symbols_loaded']:,} symbols, "
-            f"{data['source_mapping']['source_files_found']:,} source files",
+            f"{data['source_mapping']['source_files_found']:,} source files, "
+            f"{data['source_mapping']['source_index_files']:,} files in the "
+            f"source index",
         ]
         if not data['live_samples'] and data['saved_sessions']:
             lines.append('')
             lines.append('_No live data — analyse a saved session by passing '
                          'its id as `source`._')
-        if not data['source_mapping']['symbols_loaded']:
+        # Only claim source annotation is unavailable when nothing at all is
+        # resolvable. Warning on symbols_loaded alone told an agent to skip
+        # `perflens_source_hotlines` on servers where it works fine.
+        if (not data['source_mapping']['symbols_loaded']
+                and not data['source_mapping']['source_index_files']):
             lines.append('')
             lines.append('_No symbols loaded: line-level source annotation '
                          'needs the server started with `--binary` pointing at '
