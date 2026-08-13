@@ -10,12 +10,27 @@ is what is *currently true* and what is *left to do*.
 capability added; from here the work is stabilization, verification and
 documentation, not new surface.
 
-**Working branch: `stabilize-0.8.0`.** The work is phased, and STATUS.md is
-updated in the same commit as each phase, so a fresh session can resume from
-the checklist alone. Phase order and rationale live in the plan; the short
-version is: hygiene → CI/deps → version bump → docs assets → verification →
-tag. The version bump sits *before* the docs assets on purpose — the docs
-drawer renders the version, and it is one of the screenshots.
+**Working branch: `stabilize-0.8.0` ([PR #1](https://github.com/harshithsunku/perflens/pull/1)) —
+all five phases landed, nothing merged.** The branch deliberately stays open
+until it has been *manually* exercised; see [Before merging](#before-merging)
+below. Merging and tagging are owner decisions, not part of the automated
+work, because the tag publishes to PyPI with `skip-existing: true` and that
+version can then only be yanked, never replaced.
+
+Phases, in the order they landed (each one its own commit, with STATUS.md
+updated in the same commit so this file is never behind the code):
+
+| | Phase | Commit |
+|---|---|---|
+| 1 | Hygiene — fixture IPs, compat shims, version drift, metadata merge | `820b8ae` |
+| 2 | CI actions off Node 20, three CI gates, dependency bounds | `828c4e5` |
+| 3 | Version bump to 0.8.0 + CHANGELOG entry | `799261e` |
+| 4 | Docs screenshots/GIF on a new Playwright harness (+ a 500 it exposed) | `2a67d0f` |
+| 5 | Verification — clean-room wheel, MCP on live data | `a49bae5` |
+
+The version bump sits *before* the docs assets on purpose: the docs drawer
+renders the version and is one of the screenshots, so shooting at 0.7.0
+would have committed a PNG advertising a version we do not ship.
 
 - **Published:** 0.7.0 (PyPI, tag `v0.7.0`).
 - **Version: 0.8.0 on the branch, not yet tagged.** Bumped in Phase 3, ahead
@@ -25,25 +40,25 @@ drawer renders the version, and it is one of the screenshots.
   across all seven locations; run it instead of hand-checking.
   `CHANGELOG.md` has its `## [0.8.0]` heading, which the release workflow
   awk-extracts for the GitHub Release body.
-- **Unreleased on master** — a large body of work sits between the `v0.7.0`
-  tag and HEAD:
-  - `cfbe5c8` server split into `AppContext` modules + typed Pydantic API
-  - `bc6e6c5` React 19 + TypeScript + Vite frontend, Playwright E2E
-  - `eb7664a` **API v2** — REST surface renamed, `{"error": {code, message}}`
-    envelope, SSE consolidated
-  - `f847309` UX polish (keyboard shortcuts, skeletons, diff legend, a11y)
-  - `598e90b` CI fix (no-UI fallback 404s like the static mount; 413 phrase
-    pinned against the Python 3.13 rename)
-  - `4a966c7` **MCP server** (`perflens mcp`) + `skills/perflens-profiling/`
-- **CI is green** on all workflows (pytest 3.10–3.13, frontend vitest +
-  Playwright + OpenAPI drift, wheel + five agent architectures).
+- **Unreleased since `v0.7.0`** — everything below ships in 0.8.0. On master
+  already: `cfbe5c8` server split into `AppContext` modules + typed Pydantic
+  API · `bc6e6c5` React 19 + TypeScript + Vite frontend, Playwright E2E ·
+  `eb7664a` **API v2** (REST surface renamed, `{"error": {code, message}}`
+  envelope, SSE consolidated) · `f847309` UX polish · `598e90b` CI fix ·
+  `4a966c7` **MCP server** + `skills/perflens-profiling/`. Then the five
+  stabilization commits in the table above, which are on the branch only.
+- **CI is green** on the branch and on master (pytest 3.10–3.13, frontend
+  vitest + Playwright + OpenAPI drift + docs-shots smoke, wheel + five agent
+  architectures). Current counts: **152 pytest, 24 vitest, 10 Playwright,
+  10 docs shots.**
 
 ### Start-here for the next session
 
 ```bash
 uv venv .venv && uv pip install -p .venv/bin/python -e '.[dev]'
 make -C agent-c                              # protocol tests need the real binary
-.venv/bin/python -m pytest tests/            # 149 tests
+git switch stabilize-0.8.0                   # the work is here, not on master
+.venv/bin/python -m pytest tests/            # 152 tests
 .venv/bin/python tools/check_version.py      # all version locations agree
 .venv/bin/ruff check src/ tests/ tools/
 npm --prefix frontend ci
@@ -53,8 +68,8 @@ npm --prefix frontend run e2e                # Playwright, self-contained
 ```
 
 Note the `dev` extra is what pulls in `mcp` — without it the 28 MCP tests
-**skip silently** and the suite reports 121 passed / 1 skipped instead of
-149. Easy to read past when you're expecting green.
+**skip silently** and the suite reports 124 passed / 1 skipped instead of
+152. Easy to read past when you're expecting green.
 
 Two things that bite if forgotten:
 
@@ -65,6 +80,57 @@ Two things that bite if forgotten:
   `npm run build` has no `src/perflens/ui/`, which is the configuration CI
   runs in — worth reproducing locally (move the directory aside) before
   trusting a green local suite.
+
+## Before merging
+
+The automated suites are green, but they cover what someone thought to
+assert. Everything in this release that *broke* was found by running a real
+profile and looking at the result — the deep-stack 500, four identical
+screenshots, an empty flame graph, an MCP tool giving false advice. So the
+branch stays open until it has been driven by hand.
+
+A local session needs no remote device — `tools/live-capture.sh` starts the
+workload, server and agent against `127.0.0.1` and waits for a sample floor:
+
+```bash
+tools/live-capture.sh            # server on :8089, matrixlab, 25 threads
+# then open http://127.0.0.1:8089
+```
+
+Worth exercising specifically, roughly in order of how much of the release
+touched it:
+
+- [ ] **The whole live loop on a real device**, not just loopback: agent
+      connects, capability probe, continuous collection, pause / resume /
+      stop, process switching, live settings changes. Nothing in this
+      release touched the agent or the wire protocol, but nothing here
+      re-verified them on hardware either.
+- [ ] **Deep recursion**, since that is what the `/api/snapshot` fix
+      addresses. Profile something with stacks well past ~126 frames and
+      confirm the flame graph renders truncated rather than the view going
+      blank. `MAX_FLAMEGRAPH_DEPTH` is the knob.
+- [ ] **Source annotation against your own build** — the fix path depends on
+      `--binary` pointing at an unstripped `-g` binary and on `--source-dir`
+      / `--path-map` resolving. Cross-compiled targets exercise
+      `--toolchain-prefix` and `--sysroot`, which nothing here covered.
+- [ ] **Session save → replay → diff**, including setting a baseline across
+      two separate captures. Replay diffing a session against itself is all
+      zeros by construction, so the differential view is only meaningfully
+      testable with two real runs.
+- [ ] **The MCP tools from an actual agent**, not the scripted driver used
+      in Phase 5. The interesting question is whether the responses are
+      *useful* for answering "why is this slow", which no assertion covers.
+- [ ] **The docs site as rendered**, not just as diffs: `docs/index.html`
+      hero, the 12 tour cards, the GIF. Check the screenshots still describe
+      what their captions claim after any UI change you make.
+- [ ] **`uvx perflens` from the built wheel on a machine that is not this
+      one** — ideally in a container, which would close the caveat on the
+      Phase 5 clean-room check (clean interpreter, but no Docker here, so
+      independence from system binutils is unproven).
+
+If any of this turns up a problem, fix it on this branch and add a line to
+the session log — the branch is the unit of work, and merging is the last
+step, not the next one.
 
 ## Stabilization checklist
 
@@ -289,25 +355,42 @@ Explicit decisions, recorded so a later session doesn't re-litigate them.
   old blobs are still in history. "We cleaned the IPs" is not the same as
   "the IPs are gone".
 
-### Release checklist for 0.8.0 (when the above is clear)
+### Release checklist for 0.8.0
 
-1. Bump **four** places — `VERSION`, `pyproject.toml`,
+Steps 1–4 are **already done on the branch**; they are kept here because
+they are the recipe for every future release, and because step 5 has to be
+verifiable against them. Steps 5–6 are deliberately not done.
+
+1. ✅ Bump **four** places — `VERSION`, `pyproject.toml`,
    `src/perflens/__init__.py`, `frontend/package.json` (+ the two `version`
    keys in `package-lock.json`). Don't check by hand: `python
-   tools/check_version.py` asserts all of them plus the generated schema.
-2. `python tools/export_openapi.py && npm --prefix frontend run typegen`,
+   tools/check_version.py` asserts all of them plus the generated schema,
+   and CI runs it.
+2. ✅ `python tools/export_openapi.py && npm --prefix frontend run typegen`,
    then confirm `git diff` shows only the version line.
-3. `make -C agent-c clean && make -C agent-c` (version is compiled in) —
+3. ✅ `make -C agent-c clean && make -C agent-c` (version is compiled in) —
    **before** pytest, or `test_agent_protocol.py::test_hello` fails against
    a stale binary.
-4. Write the CHANGELOG entry from the unreleased commits, under a literal
-   `## [0.8.0]` heading — `build.yml` awk-extracts that exact form for the
-   release body and produces **empty notes silently** if it doesn't match.
-   Include a `### Removed` entry for `perflens.server`.
-5. Tag `v0.8.0` — the tag drives the GitHub Release and the PyPI publish
-   via Trusted Publishing. PyPI publish uses `skip-existing: true`, so a
-   botched version can only be yanked, never replaced. Run the
-   clean-container wheel check *before* tagging.
+4. ✅ CHANGELOG entry under a literal `## [0.8.0]` heading — `build.yml`
+   awk-extracts that exact form for the release body and produces **empty
+   notes silently** if it doesn't match. Verify with:
+   ```bash
+   awk -v v=0.8.0 '$0 ~ "^## \\[" v "\\]" {c=1;next} c&&/^## \[/{exit} c' \
+       CHANGELOG.md | head
+   ```
+   Currently extracts 125 lines across Removed / Added / Fixed / Changed.
+5. ⬜ **Merge the PR** — only after [Before merging](#before-merging) has
+   actually been worked through by hand.
+6. ⬜ **Tag `v0.8.0`** — drives the GitHub Release and the PyPI publish via
+   Trusted Publishing. **This is the irreversible step:** the publish uses
+   `skip-existing: true`, so a botched 0.8.0 can be yanked but never
+   replaced. One residual risk with no safe pre-flight:
+   `download-artifact@v5` at `build.yml:124,316` sits in tag-gated jobs, so
+   the tag is the first thing to exercise the v5 download path. An `rc` tag
+   would not help — `VERSION` already reads 0.8.0, so it would publish the
+   real thing. If it fails, the failure mode is a red `release` job on an
+   already-published PyPI version: fix the workflow and re-run the job,
+   don't re-tag.
 
 ## Known limitations (current, by design or accepted)
 
@@ -373,6 +456,13 @@ Condensed; anything older is in the CHANGELOG and git history.
   was brought to API v2. Worth remembering: docs staleness clusters around
   *renames* — the API v2 commit renamed every endpoint, and four files
   kept the old names for weeks because nothing tests prose.
+- **2026-08-13** — All five stabilization phases complete on
+  `stabilize-0.8.0`; branch left open by design. The merge and the tag are
+  owner decisions taken after hands-on validation, not the tail end of the
+  automated work — the PyPI publish cannot be undone, and every defect this
+  release actually fixed was found by *running* something rather than by an
+  assertion. See [Before merging](#before-merging) for what is worth
+  driving by hand.
 - **2026-08-13** — Phase 5: verification. The wheel was proven to stand
   alone from an empty directory, and the MCP tools were driven against a
   live 25-thread capture — which is the only way the per-thread and
