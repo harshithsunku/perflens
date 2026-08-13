@@ -1,7 +1,7 @@
 {
   "version": "0.5.0",
-  "session_id": "20260715_030454_10.10.3.249:9999",
-  "agent": "10.10.3.249:9999",
+  "session_id": "20260715_030454_device-arm",
+  "agent": "device-arm",
   "timestamp": "2026-07-15T03:06:05.190039",
   "total_samples": 15257,
   "chunks": 6,

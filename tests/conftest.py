@@ -51,11 +51,18 @@ def materialize_fixture_session(name, sessions_dir, session_id=None):
             with open(os.path.join(dest, f'chunk_{i:05d}.txt'), 'wb') as f:
                 f.write(data)
             i += 1
-    meta = {
-        'version': '0.5.0', 'session_id': session_id, 'agent': 'fixture',
-        'timestamp': '2026-07-15T00:00:00', 'total_samples': 0,
-        'chunks': i, 'event_types': [], 'perf_stat': {},
-    }
+    # Carry the captured metadata through (perf_stat, platform, totals) so
+    # replay renders the counter cards a real session would. Identity fields
+    # are forced, so callers can materialize the same fixture under any id.
+    # event_types stays empty on purpose: the server's per-event keys are
+    # authoritative (store/live.ts falls back to them), so a metadata list
+    # that disagreed would offer dead entries in the event dropdown.
+    with open(os.path.join(src, 'metadata.json'), encoding='utf-8') as f:
+        meta = json.load(f)
+    meta.update({
+        'session_id': session_id, 'agent': 'fixture',
+        'chunks': i, 'event_types': [],
+    })
     with open(os.path.join(dest, 'metadata.json'), 'w') as f:
         json.dump(meta, f)
     return session_id

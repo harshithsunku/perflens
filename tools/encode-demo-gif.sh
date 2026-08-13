@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # tools/encode-demo-gif.sh — encode captured frames into docs/demo.gif.
-# Run after tools/capture-demo-gif.js.
+# Run after the docs-gif Playwright project has staged its frames.
 #
 # Requires: ffmpeg
 set -euo pipefail
@@ -12,7 +12,7 @@ FPS="${FPS:-4}"
 WIDTH="${WIDTH:-900}"
 
 if [ ! -d "$FRAMES_DIR" ]; then
-    echo "no frames in $FRAMES_DIR — run tools/capture-demo-gif.js first" >&2
+    echo "no frames in $FRAMES_DIR — run the docs-gif capture first" >&2
     exit 1
 fi
 

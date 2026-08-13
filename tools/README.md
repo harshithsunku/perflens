@@ -5,62 +5,26 @@ Author-side helpers. Not needed for running PerfLens itself.
 | File | What it does |
 |---|---|
 | [`export_openapi.py`](export_openapi.py) | Dumps the FastAPI schema to `frontend/openapi.json`, which `npm --prefix frontend run typegen` turns into TypeScript types. CI diff-checks both, so run it after touching `api/models.py` or any route. |
-| [`capture-screenshots.js`](capture-screenshots.js) | Captures the PNG screenshots in `docs/screenshots/` by driving a live PerfLens server with puppeteer. |
-| [`capture-demo-gif.js`](capture-demo-gif.js) | Captures 32 frames for the live-demo GIF (function table → flame graph → source view). |
-| [`encode-demo-gif.sh`](encode-demo-gif.sh) | Encodes those frames into `docs/demo.gif` with `ffmpeg` and a 2-pass palette. |
+| [`check_version.py`](check_version.py) | Asserts every file that records the version agrees with the repo-root `VERSION`, and that no hand-typed `vX.Y.Z` literal survives in `frontend/src/`. Runs in CI. |
+| [`encode-demo-gif.sh`](encode-demo-gif.sh) | Encodes captured frames into `docs/demo.gif` with `ffmpeg` and a 2-pass palette. |
 
-## Prereqs
+## Docs screenshots and the demo GIF
 
-The capture scripts load puppeteer from the repo root's `node_modules`.
-There is no root `package.json` (the frontend has its own), so install it
-ad hoc when you need to regenerate assets:
+The capture harness lives in `frontend/docs-shots/` and runs on Playwright,
+reusing the E2E server bootstrap. See that directory's notes for the full
+flow. `encode-demo-gif.sh` is the last step of the GIF pipeline and is
+driven from there.
 
-```bash
-# From the repo root
-npm install puppeteer    # creates ./node_modules — not committed
-apt-get install ffmpeg   # only needed for encode-demo-gif.sh
-```
-
-## Regenerate everything
-
-Open four terminals (or run the first three in the background).
-
-```bash
-# 1) CPU-busy test program
-./tests/sample_workload
-
-# 2) PerfLens server with --binary so source mapping works
-#    (needs the UI built: npm --prefix frontend run build)
-.venv/bin/perflens serve \
-    --http-port 8089 --port 9899 \
-    --binary tests/sample_workload --source-dir tests
-
-# 3) agent in --server mode against the workload PID
-PID=$(pgrep -f sample_workload | tail -1)
-agent-c/perflens-agent --server 127.0.0.1 --port 9899 \
-    --pid "$PID" --duration 4 --frequency 199
-
-# 4) Tell the agent to start collecting
-curl -X POST http://localhost:8089/api/agent/command \
-     -H "Content-Type: application/json" \
-     -d '{"cmd":"start","args":{"pid":'"$PID"',"frequency":199,"duration":4},"timeout":30}'
-```
-
-Wait until `curl http://localhost:8089/api/status` reports a few thousand
-samples, then:
-
-```bash
-node tools/capture-screenshots.js          # -> docs/screenshots/*.png
-node tools/capture-demo-gif.js             # -> /tmp/perflens-gif-frames/*.png
-tools/encode-demo-gif.sh                   # -> docs/demo.gif
-```
+> Until 0.8.0 these were puppeteer scripts written against the pre-React
+> vanilla-JS DOM. Every hook they used (`showView()`, `switchToTab()`,
+> `.fn-source-link`) was deleted in the React rewrite, but `typeof` guards
+> meant they kept *reporting success* while capturing the wrong page. They
+> were removed rather than ported.
 
 ## Environment overrides
 
 | Var | Default | Notes |
 |---|---|---|
-| `PERFLENS_URL` | `http://localhost:8089` | Where the server is reachable. |
-| `OUT_DIR` | `docs/screenshots` | Where `capture-screenshots.js` writes PNGs. |
 | `FRAMES_DIR` | `/tmp/perflens-gif-frames` | Frame staging dir for the GIF pipeline. |
 | `OUT` | `docs/demo.gif` | Final GIF path. |
 | `FPS` | `4` | Encoded framerate. |

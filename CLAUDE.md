@@ -171,8 +171,8 @@ perflens/
 │   ├── src/components/, src/views/
 │   ├── e2e/                      # Playwright browser E2E (self-contained)
 │   └── openapi.json              # committed schema (CI drift-checked)
-├── server/perflens_server.py     # compat shim (one release)
 ├── tools/export_openapi.py       # dump OpenAPI schema for TS typegen
+├── tools/check_version.py        # assert every version location agrees
 ├── docs/
 │   ├── hero.svg
 │   ├── architecture.svg

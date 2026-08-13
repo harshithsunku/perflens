@@ -5,7 +5,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { createGunzip } from 'node:zlib';
 import { createReadStream, createWriteStream, cpSync, existsSync, mkdirSync,
-         mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
+         mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
@@ -36,10 +36,14 @@ async function materializeFixture(sessionsDir) {
       i++;
     }
   }
+  // Mirrors materialize_fixture_session() in tests/conftest.py: keep the
+  // captured metadata (perf_stat, platform, totals) so the UI renders the
+  // counter cards, but force the identity fields. event_types stays empty
+  // on purpose -- the server's per-event keys are authoritative.
+  const captured = JSON.parse(readFileSync(join(src, 'metadata.json'), 'utf8'));
   writeFileSync(join(dest, 'metadata.json'), JSON.stringify({
-    version: '0.5.0', session_id: FIXTURE, agent: 'fixture',
-    timestamp: '2026-07-15T00:00:00', total_samples: 0,
-    chunks: i, event_types: [], perf_stat: {},
+    ...captured, session_id: FIXTURE, agent: 'fixture',
+    chunks: i, event_types: [],
   }));
   if (existsSync(join(src, 'metrics.json'))) {
     cpSync(join(src, 'metrics.json'), join(dest, 'metrics.json'));

@@ -1,7 +1,7 @@
 {
   "version": "0.5.0",
-  "session_id": "20260715_030150_192.168.0.111:9999",
-  "agent": "192.168.0.111:9999",
+  "session_id": "20260715_030150_device-x86",
+  "agent": "device-x86",
   "timestamp": "2026-07-15T03:03:11.691256",
   "total_samples": 12090,
   "chunks": 4,

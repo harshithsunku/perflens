@@ -10,10 +10,17 @@ is what is *currently true* and what is *left to do*.
 capability added; from here the work is stabilization, verification and
 documentation, not new surface.
 
+**Working branch: `stabilize-0.8.0`.** The work is phased, and STATUS.md is
+updated in the same commit as each phase, so a fresh session can resume from
+the checklist alone. Phase order and rationale live in the plan; the short
+version is: hygiene → CI/deps → version bump → docs assets → verification →
+tag. The version bump sits *before* the docs assets on purpose — the docs
+drawer renders the version, and it is one of the screenshots.
+
 - **Published:** 0.7.0 (PyPI, tag `v0.7.0`).
-- **Version is deliberately held at 0.7.0** — `VERSION`, `pyproject.toml`
-  and `src/perflens/__init__.py` all agree. It moves to 0.8.0 only when the
-  stabilization checklist below is clear.
+- **Version:** 0.7.0 until Phase 3. `tools/check_version.py` now enforces
+  agreement across all four locations plus the generated schema — run it
+  instead of hand-checking.
 - **Unreleased on master** — a large body of work sits between the `v0.7.0`
   tag and HEAD:
   - `cfbe5c8` server split into `AppContext` modules + typed Pydantic API
@@ -33,11 +40,17 @@ documentation, not new surface.
 uv venv .venv && uv pip install -p .venv/bin/python -e '.[dev]'
 make -C agent-c                              # protocol tests need the real binary
 .venv/bin/python -m pytest tests/            # 149 tests
+.venv/bin/python tools/check_version.py      # all version locations agree
+.venv/bin/ruff check src/ tests/ tools/
 npm --prefix frontend ci
-npm --prefix frontend run test               # vitest
+npm --prefix frontend run test               # vitest, 24 tests
 npm --prefix frontend run build              # emits into src/perflens/ui/
 npm --prefix frontend run e2e                # Playwright, self-contained
 ```
+
+Note the `dev` extra is what pulls in `mcp` — without it the 28 MCP tests
+**skip silently** and the suite reports 121 passed / 1 skipped instead of
+149. Easy to read past when you're expecting green.
 
 Two things that bite if forgotten:
 
@@ -53,6 +66,45 @@ Two things that bite if forgotten:
 
 Ordered roughly by user impact.
 
+- [x] **Phase 1 — the tracked fixtures were leaking device IPs** (2026-08-13)
+      — not on the old checklist, found while auditing the tree.
+      `tests/fixtures/session-{x86,arm}-baseline/metadata.json` carried
+      `session_id`/`agent` of the form `<ts>_<ip>:9999`
+      (`192.168.0.111`, `10.10.3.249`), against this project's own no-IPs
+      rule — and a Sessions-tab screenshot would have published one. Renamed
+      to `device-x86`/`device-arm`. Provably inert: both materializers
+      (`tests/conftest.py`, `frontend/e2e/start-server.mjs`) rewrite the
+      identity fields on materialize, the gzipped chunks are IP-clean
+      (verified), and `metrics.json` has no addresses. `WizardView.tsx`'s
+      `placeholder="192.168.1.100"` is now generic prose too.
+- [x] **Phase 1 — both materializers now merge captured metadata**
+      (2026-08-13) — they used to *discard* it and write a stub with
+      `total_samples: 0, perf_stat: {}`, so replay rendered one empty stat
+      card instead of twelve counters. They now spread the committed
+      metadata and force only the identity fields. Replay of the x86 fixture
+      returns 13 `perf_stat` counters, 12090 samples, platform and metrics.
+      `event_types` stays `[]` on purpose — the server's per-event keys are
+      authoritative (`store/live.ts` falls back to them), so a metadata list
+      that disagreed would offer dead entries in the event dropdown.
+- [x] **Phase 1 — compat shims retired** (2026-08-13) — `server/`,
+      `src/perflens/server.py`, plus the orphaned `run_server.sh` (zero
+      repo references, and its `DEFAULT_SOURCE_DIR` pointed at a `test/`
+      directory that doesn't exist) and the 0-byte `requirements-server.txt`.
+      `perflens.server` was a public import path in the 0.6.0 and 0.7.0
+      wheels, so this is a **breaking removal** and needs a CHANGELOG
+      `### Removed` entry at 0.8.0.
+- [x] **Phase 1 — version drift closed mechanically** (2026-08-13) —
+      `DocsDrawer.tsx` hardcoded `v0.8.0` in the *shipped UI* while the
+      package was 0.7.0, wired to nothing and absent from every release
+      checklist. It now renders `__PERFLENS_VERSION__`, injected by
+      `vite.config.ts` from the canonical `VERSION` file (needed
+      `@types/node`, since `tsconfig.node.json` typechecks the vite config
+      under `strict`). `tools/check_version.py` asserts all seven locations
+      agree and that no `vX.Y.Z` literal survives in `frontend/src/`;
+      `frontend/src/version.test.ts` guards the injection itself.
+      `frontend/package.json` had already drifted to 0.8.0 and was pulled
+      back to 0.7.0 so the invariant holds until Phase 3.
+
 - [x] **Docs site brought to API v2** (2026-08-13) — `docs/reference.html`
       had documented the pre-v2 surface (`/api/per-event`,
       `/api/thread-summary`, `/api/thread-view`, `/api/time-window`,
@@ -63,64 +115,113 @@ Ordered roughly by user impact.
       and CI paragraph corrected. `architecture.html` SSE/endpoint wording
       updated; `index.html` no longer claims a vanilla-JS UI and gained an
       MCP feature card.
-- [ ] **The docs site's screenshots and demo GIF show the old UI.**
+- [ ] **Phase 4 — the docs site's screenshots and demo GIF show the old UI.**
       `docs/screenshots/*.png` and `docs/demo.gif` were captured
       2026-05-17, two months before the React rewrite — so the landing page
       advertises a UI that no longer exists, missing the differential view,
-      timeline scrubbing and keyboard shortcuts along the way. Regenerating
-      needs a live server + agent + workload (see `tools/README.md`), and
-      the capture scripts were written against the old vanilla-JS DOM;
-      expect to port them to the React app's `data-testid` contract rather
-      than just re-running them.
-- [ ] **Decide about the IPs in git history.** The device addresses and ssh
-      targets removed from STATUS.md on 2026-08-13 are still reachable in
-      earlier commits, against the project's no-IPs rule. Clearing them
-      needs a history rewrite (`git filter-repo` + force-push), which
-      breaks existing clones — a deliberate call, not a drive-by fix. They
-      are private-range addresses, so the practical exposure is low.
-- [ ] **Server dependencies are floors only** (`fastapi>=0.110`,
+      timeline scrubbing and keyboard shortcuts along the way.
+      The capture scripts were **deleted, not ported** (2026-08-13): every
+      hook they used was gone (`showView()`, `switchToTab()`,
+      `renderCurrentEvent()`, `.fn-source-link`, a non-bubbling
+      `new Event('change')`, direct `data-theme` mutation that leaves the
+      zustand store dark), and `typeof` guards meant they kept *reporting
+      success* while capturing the landing page. That silent-success
+      property is why they rotted unnoticed for two months.
+      Replacement plan: Playwright projects in `frontend/docs-shots/`
+      reusing `e2e/start-server.mjs` and `tools/encode-demo-gif.sh`.
+      ~10 shots come from deterministic fixture replay (no `perf` needed,
+      CI-smokeable); threads, source annotation, timeline scrubbing, the
+      differential view and the GIF need live state and come from a local
+      `tests/matrixlab` capture. Add the CI smoke job — it is what stops
+      the next UI rewrite from silently orphaning the harness again.
+- [ ] **Phase 2 — server dependencies are floors only** (`fastapi>=0.110`,
       `uvicorn>=0.29`, `orjson>=3.9`, `zstandard>=0.21`, `mcp>=2,<3`). CI
       installs the latest each run, so a FastAPI or Pydantic release can
       shift the generated OpenAPI schema and fail the drift check without
-      any change on our side. Decide: upper bounds, or generate the schema
-      in CI instead of diffing a committed artifact.
-- [ ] **Node 20 deprecation** — `actions/checkout@v4`,
-      `actions/setup-python@v5`, `actions/setup-node@v4` and
-      `actions/upload-artifact@v4` are being forced onto Node 24 with a
-      warning in every run. Bump before the forced migration.
-- [ ] **Starlette deprecation** — `TestClient` warns that `httpx` support is
-      deprecated in favour of `httpx2`. Affects the test suite only, but it
-      will become an error eventually.
-- [ ] **Retire the compat shims.** `server/perflens_server.py` and
-      `src/perflens/server.py` were introduced as "one release" bridges in
-      the 0.6.0-era restructure and have now outlived two releases. Remove
-      at 0.8.0, or commit to keeping them.
-- [ ] **Device E2E matrix** — full live run on both reference devices
-      (x86_64 and aarch64): connect, capability probe, continuous
-      collection, pause/resume/stop, health metrics, session save, replay,
-      and the same flow driven through the MCP tools.
-- [ ] **Scale tests** — long-run RSS boundedness (~1 h of continuous
-      collection) and a synthetic large source tree (~500k files) through
-      the source index.
-- [ ] **Clean-container `uvx` run** of the built wheel: no Node, no
+      any change on our side. **Decision: add upper bounds *and* keep the
+      committed schema.** They solve different problems — bounds are about
+      whether `uvx perflens` still works in 18 months; the drift check is
+      about CI brittleness. `frontend/openapi.json` stays committed because
+      `npm run typegen` consumes it into the shipped bundle; generating it
+      in CI would make the frontend's types depend on CI's resolver.
+- [ ] **Phase 2 — Node 20 deprecation.** 17 call sites across both
+      workflows: `checkout` v4→v5, `setup-python` v5→v6, `setup-node`
+      v4→v5, `upload-artifact` v4→v5, `download-artifact` v4→v5,
+      `softprops/action-gh-release` v2→v3. `pypa/gh-action-pypi-publish` is
+      a rolling ref and needs no bump. upload/download **must move in one
+      commit** — v5 artifacts are unreadable by a v4 download, and they
+      cross jobs (`python-package` uploads, `publish-pypi` and `release`
+      download).
+- [ ] **Phase 2 — three CI gaps found while auditing the workflows.**
+      (1) `ruff` runs only in `build.yml`, which has no `pull_request`
+      trigger — **no PR has ever been linted**. Move it into `test.yml` and
+      widen to `src/ tests/ tools/` (verified clean already). (2) The
+      typegen drift check `CONTRIBUTING.md` claims CI performs does not
+      exist. (3) The OpenAPI drift check is missing from `build.yml`'s
+      release path, so a tag can ship a wheel whose schema disagrees with
+      the committed artifact. Do *not* give `build.yml` a `pull_request`
+      trigger — it compiles binutils and five agent architectures.
+- [x] **Starlette deprecation — resolved by the dependency graph, not by us**
+      (2026-08-13). `TestClient` warned that `httpx` support was deprecated
+      in favour of `httpx2`. But `mcp>=2` requires `httpx2>=2.5`, and
+      starlette prefers `httpx2` whenever it is importable — so the warning
+      stops firing the moment the `dev` extra is installed, which is what CI
+      does. Worth knowing: `src/perflens/mcp/client.py` still imports
+      `httpx` directly (7 call sites, 5 of them exception handlers), so both
+      libraries are installed side by side and the `httpx` bound is what
+      keeps that working. No code change made.
+- [ ] **Phase 5 — clean-container `uvx` run** of the built wheel: no Node, no
       binutils, no repo — confirms the shipped artifact stands alone.
-- [ ] **MCP on real data** — the tools are covered by 28 tests against
-      fixture sessions and were driven end to end over stdio against a live
-      server, but not yet against a live *device* session. Optional extra:
-      an evaluation set (10 Q/A against the committed fixtures, per the
+- [ ] **Phase 5 — MCP against a live local session.** The tools have 28 tests
+      against fixture sessions and were driven end to end over stdio against
+      a live server. The gap that matters is the two tool families the
+      fixtures *structurally* cannot cover: per-thread views (both fixtures
+      are single-threaded) and source annotation (no locally-resolvable
+      binary). A `tests/matrixlab` capture covers both. Optional extra: an
+      evaluation set (10 Q/A against the committed fixtures, per the
       mcp-builder format) to catch regressions in tool usefulness.
+
+### Deferred past 0.8.0
+
+Explicit decisions, recorded so a later session doesn't re-litigate them.
+
+- **Device E2E matrix** — full live run on both reference devices. Deferred:
+  needs hardware this session doesn't have, and the local `matrixlab`
+  capture exercises the same server-side paths.
+- **Scale tests** — ~1 h continuous-collection RSS boundedness and a
+  synthetic ~500k-file source tree. Deferred: hours of wall-clock for a
+  property no recent change touches.
+- **MCP against a live *device*** — the local-session leg lands in Phase 5;
+  the device leg travels with the device E2E matrix above.
+- **The IPs in git history.** Device addresses and ssh targets in commits
+  before 2026-08-13 remain reachable. Clearing them needs `git filter-repo`
+  + force-push, which rewrites every SHA, breaks existing clones and
+  orphans the `v0.7.0` tag. **Decision (2026-08-13): not doing it.** They
+  are private-range addresses with low practical exposure, and a stable
+  long-term release is a bad moment to invalidate every clone.
+  Note carefully: Phase 1 sanitized the *tracked* fixture metadata, but the
+  old blobs are still in history. "We cleaned the IPs" is not the same as
+  "the IPs are gone".
 
 ### Release checklist for 0.8.0 (when the above is clear)
 
-1. Bump **three** places — `VERSION`, `pyproject.toml`,
-   `src/perflens/__init__.py` — they must agree, and `info.version` in the
-   exported schema follows.
+1. Bump **four** places — `VERSION`, `pyproject.toml`,
+   `src/perflens/__init__.py`, `frontend/package.json` (+ the two `version`
+   keys in `package-lock.json`). Don't check by hand: `python
+   tools/check_version.py` asserts all of them plus the generated schema.
 2. `python tools/export_openapi.py && npm --prefix frontend run typegen`,
    then confirm `git diff` shows only the version line.
-3. `make -C agent-c clean && make -C agent-c` (version is compiled in).
-4. Write the CHANGELOG entry from the unreleased commits listed above.
+3. `make -C agent-c clean && make -C agent-c` (version is compiled in) —
+   **before** pytest, or `test_agent_protocol.py::test_hello` fails against
+   a stale binary.
+4. Write the CHANGELOG entry from the unreleased commits, under a literal
+   `## [0.8.0]` heading — `build.yml` awk-extracts that exact form for the
+   release body and produces **empty notes silently** if it doesn't match.
+   Include a `### Removed` entry for `perflens.server`.
 5. Tag `v0.8.0` — the tag drives the GitHub Release and the PyPI publish
-   via Trusted Publishing.
+   via Trusted Publishing. PyPI publish uses `skip-existing: true`, so a
+   botched version can only be yanked, never replaced. Run the
+   clean-container wheel check *before* tagging.
 
 ## Known limitations (current, by design or accepted)
 
@@ -186,6 +287,18 @@ Condensed; anything older is in the CHANGELOG and git history.
   was brought to API v2. Worth remembering: docs staleness clusters around
   *renames* — the API v2 commit renamed every endpoint, and four files
   kept the old names for weeks because nothing tests prose.
+- **2026-08-13** — Phase 1 of the 0.8.0 stabilization, on branch
+  `stabilize-0.8.0`: fixture IPs sanitized, compat shims and orphans
+  deleted, version drift closed mechanically, both fixture materializers
+  switched from discarding captured metadata to merging it. Ended green —
+  149 pytest, 24 vitest (2 new), 10 Playwright, ruff clean on the widened
+  `src/ tests/ tools/` scope. Two things worth carrying forward: the
+  *tracked* fixtures were leaking device IPs, which the old checklist had
+  missed by tracking only git history; and the puppeteer capture scripts
+  were not merely stale but **silently succeeding** — `typeof` guards on
+  deleted globals meant they reported success while shooting the wrong
+  page. Prefer a harness that fails loudly, which is what the CI smoke job
+  in Phase 4 is for.
 - **2026-08-13** — MCP server + companion skill (`4a966c7`), then feature
   freeze declared and the version held at 0.7.0 (`531f27b`). Notes: the MCP
   Python SDK is on **2.x** (`MCPServer`, not 1.x's `FastMCP`;

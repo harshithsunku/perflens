@@ -73,7 +73,7 @@ The pipeline in one sentence: **`perf record` → agent → TCP+zstd → server 
 
 ### Local machine
 
-- `perflens serve` runs a FastAPI/uvicorn HTTP layer (`web.py`) in front of a plain-threads agent side (`server.py`: TCP listener, recv loops, aggregation worker); one agent at a time, any number of SSE browser clients
+- `perflens serve` runs a FastAPI/uvicorn HTTP layer (`web.py`) in front of a plain-threads agent side (`agentlink.py`: TCP listener and recv loops; `state.py`: aggregation worker); one agent at a time, any number of SSE browser clients
 - `parser.py` parses `perf script` and `perf stat` text into per-event sample lists; `aggregator.py` folds each new chunk incrementally into function summaries and flame graph trees (O(new samples) per chunk, not O(total))
 - `source_mapper.py` pipelines addresses through `addr2line` in batches of 500, applies compile-time path prefix rewrites, and builds annotated source views; `symcache.py` persists resolutions and source-file indexes under `~/.perflens/cache` so warm restarts skip the work
 - A single `SourceMapper` is created at startup and shared across requests — no per-request forking
@@ -413,7 +413,10 @@ perflens/
 │   └── vendor/zstd/              # vendored zstd amalgamation
 ├── pyproject.toml                # pip/uv package (console script: perflens)
 ├── src/perflens/                 # the server package
-│   ├── server.py                 # agent TCP protocol + state + sessions
+│   ├── app.py                    # AppContext + lifecycle + main()
+│   ├── agentlink.py              # agent TCP wire protocol + AgentSession
+│   ├── state.py                  # profiling/metrics state + rebuild worker
+│   ├── sessions.py               # session persistence, replay, perf.data import
 │   ├── web.py                    # FastAPI/uvicorn HTTP layer + SSE hub
 │   ├── cli.py                    # perflens serve/import/push-agent/provision/mcp
 │   ├── mcp/                      # MCP server (optional extra) — tools over the HTTP API

@@ -1,7 +1,7 @@
 {
   "name": "perflens-frontend",
   "private": true,
-  "version": "0.8.0",
+  "version": "0.7.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -23,6 +23,7 @@
     "@radix-ui/react-popover": "^1.1.19",
     "@radix-ui/react-tooltip": "^1.2.12",
     "@tailwindcss/vite": "^4.3.3",
+    "@types/node": "^24.13.3",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.3",

@@ -6,7 +6,7 @@
 <title>PerfLens — Real-time Linux Performance Profiler</title>
 <meta name="description" content="Remote Linux performance profiler with a real-time web UI. Flame graphs, function tables, perf stat metrics, and line-level annotated source — streamed live from any ARM or x86 Linux target.">
 <meta property="og:title" content="PerfLens — Real-time Linux Performance Profiler">
-<meta property="og:description" content="Drop the agent on any Linux device, point it at a PID, watch flame graphs and annotated source update live in your browser. Static C agent. uvx-installable server. No framework. No npm.">
+<meta property="og:description" content="Drop the agent on any Linux device, point it at a PID, watch flame graphs and annotated source update live in your browser. Static C agent. uvx-installable server. No npm needed to run it.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://harshithsunku.github.io/perflens/">
 <meta property="og:image" content="https://harshithsunku.github.io/perflens/screenshots/07-overview.png">
@@ -105,7 +105,7 @@
             <div class="feature">
                 <div class="feature-icon">&#128293;</div>
                 <h3>Interactive flame graphs</h3>
-                <p>Vanilla-JS SVG flame graphs. Zoom into a frame, hover for sample counts, search by function name, breadcrumb back to root.</p>
+                <p>Hand-rolled SVG flame graphs &mdash; no charting library. Zoom into a frame, hover for sample counts, search by function name, breadcrumb back to root.</p>
             </div>
             <div class="feature">
                 <div class="feature-icon">&#128270;</div>
@@ -182,7 +182,7 @@
                 <img src="screenshots/02-flamegraph.png" alt="Interactive SVG flame graph" loading="lazy">
                 <div class="shot-caption">
                     <strong>Flame graph</strong>
-                    Zoom, hover, search. Vanilla SVG &mdash; no d3, no bundling.
+                    Zoom, hover, search. Hand-rolled SVG layout &mdash; no d3.
                 </div>
             </div>
             <div class="shot">
@@ -392,7 +392,7 @@ uv venv && uv pip install -e .
             </div>
             <div class="feature">
                 <h3>No over-engineering</h3>
-                <p>If a piece of code doesn't earn its complexity, it gets cut. No frameworks for the sake of frameworks.</p>
+                <p>If a piece of code doesn't earn its complexity, it gets cut. The agent stays zero-dependency C; the server keeps a four-package install.</p>
             </div>
             <div class="feature">
                 <h3>Generic &amp; open</h3>

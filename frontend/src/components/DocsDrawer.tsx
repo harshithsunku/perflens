@@ -42,7 +42,7 @@ export default function DocsDrawer({ open, onClose }: Props) {
       <div id="docs-drawer" className={cls('docs-drawer')}>
         <div className="docs-header">
           <h2>Documentation</h2>
-          <span className="docs-version" id="docs-version">v0.8.0</span>
+          <span className="docs-version" id="docs-version">v{__PERFLENS_VERSION__}</span>
           <div className="docs-header-spacer"></div>
           <button id="docs-close" className="docs-close" onClick={onClose}>&times;</button>
         </div>

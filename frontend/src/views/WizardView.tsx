@@ -317,7 +317,7 @@ export default function WizardView() {
           <div className="wiz-form">
             <div className="wiz-row">
               <label>Host</label>
-              <input type="text" id="wiz-host" placeholder="192.168.1.100"
+              <input type="text" id="wiz-host" placeholder="device hostname or IP"
                      value={host} onChange={(e) => setHost(e.target.value)} />
             </div>
             <div className="wiz-row">
