@@ -297,6 +297,67 @@ Errors are uniform: every failure responds
 
 ---
 
+## MCP server — profiling data for LLM agents
+
+`perflens mcp` exposes the profiling data to any MCP client (Claude Code,
+Claude Desktop, …) so an agent can answer "why is this slow" against real
+`perf` data — and, when asked, drive a live run on a device.
+
+It is a client of the HTTP API above, so a `perflens serve` must be
+running. The MCP SDK is an optional dependency:
+
+```bash
+pip install 'perflens[mcp]'      # or: uv tool install 'perflens[mcp]'
+```
+
+Register it with your client — for Claude Code:
+
+```bash
+claude mcp add perflens -- perflens mcp
+```
+
+or in an MCP client config file:
+
+```json
+{
+  "mcpServers": {
+    "perflens": { "command": "perflens", "args": ["mcp"] }
+  }
+}
+```
+
+| Flag | Meaning |
+|------|---------|
+| `--server-url URL` | PerfLens HTTP API to query (default `$PERFLENS_MCP_URL` or `http://127.0.0.1:8080`) |
+| `--read-only` | Omit the agent-control and export tools, so the agent can analyse but cannot touch a device or write files |
+
+**Tools.** Analysis (read-only): `perflens_status`, `perflens_list_sessions`,
+`perflens_hot_functions`, `perflens_hot_stacks`, `perflens_perf_stat`,
+`perflens_list_source_files`, `perflens_source_hotlines`,
+`perflens_compare`, `perflens_threads`, `perflens_thread_detail`,
+`perflens_device_metrics`, `perflens_metrics_history`. Device control:
+`perflens_agent_info`, `perflens_agent_connect`, `perflens_list_processes`,
+`perflens_start_profiling`, `perflens_stop_profiling`,
+`perflens_collection_pause`. Plus `perflens_export`, which writes collapsed
+stacks / JSON / SVG to a file.
+
+Profiles are large — a single event's snapshot runs from kilobytes to
+megabytes — so every tool returns a ranked, capped view and tells the agent
+exactly how to page for more. Config mutation, session deletion and the
+filesystem browser are deliberately **not** exposed.
+
+**Companion skill.** [`skills/perflens-profiling/`](skills/perflens-profiling/SKILL.md)
+teaches an agent the method these tools support — orient, pick the right
+event, read self *and* total, drill to hot source lines, corroborate with
+IPC and device health, and the pitfalls that produce confidently wrong
+answers. Install it wherever you profile:
+
+```bash
+cp -r skills/perflens-profiling ~/.claude/skills/
+```
+
+---
+
 ## Supported perf events
 
 | Event | Typical use | Mode |
@@ -354,7 +415,8 @@ perflens/
 ├── src/perflens/                 # the server package
 │   ├── server.py                 # agent TCP protocol + state + sessions
 │   ├── web.py                    # FastAPI/uvicorn HTTP layer + SSE hub
-│   ├── cli.py                    # perflens serve/import/push-agent/provision
+│   ├── cli.py                    # perflens serve/import/push-agent/provision/mcp
+│   ├── mcp/                      # MCP server (optional extra) — tools over the HTTP API
 │   ├── parser.py                 # perf script / perf stat parser
 │   ├── aggregator.py             # incremental per-event aggregation
 │   ├── source_mapper.py          # addr2line pipeline + path remap
@@ -362,6 +424,7 @@ perflens/
 │   ├── provision.py              # user-space static-tools download
 │   └── ui/                       # built React app (Vite output; ships in the wheel)
 ├── frontend/                     # React + TypeScript + Vite UI source
+├── skills/perflens-profiling/    # agent skill for the MCP server (SKILL.md)
 ├── docs/
 │   ├── hero.svg
 │   ├── architecture.svg

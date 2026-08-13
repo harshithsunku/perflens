@@ -5,6 +5,7 @@
     perflens import FILE           # import a perf.data file and serve it
     perflens push-agent USER@HOST  # install the agent binary on a device
     perflens provision [--status]  # fetch static addr2line/readelf tools
+    perflens mcp                   # serve profiling data to LLM agents (MCP)
     perflens version
 """
 
@@ -27,6 +28,9 @@ Commands:
   provision     Download the static addr2line/readelf tools bundle into
                 ~/.perflens/bin (for machines without binutils).
                 `provision --status` shows what resolves from where
+  mcp           Serve profiling data to LLM agents over MCP (stdio).
+                Queries a running `perflens serve`; needs the optional
+                dependency: pip install 'perflens[mcp]'
   version       Print version and exit
 
 Run `perflens serve --help` for the full server flag reference.
@@ -184,6 +188,9 @@ def main(argv=None):
     if argv and argv[0] == 'provision':
         from perflens.provision import run_provision
         return run_provision(argv[1:])
+    if argv and argv[0] == 'mcp':
+        from perflens.mcp import main as mcp_main
+        return mcp_main(argv[1:])
 
     # Default: everything is server flags
     _run_serve(argv)

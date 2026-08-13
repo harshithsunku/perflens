@@ -144,7 +144,12 @@ perflens/
 │   ├── web.py                    # FastAPI/uvicorn HTTP layer + SSE hub
 │   ├── api/                      # Pydantic v2 schemas + response helpers
 │   ├── server.py                 # compat shim (one release)
-│   ├── cli.py                    # perflens serve/import/push-agent/provision
+│   ├── cli.py                    # perflens serve/import/push-agent/provision/mcp
+│   ├── mcp/                      # MCP server (optional [mcp] extra)
+│   │   ├── __init__.py           #   build_server() + `perflens mcp` entry point
+│   │   ├── client.py             #   async HTTP client for the REST API
+│   │   ├── format.py             #   markdown/JSON rendering, paging, stack folding
+│   │   └── analysis|threads|metrics|control|export.py   # the tools
 │   ├── parser.py                 # perf script / perf stat parser
 │   ├── aggregator.py             # incremental per-event aggregation
 │   ├── source_mapper.py          # addr2line pipeline + path remap
@@ -152,6 +157,7 @@ perflens/
 │   ├── provision.py              # static addr2line/readelf download (~/.perflens/bin)
 │   └── ui/                       # BUILT React app (gitignored Vite output;
 │                                 #   ships in the wheel/sdist via hatch artifacts)
+├── skills/perflens-profiling/    # agent skill teaching the MCP profiling workflow
 ├── frontend/                     # React 19 + TypeScript + Vite SPA source
 │   ├── src/api/                  # typed client, SSE wiring, types.gen.ts
 │   ├── src/store/                # zustand stores + URL-hash deep links
@@ -211,6 +217,19 @@ perflens/
 | `/api/browse?path=`       | GET    | File picker (confined to `--browse-root`)      |
 | `/api/config`             | GET/PATCH | Runtime binary/source/pathmap/toolchain config (one typed model) |
 | `/*`                      | GET    | Static files from `ui/`                         |
+
+### MCP server (`perflens mcp`)
+
+Optional extra (`pip install 'perflens[mcp]'`) — a stdio MCP server that
+queries a running `perflens serve` over the HTTP API above. It adds no
+server-side state and touches no core module; `--read-only` omits the
+device-control and export tools. Config mutation, session deletion and the
+file browser are never exposed. Because a single event's snapshot ranges
+from kilobytes to megabytes, every tool returns a ranked, capped view with
+the follow-up call for the next page — see `src/perflens/mcp/format.py`.
+Two limits worth knowing: per-thread views are live-only (the replay
+carries no per-thread aggregates), and live counters come from the SSE
+head, since `perf_stat` has no REST endpoint.
 
 Error model: every failure is `{"error": {"code": "<slug>", "message":
 "..."}}` with a real status code (400 validation, 403 permission, 404
