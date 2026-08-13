@@ -7,6 +7,7 @@ import subprocess
 import sys
 from datetime import datetime
 
+from perflens import __version__
 from perflens.agentlink import FLAG_DATA_ZSTD, decompress_payload
 from perflens.aggregator import build_per_event_batch
 from perflens.parser import get_event_types, parse_perf_script, split_perf_data
@@ -88,11 +89,23 @@ def load_session_samples(cfg, session_id):
 def save_session(session_dir, session_id, agent_addr, chunk_count,
                  all_samples, perf_stat, hello=None,
                  metrics_snapshot=None, metrics_summary=None):
-    """Save session metadata + metrics (chunks are spooled at receive time)."""
+    """Save session metadata + metrics (chunks are spooled at receive time).
+
+    A session with nothing in it is not saved. An agent started with
+    --server reconnects with backoff, so disconnecting one produces a
+    connect/disconnect cycle every few seconds; persisting each one filled
+    the session list with empty rows that replay to nothing.
+    """
+    if not all_samples and not chunk_count:
+        try:
+            os.rmdir(session_dir)  # only succeeds while it is genuinely empty
+        except OSError:
+            pass
+        return
     try:
         event_types = get_event_types(all_samples)
         metadata = {
-            'version': '0.5.0',
+            'version': __version__,
             'session_id': session_id,
             'agent': agent_addr,
             'timestamp': datetime.now().isoformat(),
@@ -189,7 +202,7 @@ def import_perf_data(cfg, perf_data_path):
         f.write(script_text)
 
     metadata = {
-        'version': '0.4.0',
+        'version': __version__,
         'session_id': session_id,
         'agent': 'import',
         'timestamp': datetime.now().isoformat(),
