@@ -793,6 +793,24 @@
       "IndexStatus": {
         "additionalProperties": true,
         "properties": {
+          "dwarf_source_files": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Dwarf Source Files",
+            "type": "array"
+          },
+          "dwarf_total": {
+            "default": 0,
+            "title": "Dwarf Total",
+            "type": "integer"
+          },
+          "dwarf_truncated": {
+            "default": false,
+            "title": "Dwarf Truncated",
+            "type": "boolean"
+          },
           "indexing": {
             "default": false,
             "title": "Indexing",
@@ -802,6 +820,16 @@
             "default": 0,
             "title": "Source Files Found",
             "type": "integer"
+          },
+          "source_index_files": {
+            "default": 0,
+            "title": "Source Index Files",
+            "type": "integer"
+          },
+          "source_index_ready": {
+            "default": false,
+            "title": "Source Index Ready",
+            "type": "boolean"
           },
           "symbols_loaded": {
             "default": 0,

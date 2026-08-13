@@ -219,8 +219,16 @@ class SourceResponse(BaseModel):
 class IndexStatus(BaseModel):
     model_config = ConfigDict(extra='allow')
     indexing: bool = False
+    # Eager pre-index counters. Both stay 0 until pre_index() has run.
     symbols_loaded: int = 0
     source_files_found: int = 0
+    # Source-tree index, built at startup independently of pre_index().
+    source_index_ready: bool = False
+    source_index_files: int = 0
+    # DWARF compilation-unit file list (truncated; see /api/index/files).
+    dwarf_total: int = 0
+    dwarf_source_files: list[str] = []
+    dwarf_truncated: bool = False
 
 
 class IndexFilesResponse(BaseModel):

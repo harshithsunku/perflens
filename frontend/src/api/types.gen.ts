@@ -766,6 +766,21 @@ export interface components {
         /** IndexStatus */
         IndexStatus: {
             /**
+             * Dwarf Source Files
+             * @default []
+             */
+            dwarf_source_files: string[];
+            /**
+             * Dwarf Total
+             * @default 0
+             */
+            dwarf_total: number;
+            /**
+             * Dwarf Truncated
+             * @default false
+             */
+            dwarf_truncated: boolean;
+            /**
              * Indexing
              * @default false
              */
@@ -775,6 +790,16 @@ export interface components {
              * @default 0
              */
             source_files_found: number;
+            /**
+             * Source Index Files
+             * @default 0
+             */
+            source_index_files: number;
+            /**
+             * Source Index Ready
+             * @default false
+             */
+            source_index_ready: boolean;
             /**
              * Symbols Loaded
              * @default 0

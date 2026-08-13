@@ -588,8 +588,12 @@ def api_index_status(ctx=Ctx):
     mapper = ctx.state.source_mapper
     if mapper:
         return _json(mapper.get_index_status())
+    # Same keys as get_index_status(), so a client never has to tell a
+    # missing mapper apart from an unindexed one by which fields exist.
     return _json({'indexing': False, 'symbols_loaded': 0,
-                  'source_files_found': 0})
+                  'source_files_found': 0, 'source_index_ready': False,
+                  'source_index_files': 0, 'dwarf_total': 0,
+                  'dwarf_source_files': [], 'dwarf_truncated': False})
 
 
 @router.get('/api/index/files', response_model=models.IndexFilesResponse)

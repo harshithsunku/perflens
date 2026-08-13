@@ -9,11 +9,13 @@ negotiation, the replay cache, and the SSE stream against live uvicorn.
 import gzip as gzip_mod
 import json
 import os
+import shutil
+import time
 
 import pytest
 from fastapi.testclient import TestClient
 
-from conftest import materialize_fixture_session, fixture_session_names
+from conftest import REPO, materialize_fixture_session, fixture_session_names
 
 FIXTURE = fixture_session_names()[0]
 
@@ -193,6 +195,61 @@ def test_index_endpoints(client):
     assert 'indexing' in r.json()
     assert_error(client.get('/api/index/files', params={'offset': 'x'}),
                  400, 'validation')
+
+
+def test_index_status_shape_is_the_same_without_a_mapper(client):
+    """The no-mapper fallback must carry every key get_index_status() does,
+    so a client can read source_index_files without checking it exists."""
+    body = client.get('/api/index/status').json()
+    for key in ('indexing', 'symbols_loaded', 'source_files_found',
+                'source_index_ready', 'source_index_files', 'dwarf_total',
+                'dwarf_source_files', 'dwarf_truncated'):
+        assert key in body, f'{key} missing from the no-mapper fallback'
+
+
+@pytest.mark.skipif(not (shutil.which('gcc') and shutil.which('readelf')),
+                    reason='needs gcc + binutils')
+def test_startup_binary_is_pre_indexed(tmp_path, perflens_home):
+    """A --binary passed at startup must populate the same counters a
+    runtime PATCH /api/config does.
+
+    build_context() used to skip pre_index(), so symbols_loaded and
+    source_files_found stayed 0 -- and /api/index/files stayed empty --
+    on a server whose source annotation demonstrably worked.
+    """
+    import subprocess
+    from perflens.app import build_context
+    from perflens.config import ServerConfig
+
+    src = os.path.join(REPO, 'tests', 'sample_workload.c')
+    binary = str(tmp_path / 'workload')
+    subprocess.run(['gcc', '-g', '-O0', '-o', binary, src, '-lm'],
+                   check=True, capture_output=True)
+
+    sessions_dir = str(tmp_path / 'sessions')
+    os.makedirs(sessions_dir)
+    cfg = ServerConfig(source_dir=os.path.dirname(src),
+                       sessions_dir=sessions_dir,
+                       browse_root=str(tmp_path),
+                       binary_path=binary,
+                       addr2line_bin=shutil.which('addr2line'),
+                       readelf_bin=shutil.which('readelf'))
+    ctx = build_context(cfg)
+    try:
+        mapper = ctx.state.source_mapper
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            status = mapper.get_index_status()
+            if status['symbols_loaded'] and not status['indexing']:
+                break
+            time.sleep(0.1)
+        status = mapper.get_index_status()
+        assert status['symbols_loaded'] > 0, 'startup --binary was not indexed'
+        assert status['source_files_found'] > 0
+        assert mapper.list_dwarf_files()['total'] > 0, \
+            '/api/index/files would still be empty'
+    finally:
+        ctx.state.source_mapper.close()
 
 
 def test_config_get_state(client, core, tmp_path):

@@ -74,6 +74,15 @@ def build_context(cfg):
         metrics=MetricsState(),
     )
     ctx.state.source_mapper = create_source_mapper(cfg)
+    if cfg.binary_path:
+        # Same eager pass PATCH /api/config runs when a binary is configured
+        # at runtime. Without it a --binary passed at startup left
+        # symbols_loaded/source_files_found at 0 and /api/index/files empty,
+        # while resolution quietly worked -- which read as "no symbols" to
+        # anyone (or anything) asking the server what it could do.
+        # Daemon thread: serve still comes up immediately.
+        threading.Thread(target=ctx.state.source_mapper.pre_index,
+                         daemon=True).start()
     return ctx
 
 
