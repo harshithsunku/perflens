@@ -7,6 +7,66 @@ releases may break APIs between minor versions when needed.
 
 ## [Unreleased]
 
+The feature set is frozen as of 2026-08-13; the version stays at 0.7.0
+until stabilization is complete (see [STATUS.md](STATUS.md)).
+
+### Added
+
+- **MCP server** (`perflens mcp`) — serves profiling data to LLM agents
+  over the Model Context Protocol, so an agent can answer "why is this
+  slow" against real `perf` data and drive a live run on a device.
+  Nineteen tools: hot functions (self and total), hot stacks, hardware
+  counters with derived IPC and miss rates, source hot lines, session
+  comparison, per-thread breakdowns, device health, agent lifecycle, and
+  file export. It is a client of the existing HTTP API — no core changes —
+  and the SDK is an optional extra (`pip install 'perflens[mcp]'`), so the
+  default install stays a four-dependency package. `--read-only` omits the
+  device-control and export tools; config mutation, session deletion and
+  the file browser are never exposed. Tools return ranked, capped views
+  with an explicit next-page call, because a single event's snapshot runs
+  from kilobytes to megabytes.
+- **`skills/perflens-profiling/`** — a companion skill teaching an agent
+  the method the tools support: orient first, pick the event that matches
+  the question, read self *and* total, drill to hot source lines,
+  corroborate with IPC and device health, and the pitfalls that produce
+  confidently wrong answers.
+- **API v2** — consistent REST surface (`/api/snapshot`, paginated
+  `/api/sessions` with DELETE, `/api/sessions/{id}/export`,
+  `/api/live/export`, `/api/threads`, `/api/window`, `/api/agent`,
+  unified `/api/config`), a uniform `{"error": {code, message}}` envelope
+  with real status codes, and SSE consolidated to `status` / `agent` /
+  `data_version` / `perf_stat` / `metrics`.
+- **React 19 + TypeScript + Vite frontend** replacing the vanilla-JS UI at
+  full feature parity, with types generated from the committed OpenAPI
+  schema and a self-contained Playwright E2E suite. The wheel ships the
+  prebuilt assets, so `uvx perflens` still needs no Node.
+- **Typed Pydantic API models** — the server split into `AppContext`
+  modules (`app`, `config`, `state`, `agentlink`, `sessions`, `export`),
+  with the OpenAPI schema exported to `frontend/openapi.json` and
+  drift-checked in CI.
+- UX polish: keyboard shortcuts with a help overlay, loading skeletons,
+  a diff legend, and accessibility roles on tabs and icon-only buttons.
+
+### Fixed
+
+- **The no-UI fallback answered 503 for every unmatched path.** Once the
+  frontend became a gitignored Vite output, a source checkout (and the
+  Node-free CI job) took `create_app`'s fallback branch, whose catch-all
+  route returned the "UI not built" page for *everything* — so path
+  traversal probes got 503 instead of 404 and a mistyped API URL got HTML
+  instead of the error envelope. It now answers `/` only and stays out of
+  the OpenAPI schema; every other path 404s exactly as the static mount
+  does.
+- **OpenAPI drift across Python versions.** The 413 response carried no
+  explicit description, so FastAPI filled it from
+  `http.client.responses[413]` — whose phrase changed in Python 3.13
+  ("Request Entity Too Large" → "Content Too Large"). Pinned, so the
+  exported schema no longer depends on the interpreter.
+- `__version__` had drifted to 0.6.0 while the package was 0.7.0; all
+  three version locations now agree.
+- The test suite no longer behaves differently depending on whether the
+  frontend happened to be built locally.
+
 ## [0.7.0] — 2026-07-18
 
 ### Added

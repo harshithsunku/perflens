@@ -1,19 +1,23 @@
 # tools/
 
-Author-side helpers for regenerating the docs site assets. Not needed for
-running PerfLens itself.
+Author-side helpers. Not needed for running PerfLens itself.
 
 | File | What it does |
 |---|---|
-| [`capture-screenshots.js`](capture-screenshots.js) | Captures the 7 PNG screenshots in `docs/screenshots/` by driving a live PerfLens server with puppeteer. |
+| [`export_openapi.py`](export_openapi.py) | Dumps the FastAPI schema to `frontend/openapi.json`, which `npm --prefix frontend run typegen` turns into TypeScript types. CI diff-checks both, so run it after touching `api/models.py` or any route. |
+| [`capture-screenshots.js`](capture-screenshots.js) | Captures the PNG screenshots in `docs/screenshots/` by driving a live PerfLens server with puppeteer. |
 | [`capture-demo-gif.js`](capture-demo-gif.js) | Captures 32 frames for the live-demo GIF (function table → flame graph → source view). |
 | [`encode-demo-gif.sh`](encode-demo-gif.sh) | Encodes those frames into `docs/demo.gif` with `ffmpeg` and a 2-pass palette. |
 
 ## Prereqs
 
+The capture scripts load puppeteer from the repo root's `node_modules`.
+There is no root `package.json` (the frontend has its own), so install it
+ad hoc when you need to regenerate assets:
+
 ```bash
 # From the repo root
-npm install              # pulls puppeteer (devDependency only)
+npm install puppeteer    # creates ./node_modules — not committed
 apt-get install ffmpeg   # only needed for encode-demo-gif.sh
 ```
 
@@ -26,7 +30,8 @@ Open four terminals (or run the first three in the background).
 ./tests/sample_workload
 
 # 2) PerfLens server with --binary so source mapping works
-python3 server/perflens_server.py \
+#    (needs the UI built: npm --prefix frontend run build)
+.venv/bin/perflens serve \
     --http-port 8089 --port 9899 \
     --binary tests/sample_workload --source-dir tests
 

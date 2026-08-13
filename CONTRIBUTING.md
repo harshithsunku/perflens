@@ -6,9 +6,14 @@ Thanks for taking the time. PerfLens is small on purpose, so a short list covers
 
 - **Small, deliberate dependency set.** The server depends on fastapi,
   uvicorn, orjson, and zstandard — everything installs user-space via
-  `uvx`/`pipx`/`pip`. New dependencies need an issue first. The UI stays
-  plain HTML + vanilla JS + CSS (no bundler, no framework), and the agent
-  stays a zero-dependency static C binary.
+  `uvx`/`pipx`/`pip`. New dependencies need an issue first. The MCP server
+  is an optional extra (`perflens[mcp]`) so the default install stays
+  small, and the agent stays a zero-dependency static C binary.
+- **Node is dev/CI-only.** The UI is React 19 + TypeScript + Vite in
+  `frontend/`, but the wheel ships the prebuilt assets, so `uvx perflens`
+  never needs npm. Keep it that way.
+- **The agent is frozen.** `agent-c/` and the TCP wire protocol do not
+  change; everything server-side of the socket is fair game.
 - **Defensive parsing.** `perf script` output drifts across kernel versions. Add tests under `tests/` if your change touches `parser.py`.
 - **No proprietary names** in code, docs, comments, or commit messages. The repo is meant to stay generic.
 
@@ -33,10 +38,29 @@ Then browse `http://localhost:8080`.
 ## Tests
 
 ```bash
-make -C agent-c                      # the protocol tests drive the real binary
-.venv/bin/python -m pytest tests/    # full suite
-npm ci && npm run e2e                # puppeteer browser E2E (self-contained)
+make -C agent-c                          # the protocol tests drive the real binary
+.venv/bin/python -m pytest tests/        # full suite
+npm --prefix frontend ci
+npm --prefix frontend run test           # vitest unit tests
+npm --prefix frontend run build          # emits into src/perflens/ui/
+npm --prefix frontend run e2e            # Playwright E2E (starts its own server)
 ```
+
+After changing `src/perflens/api/models.py` or any route, regenerate the
+schema and the TypeScript types — CI diff-checks both:
+
+```bash
+python tools/export_openapi.py && npm --prefix frontend run typegen
+```
+
+Two things that catch people out:
+
+- `VERSION` is compiled into the agent, so run `make -C agent-c clean &&
+  make -C agent-c` after a version change or the protocol test fails
+  against a stale binary.
+- `src/perflens/ui/` is a gitignored build output. CI's pytest job runs
+  *without* it, so if you touch anything around static serving, reproduce
+  that by moving the directory aside before trusting a green local run.
 
 For the C agent:
 
@@ -70,7 +94,7 @@ For UI bugs, a screenshot and the browser console log help.
 Screenshots and the demo GIF on the docs site (`docs/screenshots/`, `docs/demo.gif`) are author-generated via puppeteer + ffmpeg. The scripts live in [`tools/`](tools/). See [`tools/README.md`](tools/README.md) for the full flow; the short version:
 
 ```bash
-npm install
+npm install puppeteer            # ad hoc — there is no root package.json
 # (start server + agent + workload — see tools/README.md)
 node tools/capture-screenshots.js
 node tools/capture-demo-gif.js && tools/encode-demo-gif.sh
@@ -78,7 +102,17 @@ node tools/capture-demo-gif.js && tools/encode-demo-gif.sh
 
 ## Releasing
 
-Releases are tag-driven: pushing `v<x.y.z>` triggers `.github/workflows/build.yml`, which builds the Python wheel + sdist, static C agent binaries for five architectures, and static addr2line/readelf tools bundles, attaches them to a GitHub Release, and publishes the package to PyPI via Trusted Publishing. Bump `version` in `pyproject.toml` **and** the `VERSION` file before tagging — they must match the tag.
+Releases are tag-driven: pushing `v<x.y.z>` triggers `.github/workflows/build.yml`, which builds the Python wheel + sdist, static C agent binaries for five architectures, and static addr2line/readelf tools bundles, attaches them to a GitHub Release, and publishes the package to PyPI via Trusted Publishing.
+
+Before tagging, bump the version in **three** places — they must agree with each other and with the tag:
+
+| Where | Why it matters |
+|---|---|
+| `VERSION` | compiled into the agent; drives release asset names |
+| `pyproject.toml` | the published package version |
+| `src/perflens/__init__.py` | reported by `perflens version`, the OpenAPI `info.version`, and the MCP server |
+
+Then regenerate the schema (`python tools/export_openapi.py && npm --prefix frontend run typegen`) and rebuild the agent, so nothing still carries the old number.
 
 ## License
 

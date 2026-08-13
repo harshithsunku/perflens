@@ -396,7 +396,7 @@ dist/
 
 ### CI
 
-[`.github/workflows/test.yml`](.github/workflows/test.yml) runs the pytest suite on Python 3.10–3.13 (parser, aggregator differentials against device-captured fixtures, source mapper, HTTP API, provisioning against a fake release server, and the C-agent wire protocol driven through a fake framing server with a `perf` shim), plus a puppeteer browser E2E that replays a fixture session through the real UI (`node tests/e2e_ui.mjs`, self-contained).
+[`.github/workflows/test.yml`](.github/workflows/test.yml) runs the pytest suite on Python 3.10–3.13 (parser, aggregator differentials against device-captured fixtures, source mapper, HTTP API, MCP tools, provisioning against a fake release server, and the C-agent wire protocol driven through a fake framing server with a `perf` shim), plus a frontend job: OpenAPI schema drift check, vitest unit tests, and a self-contained Playwright browser E2E (`frontend/e2e/`) that replays a fixture session through the real UI.
 
 [`.github/workflows/build.yml`](.github/workflows/build.yml) lints (`ruff`), runs the pytest suite, builds and smoke-runs the Python wheel (with a wheel-contents check), builds the static C agent for five architectures (x86_64, aarch64, aarch64_be, armv7l, armeb), and builds static addr2line/readelf tools bundles (x86_64, aarch64) for `perflens provision`. Big-endian agent targets use musl toolchains from musl.cc since Ubuntu only ships little-endian sysroots. Tagged pushes (`v*`) create a GitHub Release and attach all artifacts — including raw `perflens-agent-linux-<arch>` binaries with stable names that `install-agent.sh` and the agent's `--update` fetch from `releases/latest/download/`. Tagged pushes also publish the package to [PyPI](https://pypi.org/project/perflens/) via Trusted Publishing (OIDC — no stored tokens).
 
@@ -431,8 +431,7 @@ perflens/
 │   └── wire-protocol.svg
 ├── tests/
 │   ├── conftest.py               # shared fixtures (device-captured sessions)
-│   ├── test_*.py                 # pytest suite (parser, aggregator, HTTP, agent, ...)
-│   ├── e2e_ui.mjs                # puppeteer browser E2E (self-contained)
+│   ├── test_*.py                 # pytest suite (parser, aggregator, HTTP, MCP, agent, ...)
 │   ├── fixtures/                 # gzipped perf sessions from real devices
 │   ├── sample_workload.c         # multi-function test program
 │   └── Makefile                  # gcc -g -O0 -lm

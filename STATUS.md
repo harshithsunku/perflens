@@ -1,430 +1,171 @@
 # PerfLens — Project Status
 
-Cross-session working state for the ongoing overhaul. Update this file at the
-start and end of every working session. The full plan lives in the session
-plan file; this is the executable summary.
+Cross-session working state. Update at the start and end of every working
+session. Release history lives in [CHANGELOG.md](CHANGELOG.md); this file
+is what is *currently true* and what is *left to do*.
 
-## Current phase
+## Current phase — stabilization (feature freeze)
 
-**Phases 0–4 complete** (0, 1, 2, 3a+3b, 3e, 3c+3d, 4), and
-**perflens 0.6.0 is LIVE on PyPI** (published 2026-07-15 via twine;
-`uvx perflens` / `pip install perflens` work from the index now —
-verified with a clean-venv install + serve smoke test). Remaining for
-**Phase 5**: device E2E matrix, 1h RSS scale test, 500k-file index
-test, docs-site refresh, GitHub release tag `v0.6.0` (agents + tools
-bundles; the publish-pypi job now runs on tags with skip-existing, so
-the v0.6.0 tag is safe). ONE-TIME SETUP REQUIRED before tagging: add
-the GitHub publisher on pypi.org (project perflens → Publishing:
-owner harshithsunku, repo perflens, workflow build.yml, environment
-pypi) and create the `pypi` environment in the GitHub repo settings —
-without both, the publish job errors (the release itself still works).
+**The feature set is frozen as of 2026-08-13.** The MCP server was the last
+capability added; from here the work is stabilization, verification and
+documentation, not new surface.
+
+- **Published:** 0.7.0 (PyPI, tag `v0.7.0`).
+- **Version is deliberately held at 0.7.0** — `VERSION`, `pyproject.toml`
+  and `src/perflens/__init__.py` all agree. It moves to 0.8.0 only when the
+  stabilization checklist below is clear.
+- **Unreleased on master** — a large body of work sits between the `v0.7.0`
+  tag and HEAD:
+  - `cfbe5c8` server split into `AppContext` modules + typed Pydantic API
+  - `bc6e6c5` React 19 + TypeScript + Vite frontend, Playwright E2E
+  - `eb7664a` **API v2** — REST surface renamed, `{"error": {code, message}}`
+    envelope, SSE consolidated
+  - `f847309` UX polish (keyboard shortcuts, skeletons, diff legend, a11y)
+  - `598e90b` CI fix (no-UI fallback 404s like the static mount; 413 phrase
+    pinned against the Python 3.13 rename)
+  - `4a966c7` **MCP server** (`perflens mcp`) + `skills/perflens-profiling/`
+- **CI is green** on all workflows (pytest 3.10–3.13, frontend vitest +
+  Playwright + OpenAPI drift, wheel + five agent architectures).
 
 ### Start-here for the next session
 
-- Run the packaged server: `uvx --from ./dist/perflens-0.6.0-py3-none-any.whl
-  perflens serve ...` (build with `uv build`). Dev mode now needs the deps
-  (fastapi/uvicorn/orjson/zstandard): `uv venv .venv && uv pip install -e
-  '.[dev]'` then `.venv/bin/perflens serve ...`. Plain `PYTHONPATH=src
-  python3 -m perflens.cli serve` only works in an env with those deps
-  installed; same for the compat shim `server/perflens_server.py`.
-- Tests: `make -C agent-c && .venv/bin/python -m pytest tests/` (110 tests)
-  and `npm ci && npm run e2e` (22-assertion puppeteer run, self-contained).
-  CI runs both: `.github/workflows/test.yml` (pytest 3.10–3.13 matrix +
-  browser e2e on push/PR) and `build.yml` (pytest before the wheel build).
-- Build/CI/README/docs-site/UI-docs are all current as of the post-0.6.0
-  feature work (2026-07-16); the docs/ GitHub Pages tarball-era debt was
-  cleared in 1bd2f12.
-- Sessions now default to `~/.perflens/sessions` (`--sessions-dir` to
-  override; `PERFLENS_HOME` moves the whole root — tests use this).
-  The old repo-root `sessions/` dir is no longer read.
-
-## Overhaul roadmap
-
-- [x] **Phase 0** — STATUS.md + baseline verification on both devices
-- [x] **Phase 1a** — C agent fixes (commit 83b2bdc): CAS-slot child tracking,
-      start-while-paused rejection, reprobe-while-profiling rejection
-      (use-after-free), metrics config locking, `--rounds`, `--version` +
-      `--update` self-update, `--token`/`PERFLENS_TOKEN` in hello,
-      getaddrinfo hostname support in `--server`.
-- [x] **Phase 1b** — Python agent removed; C agent is the only agent.
-      `install-agent.sh` added (curl-able, arch+endian detect, verifies
-      binary, installs to `~/.perflens/bin`). Release assets: raw static
-      binaries with STABLE names `perflens-agent-linux-<arch>` (required by
-      `releases/latest/download/` for installer + `--update`) plus versioned
-      tarballs. CI `build-agent` (Python) job dropped; docs/README/UI docs
-      updated.
-- [x] **Phase 1c+1d** — Server correctness + security, all done:
-      `_cmd_lock` around pending/response maps (+ fail-fast on disconnect);
-      `agent_session_lock` + shared `_install_agent_session()` for both
-      connect paths; `merge_perf_stat` accumulation (SSE now broadcasts the
-      merged totals; perf_stat reset on new connection); multi-marker
-      `split_perf_data` (multi-round `--output` files no longer lose rounds
-      2..N); path-traversal fixes for static files AND session ids; HTTP
-      binds 127.0.0.1 by default (`--http-bind` to expose, with warning);
-      `/api/browse` confined to `--browse-root` (default: home);
-      `--token`/`PERFLENS_TOKEN` validated at hello (hmac.compare_digest);
-      stale parser test group index fixed (30/30 pass now).
-- [x] **Phase 2a** — Incremental aggregation done: `server/aggregator.py`
-      (EventAccumulator + AggregatorSet + build_per_event_batch); rebuild
-      worker now folds only NEW chunks (O(new) per chunk, was O(total));
-      inline expansion + addr2line at ingest only; source-file index
-      incremental; replay/import reuse the same aggregator path;
-      `test/test_aggregator_diff.py` pins batch↔incremental equivalence on
-      both device fixtures (12/12 event combos identical). Aggregates cover
-      the full session; the --max-samples deque remains only as the raw
-      window for thread/source drill-downs.
-- [x] **Phase 2b+2c** — Done. 2b (landed with the 2a commit): chunks
-      spooled to disk as received (`chunk_%05d.zst` stores the compressed
-      payload as-is), `_raw_chunks` RAM growth eliminated, `_save_session`
-      metadata-only, replay cache (`replay_cache.json.gz`, config-keyed;
-      2nd replay ~40x faster). 2c: SSE now carries only a tiny
-      `data_version` stamp per chunk (was the full multi-MB per_event
-      blob); new `GET /api/per-event?event=X` serves the cached snapshot
-      gzip-encoded (~11x); UI fetches only the viewed event, with
-      in-flight guard + catch-up; flamegraph zoom is now an ancestry
-      name-path (`flamegraphZoomNames`) that survives data refreshes and
-      cannot mis-target same-named frames in other stacks; breadcrumbs =
-      ancestry chain. Verified in a real browser (puppeteer): live
-      notify→fetch→render, zoom survives chunk refresh, 0 JS errors.
-      NOTE: test/e2e_flamegraph.mjs is stale relative to the CURRENT UI
-      (expects pre-swap single/double-click semantics; fails identically
-      on HEAD) — rewrite in Phase 4.
-- [x] **Phase 2d** — Done. New `server/symcache.py`: persistent caches under
-      `~/.perflens/cache` (override root: `PERFLENS_HOME`) — sqlite
-      `symbols.db` for addr2line resolutions / inline chains / symbol
-      tables / DWARF file lists keyed by binary identity
-      (realpath+mtime+size), plus `source_index_<sha1>.json.gz`.
-      Source index: `os.scandir` background build, instant load from
-      cache at startup, atomic swap; `_find_source_file` NEVER walks the
-      tree (misses aren't negative-cached while the index is missing).
-      Probe prefers `llvm-addr2line`; `llvm-dwarfdump --show-sources`
-      used for DWARF file lists when present. `/api/index/status` now
-      truncates the DWARF list (200 + total + truncated flag); new
-      paginated `/api/index/files?offset=&limit=&q=`.
-      Verified: 100k-file synthetic tree scans+persists in 0.14s, warm
-      start loads it in 0.05s; live session populated symbols.db; warm
-      restart hits all three caches (symbols/addr2line/index) on replay.
-- [x] **Phase 3a+3b** — Done. `git mv` to src-layout: `src/perflens/{server,
-      cli,parser,aggregator,source_mapper,symcache}.py` + `ui/` inside the
-      package; intra-package imports fixed; UI served via
-      `importlib.resources`; sessions moved to `~/.perflens/sessions`
-      (`--sessions-dir` flag); in-process `zstandard` decompression with
-      external-binary fallback; compat shim kept at
-      `server/perflens_server.py`. `pyproject.toml` (hatchling, dep:
-      zstandard only for now — fastapi/uvicorn/orjson land WITH the 3e
-      migration); console script `perflens` with subcommands `serve`
-      (default) / `import` / `push-agent USER@HOST` (ssh arch detect →
-      download release binary → scp) / `version`. Verified: wheel builds
-      via `uv build` (100 KB, UI files confirmed inside), `uvx --from
-      ./dist/...whl perflens serve` cold-runs with UI served from the
-      wheel and an agent connect round-trip, shim works, both test
-      suites pass. PyPI name `perflens` free (2026-07-15); prepare, don't
-      publish.
-- [x] **Phase 3e** — Done. HTTP layer migrated to FastAPI/uvicorn: new
-      `src/perflens/web.py` (all 26 endpoints ported 1:1, orjson responses,
-      asyncio SSE hub fed from worker threads via call_soon_threadsafe,
-      StaticFiles for the UI, uvicorn in the main thread); `server.py` lost
-      its 876-line BaseHTTPRequestHandler and now owns only agent
-      protocol/state/sessions (SSE broadcasts go through a pluggable sink
-      the web layer registers). Deliberate parity choices: manual JSON body
-      + query parsing (no pydantic validation → error shapes stay
-      `{'error': ...}`, never FastAPI's `{'detail': ...}`), hand-rolled
-      gzip in `_json()` (same >8KB/level-1 policy; GZipMiddleware avoided
-      because it interacts badly with SSE streaming). Verified by
-      golden-diff: every endpoint captured from the OLD server pre-
-      migration and compared — all JSON semantically identical, exports
-      (collapsed/SVG) + index.html byte-identical, all error status codes
-      equal, traversal probes still 404. Live e2e on the new stack: agent
-      connect → ping → start → 3 chunks streamed → SSE (agent_connected,
-      data_version per chunk, accumulated perf_stat, all 3 metrics types,
-      keepalives) → gzip per-event fetch (20KB→2.4KB) → pause/resume/stop
-      → session saved → replay 0.27s cold / 9ms cached; puppeteer browser
-      run clean (only pre-existing favicon 404); uvx cold-run of the wheel
-      OK (16 deps resolved). BONUS FIX found by the golden diff: function
-      summaries had hash-randomized ordering for equal-count functions
-      (`set(a)|set(b)` union in aggregator.py + parser.py) — now a
-      deterministic dict-based union; output stable across processes.
-- [x] **Phase 3c+3d** — Done. `src/perflens/provision.py`: tool resolution
-      flag → PATH → `~/.perflens/bin` → sha256-verified download of the
-      static `perflens-tools-linux-<arch>.tar.gz` release asset (x86_64 +
-      aarch64); `perflens provision` / `provision --status` CLI; server
-      `probe_tools` auto-provisions addr2line/readelf at startup when
-      both PATH and cache miss, degrades with instructions offline.
-      Verified against a fake release server: fresh-home download,
-      idempotent re-run, checksum-mismatch REFUSED, offline degrade
-      (exit 1 + instructions), and a full bare-machine e2e (stripped
-      PATH + fresh PERFLENS_HOME → server auto-provisions at startup →
-      replay with line-level source annotation through the downloaded
-      static addr2line, inline probe passes). CI overhauled: PyInstaller
-      server matrix + AlmaLinux legacy job DELETED; new `python-package`
-      job (ruff + both suites + `python -m build` + twine check +
-      wheel-contents assert + install-and-serve smoke test); new
-      `build-tools` job builds static binutils 2.44 (pinned sha256)
-      addr2line+readelf for x86_64 + aarch64 — recipe validated locally
-      for BOTH arches (key trick: `make -C binutils LDFLAGS=-all-static`
-      relink; plain `-static` produces dynamic binaries via libtool);
-      `publish-pypi` job prepared but `if: false` (enable steps are in
-      the workflow comment); release job attaches wheel/sdist + agent
-      binaries + tools bundles with new uvx-first release notes.
-      `build_package.sh` rewritten (--server → uv/python -m build with
-      contents check; PyInstaller path deleted). README install story
-      now uvx/pipx-first; layout + badges + prerequisites updated.
-      All 15 pre-existing ruff findings fixed — `ruff check src/` is
-      CLEAN and the CI lint job is strict. VERSION file synced 0.5.0 →
-      0.6.0 (it drives agent version + asset names).
-- [x] **Phase 4** — Done. `test/` renamed `tests/` (git mv, fixtures
-      intact); everything is pytest now (`[tool.pytest.ini_options]` in
-      pyproject, shared `tests/conftest.py` with fixture-session loaders
-      and an isolated `PERFLENS_HOME` fixture). 109 tests:
-      parser (30) + parser_compat (15) + aggregator (12) + aggregator_diff
-      (12, differential vs both device fixtures) + source_mapper (9) +
-      **test_http_api.py** (25: every endpoint's shape via FastAPI
-      TestClient, path/session-id traversal + browse confinement
-      regressions, replay + replay-cache, exports, gzip negotiation, SSE
-      initial frames + worker-thread broadcast against a real uvicorn) +
-      **test_provision.py** (17: fake release HTTP server — fresh
-      download, flat/hostile bundle members, checksum/sidecar/incomplete
-      refusals, offline degrade, resolve_tool precedence flag→PATH→cache→
-      download, CLI idempotence) + **test_agent_protocol.py** (13: the
-      real C binary against a fake framing server with a `perf` shim on
-      PATH — hello incl. --token/env token, ping/status/unknown-cmd,
-      full lifecycle with zstd data frames decompressed and verified
-      (probe results, PERF_STAT section), start-while-paused rejection,
-      metrics frames, reconnect-after-disconnect, --output multi-round
-      marker layout). Stale puppeteer e2e (3 files, pre-zoom-swap
-      semantics) replaced by ONE self-contained `tests/e2e_ui.mjs`
-      (22 assertions: starts its own server + isolated PERFLENS_HOME,
-      materializes the x86 fixture session, drives the real UI — landing
-      → replay → function table → flamegraph ancestry zoom/breadcrumbs/
-      reset/search/context menu → export menu + all 3 export endpoints;
-      zero JS errors). `npm run e2e`; package-lock.json committed for CI.
-      New CI `test.yml`: pytest matrix (3.10–3.13, agent built first) +
-      browser-e2e job; `build.yml` now runs pytest too. BONUS UI FIX
-      found by the e2e: after a session replay the Flame Graph tab
-      rendered empty (renderFlamegraph aborts at clientWidth 0 while the
-      tab is hidden; live mode repaints on the next SSE refresh, replay
-      never does) — the tab-click handler now re-renders when the
-      container has no SVG. Doc sweep: README/CLAUDE/CONTRIBUTING/
-      .gitignore/tools-README updated for tests/ + current stack.
-- [ ] **Phase 5** — Full device E2E matrix, 1h RSS-bounded scale test,
-      synthetic 500k-file source-index test, clean-container `uvx` run,
-      release prep (tag will now carry the post-0.6.0 features below —
-      consider calling it 0.7.0 rather than 0.6.0; bump VERSION first).
-- [x] **Post-0.6.0 hardening** (c7d7381) — agent: network-metrics snprintf
-      overflow (size_t underflow on many-interface hosts), 64 MB frame cap,
-      buf_ensure cap fix, TCP keepalive (dead peers unblock recv →
-      --server reconnects), shutdown-before-join recv teardown, socket()
-      retry, strdup guard. Server: agent-replacement no longer clobbers
-      the new session's state, AggregatorSet swapped on reset (rebuild
-      worker can't fold old chunks into a new session, and it survives
-      bad chunks instead of dying silently), 128 MB inbound frame cap.
-- [x] **Opt-in metrics + UI settings** (19701ee) — agent disk I/O collector
-      (/proc/diskstats whole-disk + /proc/<pid>/io, off by default) behind
-      `configure_metrics {"disk": true}`; UI gear popover on the Device
-      Health strip (network/disk/interval, live). Fixed the broken
-      per-thread source view (l.code vs l.source + dead CSS classes),
-      control-bar state on reload, sparkline hover readouts, docs drawer
-      brought to the 0.6.0 era.
-- [x] **Analysis features** (63163bb) — differential view (baseline from
-      live snapshot or saved session; Δ Self column + path-matched
-      red/blue flame graph recolor), timeline scrubbing (drag on health
-      sparklines → new GET /api/time-window over recv_ts-stamped samples),
-      opt-in per-thread CPU metrics (`configure_metrics {"threads":
-      true}` → Live CPU column in Threads tab), shareable URL hash
-      (tab/event/tid/zoom/session), metrics-settings read-back on open.
-      Fixed a stale-flamegraph bug (hidden-tab renders skipped, then tab
-      activation kept the old SVG). Tests: 110 pytest (+time-window),
-      e2e 22/22, plus an 11-assertion targeted puppeteer run for the new
-      features (scratchpad-only, not committed).
-
-Key decisions (user-confirmed): bugs → scalability → packaging order;
-**Python agent will be removed** (single static C agent, kept lightweight for
-embedded, with self-update); server stdlib-only rule **lifted** (world-class
-stack via uv, all user-space); PyInstaller frozen-server builds dropped once
-uvx works; HTTP defaults to localhost bind.
-
-## Known issues (baseline, 2026-07-15)
-
-### Agent (agent-c/perflens_agent.c) — ALL FIXED in 83b2bdc
-- ~~`g_child_pids` race~~ → lock-free CAS slots, signal-safe.
-- ~~start-while-PAUSED thread leak~~ → rejected; stale thread joined.
-- ~~reprobe while profiling freed caps under collection thread~~ → rejected.
-- ~~Metrics config unlocked~~ → under state_lock.
-- ~~No --rounds/--version/--update/--token~~ → all added.
-- NEW (latent, shared with old Python agent): multi-round `--output` files
-  concatenate `### PERF_STAT ###` sections; server's `split_perf_data`
-  splits on the FIRST marker only, so rounds 2..N are lost on `--import`.
-  Fix in parser.py during Phase 1c.
-
-### Server (server/perflens_server.py)
-- `_raw_chunks` grows unbounded in RAM all session — GBs over hours.
-  Fix: spool to disk at receive time (Phase 2b).
-- `_rebuild_worker` re-aggregates ALL samples every chunk — O(total)
-  every ~8s; the main big-codebase bottleneck (Phase 2a).
-- Session replay re-parses everything per request, uncached (Phase 2b).
-- `_build_source_index` synchronous full walk on first source request
-  (source_mapper.py:483) — minutes on 500k-file trees (Phase 2d).
-- `/api/index/status` returns full DWARF file list (multi-MB JSON) (2d).
-- ~~cmd response race / agent_session race / perf_stat last-wins / path
-  traversal (static + session id) / 0.0.0.0 bind / unconfined browse /
-  no auth~~ — ALL FIXED in Phase 1c+1d.
-
-### UI (ui/app.js)
-- Full re-render (table sort + flamegraph innerHTML) on every per_event SSE
-  message; per_event payloads are multi-MB on big profiles (Phase 2c).
-- Flamegraph zoom resets silently if zoomed function vanishes between rounds.
-
-### Tests
-- `test/test_parser_compat.py`: 15 regex-level checks FAIL — **stale test,
-  not a parser bug**: HEADER_RE gained the optional `/tid` capture group
-  (commit 8659c72) shifting event from group(4)→group(5); test still reads
-  group(4) (test line 160). All 15 end-to-end parse tests pass. Fix the test
-  in Phase 1.
-- No tests for server HTTP layer, source_mapper, or agent.
-
-## Test device state
-
-| | x86 | ARM |
-|---|---|---|
-| SSH | `root@192.168.0.111` | `kali@10.10.3.249` |
-| Host | Proxmox host `pve2` | Kali NetHunter, SDM845 phone |
-| Arch / cores | x86_64 / 4 | aarch64 / 8 |
-| Kernel | 6.17.13-2-pve | 6.12.92-sdm845-nh |
-| perf | 6.12.95 | 7.0.12 |
-| perf_event_paranoid | 4 (agent runs as root — OK) | 2 (own-process profiling OK) |
-| gcc on device | 14.2 | 15.3 |
-| Test dir | `/root/perflens-test/` | `~/perflens-test/` |
-| Last verified | 2026-07-15 baseline PASS | 2026-07-15 baseline PASS |
-
-Local dev machine: 192.168.0.85 (same subnet as x86 device; ARM device
-reached via gateway). Local aarch64 cross-toolchain available:
-`aarch64-linux-gnu-gcc` → `make CROSS=aarch64-linux-gnu-` in `agent-c/`.
-
-## Baseline smoke test (repeat any session)
-
 ```bash
-# 1. Local
-.venv/bin/python -m pytest tests/            # full suite must pass
-cd agent-c && make && cd ..                   # static x86_64 agent builds
-python3 server/perflens_server.py --http-port 8080 --port 9999 &
-curl -s localhost:8080/api/status
-
-# 2. Device (x86 shown; ARM identical with kali@10.10.3.249 + CROSS build)
-ssh root@192.168.0.111 'mkdir -p /root/perflens-test'
-scp agent-c/perflens-agent tests/sample_workload.c tests/Makefile \
-    root@192.168.0.111:/root/perflens-test/
-ssh root@192.168.0.111 'cd /root/perflens-test && make && \
-    nohup ./sample_workload >/dev/null 2>&1 & \
-    nohup ./perflens-agent --listen --port 9999 > agent.log 2>&1 &'
-# NOTE: use pkill -x (never pkill -f — it matches the ssh shell and kills it)
-
-# 3. Drive via API
-curl -X POST localhost:8080/api/connect -d '{"host":"192.168.0.111","port":9999}'
-WPID=$(ssh root@192.168.0.111 'pgrep -x sample_workload | head -1')
-curl -X POST localhost:8080/api/agent/command -d "{\"cmd\":\"start\",\"args\":{\"pid\":$WPID}}"
-sleep 20
-curl localhost:8080/api/status                # total_samples > 0, chunks grow
-curl 'localhost:8080/api/thread-summary?event=cycles'
-curl -X POST localhost:8080/api/agent/command -d '{"cmd":"stop"}'
-curl localhost:8080/api/stop                  # disconnect → session saved
-curl localhost:8080/api/sessions              # then GET /api/sessions/<id>
+uv venv .venv && uv pip install -p .venv/bin/python -e '.[dev]'
+make -C agent-c                              # protocol tests need the real binary
+.venv/bin/python -m pytest tests/            # 149 tests
+npm --prefix frontend ci
+npm --prefix frontend run test               # vitest
+npm --prefix frontend run build              # emits into src/perflens/ui/
+npm --prefix frontend run e2e                # Playwright, self-contained
 ```
 
-Baseline result 2026-07-15: **PASS on both devices** — connect, capability
-probe (6 record events, fp callgraph), streaming (~3k samples/round),
-pause/resume/stop, health metrics (incl. temp on ARM), session save,
-replay (<150ms, 0.28MB JSON). Symbolization better on ARM (libm has symbols
-there). x86 workload shows ~86% [unknown] frames — fp unwind can't cross
-stripped libm; expected, not a bug.
+Two things that bite if forgotten:
+
+- **`VERSION` drives the agent's baked-in version**, so `make -C agent-c
+  clean && make -C agent-c` after any version change or
+  `test_agent_protocol.py::test_hello` fails against a stale binary.
+- **The frontend is a gitignored Vite output.** A source checkout without
+  `npm run build` has no `src/perflens/ui/`, which is the configuration CI
+  runs in — worth reproducing locally (move the directory aside) before
+  trusting a green local suite.
+
+## Stabilization checklist
+
+Ordered roughly by user impact.
+
+- [ ] **The published docs site documents the v1 API.**
+      `docs/reference.html` still lists `/api/per-event`,
+      `/api/thread-summary`, `/api/thread-view`, `/api/time-window`,
+      `/api/connect`, `/api/stop`, `/api/export`, `/api/import` — every one
+      renamed by API v2 in `eb7664a`. `docs/architecture.html` has the same
+      problem. This is the most visible piece of staleness in the project:
+      anyone following the site's reference gets 404s. Regenerate against
+      the committed `frontend/openapi.json`, and add the MCP server.
+- [ ] **Server dependencies are floors only** (`fastapi>=0.110`,
+      `uvicorn>=0.29`, `orjson>=3.9`, `zstandard>=0.21`, `mcp>=2,<3`). CI
+      installs the latest each run, so a FastAPI or Pydantic release can
+      shift the generated OpenAPI schema and fail the drift check without
+      any change on our side. Decide: upper bounds, or generate the schema
+      in CI instead of diffing a committed artifact.
+- [ ] **Node 20 deprecation** — `actions/checkout@v4`,
+      `actions/setup-python@v5`, `actions/setup-node@v4` and
+      `actions/upload-artifact@v4` are being forced onto Node 24 with a
+      warning in every run. Bump before the forced migration.
+- [ ] **Starlette deprecation** — `TestClient` warns that `httpx` support is
+      deprecated in favour of `httpx2`. Affects the test suite only, but it
+      will become an error eventually.
+- [ ] **Retire the compat shims.** `server/perflens_server.py` and
+      `src/perflens/server.py` were introduced as "one release" bridges in
+      the 0.6.0-era restructure and have now outlived two releases. Remove
+      at 0.8.0, or commit to keeping them.
+- [ ] **Device E2E matrix** — full live run on both reference devices
+      (x86_64 and aarch64): connect, capability probe, continuous
+      collection, pause/resume/stop, health metrics, session save, replay,
+      and the same flow driven through the MCP tools.
+- [ ] **Scale tests** — long-run RSS boundedness (~1 h of continuous
+      collection) and a synthetic large source tree (~500k files) through
+      the source index.
+- [ ] **Clean-container `uvx` run** of the built wheel: no Node, no
+      binutils, no repo — confirms the shipped artifact stands alone.
+- [ ] **MCP on real data** — the tools are covered by 28 tests against
+      fixture sessions and were driven end to end over stdio against a live
+      server, but not yet against a live *device* session. Optional extra:
+      an evaluation set (10 Q/A against the committed fixtures, per the
+      mcp-builder format) to catch regressions in tool usefulness.
+
+### Release checklist for 0.8.0 (when the above is clear)
+
+1. Bump **three** places — `VERSION`, `pyproject.toml`,
+   `src/perflens/__init__.py` — they must agree, and `info.version` in the
+   exported schema follows.
+2. `python tools/export_openapi.py && npm --prefix frontend run typegen`,
+   then confirm `git diff` shows only the version line.
+3. `make -C agent-c clean && make -C agent-c` (version is compiled in).
+4. Write the CHANGELOG entry from the unreleased commits listed above.
+5. Tag `v0.8.0` — the tag drives the GitHub Release and the PyPI publish
+   via Trusted Publishing.
+
+## Known limitations (current, by design or accepted)
+
+- Single agent connection at a time; a new agent replaces the current one.
+- Per-thread views are live-only — a saved session's replay carries the
+  thread list but no per-thread aggregates.
+- Live `perf_stat` has no REST endpoint; it is read from the SSE head.
+- Capability probing adds ~8–14 s to first-connection startup.
+- In continuous pipe mode the first chunk after `start` may carry only
+  PERF_STAT data before samples begin flowing.
+- `addr2line` source mapping needs an unstripped `-g` build.
+- Some container environments reject `perf record -p <pid>`; system-wide
+  `perf record -a` usually works instead.
+
+## Reference devices
+
+Kept generic on purpose — this repo carries no addresses, hostnames or
+credentials.
+
+| | x86 reference | ARM reference |
+|---|---|---|
+| Arch / cores | x86_64 / 4 | aarch64 / 8 |
+| Kernel | 6.x | 6.x |
+| `perf_event_paranoid` | agent runs as root | 2 (own-process profiling OK) |
+| Notes | hypervisor host | phone-class SoC, has thermal metrics |
+
+The local dev box has a **hybrid CPU** (event names like `cpu_atom/cycles/`)
+and slow `perf script` rounds — useful for parser coverage, misleading for
+timing. Use the reference devices for anything timing-sensitive, and
+`pgrep -x` (never `pgrep -f`, which matches wrapper shells).
+
+Cross-compiling the agent: `make -C agent-c CROSS=aarch64-linux-gnu-`.
 
 ## Regression fixtures
 
-`tests/fixtures/session-{x86,arm}-baseline/` — real captured sessions
-(chunks gzipped). Used by the Phase 2a differential aggregator test
-(old batch path vs new incremental path must produce identical
-snapshots), the HTTP API replay tests, and the browser e2e.
+`tests/fixtures/session-{x86,arm}-baseline/` — real captured sessions,
+chunks gzipped. Used by the differential aggregator test (batch vs
+incremental must agree), the HTTP API replay tests, the Playwright E2E, and
+the MCP tool tests.
 
 ## Session log
 
-- **2026-07-15** — Full project analysis (agents/server/UI/CI). Plan approved
-  and saved. Phase 0 executed: C agent built natively + aarch64 cross,
-  baseline PASS on both devices, fixtures captured, STATUS.md created.
-- **2026-07-15 (cont.)** — Phase 1a: C agent race/state-machine fixes +
-  self-update/--rounds/--token/getaddrinfo, all verified live against the
-  running server (state machine incl. rejection paths, self-update against
-  a fake release HTTP server, --rounds 2 headless). Phase 1b: Python agent
-  and run_agent.sh deleted, install-agent.sh added (endianness detection
-  verified on x86_64 + aarch64 device), build_package.sh + CI reworked
-  (raw stable-name binaries as release assets), all docs updated.
-- **2026-07-15 (cont.)** — Phase 2a: incremental aggregation. Differential
-  test 12/12 identical vs batch on device fixtures; live streaming verified
-  (consecutive per_event snapshots grow 2985→3057 samples, hybrid-CPU event
-  names like cpu_core/cycles/ handled); replay through the new batch path
-  0.22s. NOTE: local dev box has a hybrid CPU — useful extra test coverage.
-- **2026-07-15 (cont.)** — Phase 1c+1d: server correctness + security.
-  Verified live: traversal blocked (plain + URL-encoded + session-id),
-  bind 127.0.0.1, browse snapped to home, token rejection AND acceptance
-  (local agent), full inbound-mode regression on the x86 device with token
-  (perf_stat accumulation confirmed: cycles 74.2B→98.8B→172.9B final in
-  saved session; replay OK). NOTE: x86 device rebooted into kernel
-  7.0.14-4-pve since baseline (was 6.17.13-2-pve).
-- **2026-07-15 (cont.)** — Phases 2a–2d (see roadmap entries above for
-  detail + verification evidence) and Phase 3a+3b: package restructure,
-  pyproject, `perflens` CLI, uvx cold-run verified. Dev-box note: it has
-  a hybrid CPU (event names like `cpu_atom/cycles/`) and slow perf-script
-  rounds (~15-20s per 5s round) — use the real devices for timing-
-  sensitive checks, and never `pgrep -f` for the workload (matches
-  wrapper shells; use `pgrep -x workload`).
-- **2026-07-15 (cont.)** — Phase 3e: FastAPI/uvicorn migration (see roadmap
-  entry for full detail + verification evidence). Method worth reusing:
-  golden-capture every endpoint from the old implementation BEFORE
-  touching it, then semantic-diff the new one — this caught a latent
-  hash-randomization bug in function-summary tie ordering that had
-  nothing to do with the migration itself. ruff run on src/: web.py
-  clean; ~15 pre-existing style findings (B904/E741/B007/E731/F541 in
-  server/source_mapper/symcache/parser) left for the 3d ruff CI job.
-- **2026-07-15 (cont.)** — Phase 3c+3d (see roadmap entry for detail).
-  Notes for the future: the static-binutils CI recipe was validated
-  locally for both arches before landing (x86_64 native + aarch64 via
-  local cross toolchain); binutils 2.44 source sha256 is pinned in the
-  workflow env. `perflens provision` flows all tested against a local
-  fake release server (PERFLENS_UPDATE_URL override — same mechanism
-  the agent self-update tests used). The misleading "inline disabled
-  (-i not supported)" log line when no --binary is set was reworded.
-  All 15 ruff findings fixed; `ruff check src/` clean.
-- **2026-07-15 (cont.)** — Phase 4: pytest suite + browser e2e + CI (see
-  roadmap entry for full detail). 109 pytest tests + 22-assertion
-  puppeteer run, all green; `test.yml` added, `build.yml` runs pytest.
-  Notes for the future: the agent protocol tests need `make -C agent-c`
-  first (they skip, not fail, without the binary — CI builds it before
-  pytest); the `perf` shim technique (PATH shim + PERF_SHIM_LOG) makes
-  the full agent lifecycle testable in ~2s with no root and no real
-  perf. The e2e caught a real replay-mode bug (flamegraph tab rendered
-  empty — clientWidth 0 while hidden) — fixed in the tab-click handler.
-  e2e clicks on re-renderable lists must be dispatched inside the page
-  (`page.evaluate(... .click())`), not via element handles, or the
-  initial-load `loadSessions()` race detaches them.
-- **2026-07-15 (cont.)** — Docs made fully current (wire-protocol flags
-  0–4, complete HTTP API tables, --sessions-dir, FastAPI architecture
-  wording, dependency policy replacing the stdlib-only rule), CHANGELOG
-  0.6.0 written, and **perflens 0.6.0 published to PyPI** (twine, user
-  account token; name was free). Verified live: clean-venv
-  `pip install perflens` → `perflens serve` → /api/status + UI 200.
-  User was advised to delete the account-scoped token and set up
-  Trusted Publishing. The build.yml publish-pypi job was then ENABLED
-  (fires on `v*` tags, `skip-existing: true` so the already-uploaded
-  0.6.0 doesn't fail the first tag) — needs the one-time pypi.org
-  publisher + GitHub `pypi` environment setup noted in Current phase.
-- **2026-07-16** — Post-0.6.0 review + feature session (three commits, no
-  tag yet — see the roadmap entries for detail): c7d7381 agent/server
-  hardening (memory-safety, dead-peer, session-replacement races),
-  19701ee opt-in disk I/O metrics + UI metrics settings + thread-source
-  fix, 63163bb differential view / timeline scrubbing / per-thread CPU
-  metrics / shareable URLs. Doc sweep: README, docs/ site, STATUS, UI
-  docs drawer, CLAUDE.md, CHANGELOG all current. Gotcha for future
-  sessions: JSON-escaped `\uXXXX` sequences in Edit-tool payloads become
-  literal bytes — a raw NUL landed in app.js twice and made grep treat
-  the file as binary; write `\\u0000` (or plain UTF-8 chars) instead.
-  Metrics opt-in contract: disk + threads collectors are OFF by default
-  (embedded targets), toggled live via `configure_metrics`; an argless
-  `configure_metrics` reads current settings without changing them.
+Condensed; anything older is in the CHANGELOG and git history.
+
+- **2026-07-15/16** — the 0.6.0 overhaul: agent hardening, incremental
+  aggregation, disk spooling + replay cache, persistent symbol caches,
+  src-layout package, FastAPI migration, provisioning, pytest suite. Then
+  post-0.6.0 features: opt-in disk/thread metrics, differential view,
+  timeline scrubbing, shareable URLs.
+- **2026-07-18** — 0.7.0 released. Then the module split, React frontend,
+  API v2 and UX polish landed together; that push left CI red.
+- **2026-08-13** — CI repaired (`598e90b`): the no-UI fallback was
+  answering 503 for every unmatched path once the UI became a gitignored
+  build artifact, and the 413 reason phrase changed under Python 3.13.
+  Method worth reusing: reproduce the CI *environment* locally (move
+  `src/perflens/ui` aside) rather than trusting a green local suite.
+- **2026-08-13** — MCP server + companion skill (`4a966c7`), then feature
+  freeze declared and the version held at 0.7.0 (`531f27b`). Notes: the MCP
+  Python SDK is on **2.x** (`MCPServer`, not 1.x's `FastMCP`;
+  `input_schema`, not `inputSchema`) — check the installed package, the
+  reference docs in circulation are still 1.x. httpx's ASGI transport
+  buffers whole responses, so it cannot consume SSE at all; SSE-dependent
+  tests need a real uvicorn instance. Annotated source records use
+  `line`/`source` keys, not the `line_no`/`text` the Pydantic model
+  suggests.

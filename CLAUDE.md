@@ -10,6 +10,12 @@ Generic open-source project — no proprietary names, no company-specific
 references, no IPs, credentials, or secrets anywhere in the repo or its
 history.
 
+**Status: feature-frozen since 2026-08-13, stabilizing toward 0.8.0.** The
+MCP server was the last capability added; the version is deliberately held
+at 0.7.0 until the stabilization checklist in [STATUS.md](STATUS.md) is
+clear. New features need an explicit decision to unfreeze — bug fixes,
+tests, docs and verification do not.
+
 ---
 
 ## Architecture
@@ -309,6 +315,16 @@ Options:
   (Playwright, self-contained: starts its own server + fixture session).
   For agent changes (rare, requires explicit approval): a real Linux
   target.
+- **Reproduce the CI environment, not just the CI commands.** The pytest
+  job runs without `src/perflens/ui/` (a gitignored Vite output), which is
+  a different code path from a dev machine that has built the frontend.
+  Move the directory aside before trusting a green local suite on anything
+  touching static serving. Likewise `VERSION` is compiled into the agent —
+  rebuild it after a version change or the protocol test fails on a stale
+  binary.
+- **Version lives in three places** — `VERSION`, `pyproject.toml`,
+  `src/perflens/__init__.py` — and they must agree; the OpenAPI
+  `info.version` follows the third.
 
 ---
 
