@@ -41,6 +41,37 @@ addr2line cache. Full detail in [CHANGELOG.md](CHANGELOG.md).
 
 Current counts: **165 pytest** (was 152), 24 vitest, 10 Playwright.
 
+### Where the work lives
+
+On branch **`validate-0.9.0`**, eight commits, pushed but **not merged and
+not released**. Nothing is tagged and nothing went to PyPI.
+
+Pushing the branch deliberately runs no CI: `test.yml` triggers on
+`push` to main/master plus `pull_request`, and `build.yml` on push to
+main/master plus `v*` tags. With no PR open, a feature-branch push fires
+neither. Opening a PR is what runs the gates — and is the next step when
+someone wants to review this.
+
+| | commit | what |
+|---|---|---|
+| 1 | `86c00f3` | ip-based line recovery + agent `symoff` |
+| 2 | `9085aae` | pre-index a startup `--binary` |
+| 3 | `40de454` | stop saving empty sessions; real version in metadata |
+| 4 | `2cb60a3` | MCP basename resolution |
+| 5 | `ac4708e` | drop Tailwind/Radix + a test collecting nothing |
+| 6 | `23df429` | docs corrected against the code |
+| 7 | `be7116d` | binutils-independence caveat closed |
+| 8 | (HEAD)    | this status entry — no hash, it would cite itself |
+
+Verified green on the branch: 165 pytest, ruff, `check_version.py`, 24
+vitest, 10 Playwright, 10 docs-shots, OpenAPI + typegen regeneration a
+no-op, and pytest in CI's no-UI configuration (164 passed, 1 skipped —
+`test_static_ui_served`, correctly).
+
+**Read commit 1 first if you review nothing else.** It is the one that
+changes profiling output, and it is the one with a deliberate exception to
+the agent freeze.
+
 ### Still open for 0.9.0
 
 - [x] **The wheel does not depend on system binutils** — the caveat left
@@ -69,11 +100,48 @@ Current counts: **165 pytest** (was 152), 24 vitest, 10 Playwright.
       resolved fastapi 0.141.1 / starlette 1.6.0 / uvicorn 0.52.2 — newer
       than the dev venv and inside the upper bounds, so the caps were
       exercised rather than merely declared.
-- [ ] **Docs screenshots need regenerating.** The source-annotation shot
-      now shows the wrong thing — it was captured against the declaration-line
-      bug. `npm run shots` then `npm run shots:live`.
-- [ ] **The version is still 0.8.0.** Bump before shipping; the docs drawer
-      renders it and is one of the screenshots, so bump *before* reshooting.
+- [ ] **Docs screenshots need regenerating.** `docs/screenshots/03-source.png`
+      now advertises the bug: it was captured 2026-08-13 07:25, before the
+      annotation fix, so it shows heat on a function's declaration line.
+      Run **both** halves — `npm run shots` then `npm run shots:live` —
+      never the first alone. `shots` overwrites the committed assets in
+      place from a fixture that has no resolvable binary, so committing its
+      output on its own downgrades seven shots to an `[unknown]`-at-73%
+      replay. That trap is now written down in `tools/README.md`; it caught
+      this session, mid-verification.
+- [ ] **The version is still 0.8.0, deliberately.** Not bumped: the fixes
+      are on a branch, unreviewed and unmerged, and bumping is step 1 of the
+      release recipe rather than part of the work. When it is time, bump
+      *before* reshooting the screenshots — the docs drawer renders the
+      version and is itself one of the shots.
+- [ ] **The response-model contract is still unenforced** — planned this
+      pass, not done. `_json` returns a raw Starlette `Response`, and
+      FastAPI skips `response_model` entirely when a handler does that, so
+      all 26 routes declare a schema nothing checks. `IndexStatus` had
+      drifted to declaring 3 of the 8 fields it returns; that instance is
+      fixed, **the class of defect is not**. CI checks schema-vs-committed-file
+      drift, never schema-vs-reality. A test validating a few representative
+      route bodies against their declared models would close it. The design
+      itself is correct and should not change — orjson plus per-route gzip
+      is the whole reason.
+- [ ] **`--binary` attributes every frame to that binary**, including libc
+      and kernel frames (`web.py`/`source_mapper.py`:
+      `self.binary_path or self._resolve_module_path(...)`). Pre-existing and
+      mostly harmless, because an unknown symbol name fails the lookup — but
+      it is what made ip-based recovery produce out-of-range addresses until
+      a span check was added, and it is why that check has to exist. Worth
+      revisiting as a real module-to-binary mapping.
+- [ ] **Test coverage gaps**, unchanged except for sessions:
+      `agentlink.py` (569 lines) is the largest untested Python module — the
+      15 agent-protocol tests drive the *C binary* and import no `perflens`
+      module at all. No `test_export.py`, no `test_cli.py`. No mypy or
+      pyright anywhere. The frontend has no `typecheck` script (only via
+      `tsc -b && vite build`), and every test/e2e/docs-shots `.ts` file sits
+      outside all tsconfig projects, so none is ever typechecked.
+- [ ] **`build.yml` has no `pull_request` trigger**, so wheel packaging and
+      all five agent cross-compiles are still post-merge discoveries. The
+      `symoff` change touches the agent, which makes this more relevant than
+      it was: a cross-compile break would not surface on the PR.
 - [ ] Two stale remote branches (`origin/stabilize-0.8.0`,
       `origin/copilot/review-security-issues`) — both fully merged
       ancestors of master. Left alone deliberately: deleting remote
@@ -568,6 +636,36 @@ the MCP tool tests.
 ## Session log
 
 Condensed; anything older is in the CHANGELOG and git history.
+
+- **2026-08-13** — **0.9.0 validation pass**, on branch `validate-0.9.0`
+  (pushed, not merged, not released). The scope call was validation-first
+  over new features, on the reasoning this file already recorded: every
+  defect 0.8.0 fixed was found by running something. That paid immediately —
+  **line-level source annotation had been putting every sample on its
+  function's declaration line** on every modern `perf`, because
+  `SCRIPT_FIELDS` omitted `symoff`. The agent was unfrozen to add it, and
+  the server additionally recovers the load base from the raw ip so old
+  agents and already-saved sessions are fixed too.
+
+  Four lessons worth carrying:
+
+  1. **The fixtures did not just fail to catch it — they encoded it.** Both
+     were captured through the same `-F` path and carry zero offsets, so
+     every assertion agreed with the broken behaviour. A fixture is a
+     recording of one configuration, and "the tests pass" means "it still
+     behaves the way it behaved when we recorded it".
+  2. **A compatibility feature broke the thing it normalized.** The `-F`
+     field list exists to make output consistent across kernels; older perf,
+     which cannot use it, was the only configuration that worked. Prefer
+     auditing what a normalization *drops*.
+  3. **The instrument was wrong, not just missing.** The container check
+     carried from 0.8.0 was a proxy for "does this need system binutils".
+     Stripping `PATH` answered that directly and needed no Docker. Ask what
+     property is under test before assuming the tool that was named for it.
+  4. **`npm run shots` overwrites committed screenshots in place.** Running
+     it as a CI smoke check and staging the result silently downgrades seven
+     of them. Now documented in `tools/README.md`; `git checkout --
+     docs/screenshots/` undoes it.
 
 - **2026-07-15/16** — the 0.6.0 overhaul: agent hardening, incremental
   aggregation, disk spooling + replay cache, persistent symbol caches,
