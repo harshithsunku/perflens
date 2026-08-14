@@ -9,7 +9,6 @@ the way an agent would hit them.
 Skipped entirely when the optional `mcp` extra is not installed.
 """
 
-import pytest
 import asyncio
 import json
 import os
