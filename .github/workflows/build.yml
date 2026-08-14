@@ -242,7 +242,11 @@ jobs:
             cross: 'aarch64_be-linux-musl-'
             cross_pkg: ''
             toolchain_asset: 'aarch64_be-linux-musl-cross.tgz'
-          - arch: armv7l
+          # 'armv7', not the 'armv7l' that uname -m reports: this is the
+          # asset name, and every consumer (install-agent.sh, push-agent,
+          # agent --update) normalizes the uname string to 'armv7' before
+          # building the URL. Publishing 'armv7l' 404s all three.
+          - arch: armv7
             cross: 'arm-linux-gnueabihf-'
             cross_pkg: 'gcc-arm-linux-gnueabihf'
             toolchain_asset: ''
