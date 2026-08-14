@@ -3,9 +3,10 @@ merging, multi-round file splitting, and malformed-input tolerance."""
 
 import pytest
 
-from perflens.parser import (HEADER_RE, PERF_STAT_MARKER, merge_perf_stat,
-                             parse_perf_script, parse_perf_stat,
-                             split_perf_data)
+from perflens.parser import (HEADER_RE, PERF_STAT_MARKER, _normalize_event,
+                             event_base, filter_samples_by_event,
+                             merge_perf_stat, parse_perf_script,
+                             parse_perf_stat, resolve_event, split_perf_data)
 
 # Each entry: (label, sample_text, expected_comm, expected_pid, expected_event)
 # Covers kernel 2.6 through 6.x, pid/tid variants, [cpu] field, flags field,
@@ -188,3 +189,107 @@ def test_merge_perf_stat_new_keys_added():
     merged = merge_perf_stat(old, {'branches': {'value': 2, 'comment': ''}})
     assert merged['branches']['value'] == 2
     assert merged['cycles']['value'] == 1
+
+
+# ---------------------------------------------------------------------------
+# Hybrid-CPU event names
+#
+# A P/E-core machine never reports a bare 'cycles'. It reports
+# 'cpu_core/cycles/' and 'cpu_atom/cycles/', and the same event arrives
+# spelled with a trailing modifier ('cpu_atom/cycles/P') when it comes from
+# an imported perf.data rather than a live agent round. Asking for 'cycles'
+# used to match nothing at all on that hardware.
+# ---------------------------------------------------------------------------
+
+HYBRID_EVENTS = ['cpu_core/cycles/', 'cpu_atom/cycles/',
+                 'cpu_core/instructions/', 'cpu_atom/instructions/']
+
+
+@pytest.mark.parametrize('raw,expected', [
+    ('cycles', 'cycles'),
+    ('cycles:P', 'cycles'),
+    ('cycles:ppp', 'cycles'),
+    ('cpu_atom/cycles/', 'cpu_atom/cycles/'),
+    ('cpu_atom/cycles/P', 'cpu_atom/cycles/'),
+    ('cpu_core/branch-misses/P', 'cpu_core/branch-misses/'),
+])
+def test_normalize_event_drops_modifier_not_pmu(raw, expected):
+    """The PMU prefix identifies real hardware and must survive; the
+    precise-ip modifier is noise that differs by capture path."""
+    assert _normalize_event(raw) == expected
+
+
+@pytest.mark.parametrize('raw,expected', [
+    ('cycles', 'cycles'),
+    ('cycles:P', 'cycles'),
+    ('cpu_atom/cycles/', 'cycles'),
+    ('cpu_core/cycles/P', 'cycles'),
+    ('cpu_atom/branch-instructions/', 'branch-instructions'),
+])
+def test_event_base_strips_pmu_and_modifier(raw, expected):
+    assert event_base(raw) == expected
+
+
+def test_resolve_event_prefers_exact_match():
+    assert resolve_event('cpu_atom/cycles/', HYBRID_EVENTS) == \
+        ['cpu_atom/cycles/']
+
+
+def test_resolve_event_expands_base_name_across_pmus():
+    """'cycles' means both PMUs' cycles, not nothing."""
+    assert resolve_event('cycles', HYBRID_EVENTS) == \
+        ['cpu_core/cycles/', 'cpu_atom/cycles/']
+
+
+def test_resolve_event_unknown_returns_empty():
+    assert resolve_event('branch-misses', HYBRID_EVENTS) == []
+
+
+def test_resolve_event_plain_hardware_is_unaffected():
+    plain = ['cycles', 'instructions']
+    assert resolve_event('cycles', plain) == ['cycles']
+
+
+def test_filter_samples_by_event_falls_back_to_base_name():
+    text = (
+        "matrixlab 100 [002] 1.0: 1000 cpu_core/cycles/:\n"
+        "\t    7f0000000010 hot+0x4 (/opt/m)\n"
+        "matrixlab 100 [015] 1.1: 1000 cpu_atom/cycles/:\n"
+        "\t    7f0000000010 hot+0x4 (/opt/m)\n"
+        "matrixlab 100 [002] 1.2: 1000 cpu_core/instructions/:\n"
+        "\t    7f0000000010 hot+0x4 (/opt/m)\n"
+    )
+    samples = parse_perf_script(text)
+    assert len(samples) == 3
+    # The default event name still selects both PMUs' cycles...
+    assert len(filter_samples_by_event(samples, 'cycles')) == 2
+    # ...while an exact name stays exact.
+    assert len(filter_samples_by_event(samples, 'cpu_atom/cycles/')) == 1
+    assert len(filter_samples_by_event(samples, 'instructions')) == 1
+
+
+def test_import_and_live_spellings_agree():
+    """Same event, two capture paths, one event_type."""
+    live = parse_perf_script(
+        "m 1 [0] 1.0: 10 cpu_atom/cycles/:\n\t 7f10 f+0x0 (/o/m)\n")
+    imported = parse_perf_script(
+        "m 1 [0] 1.0: 10 cpu_atom/cycles/P:\n\t 7f10 f+0x0 (/o/m)\n")
+    assert live[0]['event_type'] == imported[0]['event_type']
+
+
+def test_frame_strings_are_shared_across_samples():
+    """Repeated symbols must not allocate a fresh string per frame — that
+    is what made a long session cost ~3.3 KB per sample."""
+    text = ''.join(
+        f"matrixlab 100 [002] {i}.0: 1000 cycles:\n"
+        "\t    7f0000000010 hot_loop+0x4 (/opt/matrixlab)\n"
+        for i in range(50)
+    )
+    samples = parse_perf_script(text)
+    assert len(samples) == 50
+    funcs = {id(s['frames'][0]['func']) for s in samples}
+    modules = {id(s['frames'][0]['module']) for s in samples}
+    comms = {id(s['comm']) for s in samples}
+    assert len(funcs) == 1
+    assert len(modules) == 1
+    assert len(comms) == 1

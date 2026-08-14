@@ -21,6 +21,11 @@ export interface paths {
         /**
          * Api Agent Disconnect
          * @description Close the agent connection, triggering normal disconnect flow.
+         *
+         *     This ends the current session and saves it. It is not a way to keep
+         *     an agent away: one started with `--server` dials back in within
+         *     seconds by design, so for that deployment this reads as a session
+         *     reset. Stop the agent process on the device to make it stick.
          */
         delete: operations["api_agent_disconnect_api_agent_delete"];
         options?: never;
@@ -470,6 +475,10 @@ export interface components {
          * AgentCommandRequest
          * @description Command relay body for POST /api/agent/command. `cmd` is enforced
          *     against the frozen agent's command set.
+         *
+         *     Extra keys are rejected: command parameters belong inside `args`, and
+         *     spelling them at the top level used to return ok:true while changing
+         *     nothing at all.
          */
         AgentCommandRequest: {
             /** Args */

@@ -86,13 +86,67 @@ def split_perf_data(text):
 
 
 def _normalize_event(event_type):
-    """Normalize event type: strip everything from the first ':' onwards."""
+    """Normalize event type: strip everything from the first ':' onwards.
+
+    Hybrid CPUs name events per-PMU ('cpu_core/cycles/P'), where the
+    modifier rides after the last '/' instead of behind a ':'. Whether it
+    shows up at all depends on how the event was requested — a live agent
+    round yields 'cpu_atom/cycles/' while the same event imported from a
+    perf.data yields 'cpu_atom/cycles/P'. Drop it so both spell the event
+    the same way.
+    """
     idx = event_type.find(':')
-    return event_type[:idx] if idx >= 0 else event_type
+    if idx >= 0:
+        event_type = event_type[:idx]
+    if '/' in event_type:
+        pmu, _, rest = event_type.partition('/')
+        name, sep, _modifier = rest.rpartition('/')
+        if sep:
+            event_type = f'{pmu}/{name}/'
+    return event_type
 
 
-def _parse_frame(line):
-    """Parse a stack frame line. Returns frame dict or None."""
+def event_base(event_type):
+    """The bare event name, with any PMU prefix and modifier stripped.
+
+    'cpu_core/cycles/' -> 'cycles', 'cycles:P' -> 'cycles', 'cycles' ->
+    'cycles'. This is the name a human means when they say 'cycles'.
+    """
+    name = _normalize_event(event_type)
+    if '/' in name:
+        _pmu, _, rest = name.partition('/')
+        name = rest.rstrip('/')
+    return name
+
+
+def resolve_event(requested, available):
+    """Map a requested event name onto the event names actually present.
+
+    An exact hit wins. Otherwise every event sharing the requested base
+    name matches, so 'cycles' finds both 'cpu_core/cycles/' and
+    'cpu_atom/cycles/' on a hybrid CPU rather than nothing at all.
+    Returns a (possibly empty) list, ordered as `available` was.
+    """
+    if requested is None:
+        return []
+    available = list(available)
+    if requested in available:
+        return [requested]
+    want = event_base(requested)
+    return [e for e in available if event_base(e) == want]
+
+
+def _parse_frame(line, intern=sys.intern):
+    """Parse a stack frame line. Returns frame dict or None.
+
+    Every field is interned. A regex group is a fresh string each time,
+    so a long session otherwise holds one object per frame — hundreds of
+    thousands of them — for a handful of distinct values. Profiling is
+    repetitive by nature: a hot loop resamples the same few addresses, so
+    even `addr` and `offset` are far from unique (measured on a real ARM
+    session: 4,360 distinct addresses and 516 distinct offsets across
+    426,284 frames).
+    """
     # Try with module first (most common)
     m = FRAME_MODULE_RE.match(line)
     if m:
@@ -106,10 +160,10 @@ def _parse_frame(line):
             func = func_raw
             offset = ''
         return {
-            'addr': m.group(1),
-            'func': func,
-            'offset': offset,
-            'module': module,
+            'addr': intern(m.group(1)),
+            'func': intern(func),
+            'offset': intern(offset),
+            'module': intern(module),
         }
 
     # Try without module
@@ -124,9 +178,9 @@ def _parse_frame(line):
             func = func_raw
             offset = ''
         return {
-            'addr': m.group(1),
-            'func': func,
-            'offset': offset,
+            'addr': intern(m.group(1)),
+            'func': intern(func),
+            'offset': intern(offset),
             'module': '',
         }
 
@@ -161,11 +215,11 @@ def parse_perf_script(text):
                 samples.append(current_sample)
             tid_str = m.group(3)
             current_sample = {
-                'comm': m.group(1).strip(),
+                'comm': sys.intern(m.group(1).strip()),
                 'pid': int(m.group(2)),
                 'tid': int(tid_str) if tid_str else int(m.group(2)),
                 'event_count': int(m.group(4)),
-                'event_type': _normalize_event(m.group(5)),
+                'event_type': sys.intern(_normalize_event(m.group(5))),
                 'frames': [],
             }
             continue
@@ -183,16 +237,16 @@ def parse_perf_script(text):
                 func, offset = func_raw, ''
             tid_str = m.group(3)
             current_sample = {
-                'comm': m.group(1).strip(),
+                'comm': sys.intern(m.group(1).strip()),
                 'pid': int(m.group(2)),
                 'tid': int(tid_str) if tid_str else int(m.group(2)),
                 'event_count': int(m.group(4)),
-                'event_type': _normalize_event(m.group(5)),
+                'event_type': sys.intern(_normalize_event(m.group(5))),
                 'frames': [{
-                    'addr': m.group(6),
-                    'func': func,
-                    'offset': offset,
-                    'module': m.group(8),
+                    'addr': sys.intern(m.group(6)),
+                    'func': sys.intern(func),
+                    'offset': sys.intern(offset),
+                    'module': sys.intern(m.group(8)),
                 }],
             }
             continue
@@ -221,8 +275,21 @@ def get_event_types(samples):
 
 
 def filter_samples_by_event(samples, event_type):
-    """Filter samples to only those matching the given event type."""
-    return [s for s in samples if s['event_type'] == event_type]
+    """Filter samples to only those matching the given event type.
+
+    Falls back to base-name matching, so the default 'cycles' still
+    selects something on a hybrid CPU that only ever reports
+    'cpu_core/cycles/' and 'cpu_atom/cycles/'.
+    """
+    exact = [s for s in samples if s['event_type'] == event_type]
+    if exact or not samples:
+        return exact
+    # Resolve against the handful of distinct event names present rather
+    # than re-deriving a base name for every sample in the ring buffer.
+    wanted = set(resolve_event(event_type, {s['event_type'] for s in samples}))
+    if not wanted:
+        return []
+    return [s for s in samples if s['event_type'] in wanted]
 
 
 def aggregate_functions(samples):

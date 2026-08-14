@@ -54,7 +54,8 @@
         "type": "object"
       },
       "AgentCommandRequest": {
-        "description": "Command relay body for POST /api/agent/command. `cmd` is enforced\nagainst the frozen agent's command set.",
+        "additionalProperties": false,
+        "description": "Command relay body for POST /api/agent/command. `cmd` is enforced\nagainst the frozen agent's command set.\n\nExtra keys are rejected: command parameters belong inside `args`, and\nspelling them at the top level used to return ok:true while changing\nnothing at all.",
         "properties": {
           "args": {
             "additionalProperties": true,
@@ -1619,7 +1620,7 @@
   "paths": {
     "/api/agent": {
       "delete": {
-        "description": "Close the agent connection, triggering normal disconnect flow.",
+        "description": "Close the agent connection, triggering normal disconnect flow.\n\nThis ends the current session and saves it. It is not a way to keep\nan agent away: one started with `--server` dials back in within\nseconds by design, so for that deployment this reads as a session\nreset. Stop the agent process on the device to make it stick.",
         "operationId": "api_agent_disconnect_api_agent_delete",
         "responses": {
           "200": {

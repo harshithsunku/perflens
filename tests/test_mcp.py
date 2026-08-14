@@ -9,6 +9,7 @@ the way an agent would hit them.
 Skipped entirely when the optional `mcp` extra is not installed.
 """
 
+import pytest
 import asyncio
 import json
 import os
@@ -591,3 +592,42 @@ def test_source_hotlines_reports_an_ambiguous_basename():
             await _resolve_source_path(client, 'util.c', 'cycles')
         assert 'ambiguous' in str(excinfo.value)
     run(go())
+
+
+# ---------------------------------------------------------------------------
+# Hybrid-CPU event selection
+# ---------------------------------------------------------------------------
+
+HYBRID_PER_EVENT = {
+    'cpu_atom/branch-instructions/': {},
+    'cpu_atom/cycles/': {},
+    'cpu_core/branch-instructions/': {},
+    'cpu_core/cycles/': {},
+}
+
+
+def test_pick_event_defaults_to_cycles_on_hybrid():
+    """Sorting alphabetically would hand back branch-instructions."""
+    from perflens.mcp.client import pick_event
+    assert pick_event(HYBRID_PER_EVENT) in (
+        'cpu_atom/cycles/', 'cpu_core/cycles/')
+
+
+def test_pick_event_explicit_cycles_is_disambiguated():
+    from perflens.mcp.client import PerfLensError, pick_event
+    with pytest.raises(PerfLensError) as e:
+        pick_event(HYBRID_PER_EVENT, 'cycles')
+    assert 'cpu_core/cycles/' in str(e.value)
+
+
+def test_pick_event_unique_base_name_resolves():
+    from perflens.mcp.client import pick_event
+    single = {'cpu_core/instructions/': {}, 'cpu_core/cycles/': {}}
+    assert pick_event(single, 'instructions') == 'cpu_core/instructions/'
+
+
+def test_pick_event_plain_hardware_unchanged():
+    from perflens.mcp.client import pick_event
+    plain = {'cycles': {}, 'instructions': {}}
+    assert pick_event(plain) == 'cycles'
+    assert pick_event(plain, 'instructions') == 'instructions'

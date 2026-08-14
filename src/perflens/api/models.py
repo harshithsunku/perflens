@@ -320,7 +320,14 @@ AgentCommandName = Literal['ping', 'status', 'list_processes', 'verify_pid',
 
 class AgentCommandRequest(BaseModel):
     """Command relay body for POST /api/agent/command. `cmd` is enforced
-    against the frozen agent's command set."""
+    against the frozen agent's command set.
+
+    Extra keys are rejected: command parameters belong inside `args`, and
+    spelling them at the top level used to return ok:true while changing
+    nothing at all.
+    """
+    model_config = ConfigDict(extra='forbid')
+
     cmd: AgentCommandName
     args: dict[str, Any] = Field(default_factory=dict)
     timeout: int = 60

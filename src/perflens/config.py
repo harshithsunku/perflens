@@ -231,7 +231,10 @@ def config_from_args(argv=None):
                              '(like perf --symfs)')
     parser.add_argument('--max-samples', type=int, default=500000,
                         help='Max accumulated samples before oldest are dropped '
-                             '(default: 500000)')
+                             '(default: 500000). Costs roughly 1.7 KB of RSS '
+                             'per sample, so the default tops out near 850 MB '
+                             'on a busy multi-threaded target; lower it if '
+                             'that matters more than history depth')
     parser.add_argument('--inline', action='store_true', default=True,
                         dest='inline',
                         help='Enable inline function resolution via '

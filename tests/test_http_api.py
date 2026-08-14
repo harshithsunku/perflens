@@ -662,3 +662,59 @@ def test_sse_broadcast_reaches_client(core, live_server):
     got = _read_sse(live_server, {'status', 'metrics'}, on_first_line=fire)
     assert got['status'] == {'connected': True, 'agent': 'x:1'}
     assert got['metrics']['type'] == 'system'
+
+
+# ---------------------------------------------------------------------------
+# Hybrid-CPU event names over HTTP
+# ---------------------------------------------------------------------------
+
+def _seed_hybrid_snapshot(core):
+    """Give the state cache the event names a P/E-core machine produces."""
+    with core.state.lock:
+        core.state._cached_per_event = {
+            'cpu_core/cycles/': {'function_summary': {'functions': [],
+                                                      'total_samples': 7}},
+            'cpu_atom/cycles/': {'function_summary': {'functions': [],
+                                                      'total_samples': 3}},
+            'cpu_core/instructions/': {'function_summary': {'functions': [],
+                                                            'total_samples': 5}},
+        }
+
+
+def test_snapshot_resolves_unambiguous_base_name(client, core):
+    """'instructions' exists on only one PMU here, so it resolves."""
+    _seed_hybrid_snapshot(core)
+    r = client.get('/api/snapshot', params={'event': 'instructions'})
+    assert r.status_code == 200
+    assert r.json()['event'] == 'cpu_core/instructions/'
+
+
+def test_snapshot_ambiguous_base_name_names_the_candidates(client, core):
+    """'cycles' exists on both PMUs — say so instead of 404ing."""
+    _seed_hybrid_snapshot(core)
+    r = client.get('/api/snapshot', params={'event': 'cycles'})
+    assert_error(r, 400, 'ambiguous_event')
+    msg = r.json()['error']['message']
+    assert 'cpu_core/cycles/' in msg and 'cpu_atom/cycles/' in msg
+
+
+def test_snapshot_exact_name_still_wins(client, core):
+    _seed_hybrid_snapshot(core)
+    r = client.get('/api/snapshot', params={'event': 'cpu_atom/cycles/'})
+    assert r.status_code == 200
+    assert r.json()['event'] == 'cpu_atom/cycles/'
+
+
+def test_snapshot_404_lists_what_is_available(client, core):
+    _seed_hybrid_snapshot(core)
+    r = client.get('/api/snapshot', params={'event': 'cache-misses'})
+    assert_error(r, 404, 'not_found')
+    assert 'cpu_core/cycles/' in r.json()['error']['message']
+
+
+def test_agent_command_rejects_stray_top_level_fields(client):
+    """Parameters belong in args{}. Spelling them at the top level used to
+    return ok:true while changing nothing."""
+    r = client.post('/api/agent/command',
+                    json={'cmd': 'configure', 'frequency': 499})
+    assert_error(r, 400, 'validation')

@@ -17,6 +17,8 @@ import time
 
 import httpx
 
+from perflens.parser import event_base, resolve_event
+
 DEFAULT_URL = 'http://127.0.0.1:8080'
 
 # A session replay can take a while to rebuild from raw chunks the first
@@ -307,16 +309,29 @@ def pick_event(per_event, event=None):
 
     `cycles` is the default because it is the one event that answers "where
     does the time go"; anything else has to be asked for deliberately.
+
+    A hybrid P/E-core machine never reports a bare `cycles` — it reports
+    `cpu_core/cycles/` and `cpu_atom/cycles/`. Match on the base name so
+    that both the default and an explicit `cycles` land on a cycles event
+    there, instead of falling through to whatever sorts first.
     """
     if not per_event:
         raise PerfLensError('No events have data.')
     available = sorted(per_event)
     if event:
-        if event in per_event:
-            return event
+        matches = resolve_event(event, available)
+        if len(matches) == 1:
+            return matches[0]
+        if matches:
+            raise PerfLensError(
+                f'Event {event!r} is split across PMUs on this device. '
+                f'Ask for one of: {", ".join(matches)}.')
         raise PerfLensError(
             f'No data for event {event!r}. Events with data: '
             f'{", ".join(available)}.')
     if 'cycles' in per_event:
         return 'cycles'
+    cycles = [e for e in available if event_base(e) == 'cycles']
+    if cycles:
+        return cycles[0]
     return available[0]

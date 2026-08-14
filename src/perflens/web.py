@@ -47,7 +47,8 @@ from perflens.api.responses import error_response as _err
 from perflens.api.responses import json_response as _json
 from perflens.config import create_source_mapper
 from perflens.parser import (build_flamegraph_data, build_function_summary,
-                             filter_samples_by_event, get_event_types)
+                             filter_samples_by_event, get_event_types,
+                             resolve_event)
 
 if TYPE_CHECKING:
     from perflens.app import AppContext
@@ -150,7 +151,23 @@ def api_snapshot(request: Request, event: Optional[str] = None, ctx=Ctx):
     if event is not None:
         entry = per_event.get(event)
         if entry is None:
-            return _err('not_found', f'no data for event: {event}', 404)
+            # A hybrid CPU reports 'cpu_core/cycles/' and 'cpu_atom/cycles/'
+            # but never a bare 'cycles'. Resolve one of those when the base
+            # name is unambiguous; when it is not, name the candidates
+            # rather than leaving the caller to guess.
+            matches = resolve_event(event, per_event.keys())
+            if len(matches) == 1:
+                event = matches[0]
+                entry = per_event[event]
+            elif matches:
+                return _err('ambiguous_event',
+                            f'{event!r} matches several events on this '
+                            f'device; ask for one of: '
+                            f'{", ".join(sorted(matches))}', 400)
+            else:
+                have = ', '.join(sorted(per_event)) or 'none yet'
+                return _err('not_found',
+                            f'no data for event: {event} (have: {have})', 404)
         return _json({'event': event, 'data': entry, 'version': version},
                      request=request, allow_gzip=True)
     return _json({'per_event': per_event, 'version': version},
@@ -681,7 +698,13 @@ def api_agent_info(ctx=Ctx):
 
 @router.delete('/api/agent', response_model=models.StopResponse)
 def api_agent_disconnect(ctx=Ctx):
-    """Close the agent connection, triggering normal disconnect flow."""
+    """Close the agent connection, triggering normal disconnect flow.
+
+    This ends the current session and saves it. It is not a way to keep
+    an agent away: one started with `--server` dials back in within
+    seconds by design, so for that deployment this reads as a session
+    reset. Stop the agent process on the device to make it stick.
+    """
     return _json(agentlink.stop_agent(ctx))
 
 
