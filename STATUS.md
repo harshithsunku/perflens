@@ -30,7 +30,9 @@ lines to 10; the profile from 76 distinct source lines to 356.
 
 **This required unfreezing the agent**, on an explicit decision. The wire
 protocol did not change, and the server-side recovery means a new server
-works with old agents either way.
+works with old agents either way. The agent was unfrozen a **second** time
+later in the pass, for the `--update` architecture fix below; the wire
+protocol is untouched by both.
 
 Also fixed, all found by hand: `/api/index/status` reporting 0 symbols with
 a startup `--binary` (and `/api/index/files` empty for the same reason);
@@ -39,12 +41,40 @@ a hardcoded `"0.5.0"`; `perflens_source_hotlines` dead-ending on a bare
 filename; and an `OverflowError` that could abort a request from the
 addr2line cache. Full detail in [CHANGELOG.md](CHANGELOG.md).
 
-Current counts: **165 pytest** (was 152), 24 vitest, 10 Playwright.
+**The pass then moved off the dev box onto real devices (2026-08-14), and
+that found a second class of defect the dev box structurally could not.**
+Two reference beds: an ARM64 phone running Kali (permissive perf,
+`paranoid=-1`, non-root) and an x86_64 LXC container on a hybrid P/E-core
+host (`paranoid=1`, read-only, `perf record -a` unavailable). The inventory
+is deliberately not in this repo — addresses and device paths would violate
+the generic rule — and lives at `~/.perflens-testbeds/config.yaml` on the
+machine that owns the devices.
+
+**The headline device finding: on a hybrid P/E-core CPU, asking for `cycles`
+returned nothing.** That hardware reports `cpu_core/cycles/` and
+`cpu_atom/cycles/` and never a bare `cycles`, while the agent's `start`
+response still advertises the plain names it asked for. The 404 from
+`/api/snapshot` was the visible half; the quiet half was `filter_samples_by_event`
+comparing with `==`, so `/api/threads`, `/api/window`, `/api/source` and the
+live exports all defaulted to `event=cycles` and returned an *empty and
+entirely plausible* result. The UI escaped only because it picks the first
+name the SSE stamp offers — which is exactly why hand-driving the UI on this
+same hardware, as the first half of this pass did, never surfaced it.
+
+Two more device-only defects: `agent --update` picked its release asset from
+`uname()`, which reports the *kernel's* arch, so a 32-bit agent on a 64-bit
+kernel self-updated to the 64-bit binary; and the release matrix published
+the 32-bit agent as `armv7l` when all three consumers ask for `armv7`,
+making that the one 404 of five against the live v0.8.0 release and breaking
+install, push and self-update on 32-bit ARM entirely.
+
+Current counts: **192 pytest** (was 165, then 152), 24 vitest, 10 Playwright.
 
 ### Where the work lives
 
-On branch **`validate-0.9.0`**, eight commits, pushed but **not merged and
-not released**. Nothing is tagged and nothing went to PyPI.
+On branch **`validate-0.9.0`**, eleven commits, **not merged and not
+released**. Nothing is tagged and nothing went to PyPI. The first eight are
+pushed; the three device fixes are local at time of writing.
 
 Pushing the branch deliberately runs no CI: `test.yml` triggers on
 `push` to main/master plus `pull_request`, and `build.yml` on push to
@@ -61,16 +91,19 @@ someone wants to review this.
 | 5 | `ac4708e` | drop Tailwind/Radix + a test collecting nothing |
 | 6 | `23df429` | docs corrected against the code |
 | 7 | `be7116d` | binutils-independence caveat closed |
-| 8 | (HEAD)    | this status entry — no hash, it would cite itself |
+| 8 | `f6d999c` | status entry for the dev-box half |
+| 9 | `24ffee2` | hybrid-CPU event resolution + halved per-sample memory |
+| 10 | `9bc4296` | agent `--update` asset from compile-time macros |
+| 11 | `3fcf947` | publish the 32-bit agent as `armv7` |
 
-Verified green on the branch: 165 pytest, ruff, `check_version.py`, 24
-vitest, 10 Playwright, 10 docs-shots, OpenAPI + typegen regeneration a
-no-op, and pytest in CI's no-UI configuration (164 passed, 1 skipped —
-`test_static_ui_served`, correctly).
+Verified green on the branch: 192 pytest, `check_version.py`, 24 vitest, 10
+Playwright, OpenAPI + typegen regenerated, and pytest in CI's no-UI
+configuration (191 passed, 1 skipped — `test_static_ui_served`, correctly).
 
-**Read commit 1 first if you review nothing else.** It is the one that
-changes profiling output, and it is the one with a deliberate exception to
-the agent freeze.
+**Read commits 1 and 9 first if you review nothing else.** Commit 1 changes
+profiling output; commit 9 is the one that made whole endpoints return
+believable empty results on hybrid hardware. Commit 10 is the second
+deliberate exception to the agent freeze.
 
 ### Still open for 0.9.0
 
@@ -142,6 +175,28 @@ the agent freeze.
       all five agent cross-compiles are still post-merge discoveries. The
       `symoff` change touches the agent, which makes this more relevant than
       it was: a cross-compile break would not surface on the PR.
+- [ ] **Server memory still drifts slowly after the ring buffer is full.**
+      The interning fix took the plateau from ~1.9 GB to ~1.1 GB at the
+      default `--max-samples 500000`, confirmed on a 22-minute device soak
+      (152 chunks, cap reached at ~3 min). But RSS went 1100 MB at t+180s to
+      1157 MB at t+1330s — roughly 3 MB/min, and it did **not** visibly
+      flatten. It is not the sample ring, which is capped and holding: the
+      profile was still discovering code over the run (function count 464 →
+      581), which grows both the aggregation dicts and the interned string
+      table. That should asymptote with the target's code footprint, but
+      "should" is doing real work in that sentence. Needs a multi-hour
+      unattended run to confirm; at 3 MB/min it would be ~180 MB/hour if it
+      does not.
+- [ ] **Big-endian is built but never executed.** All five release targets
+      compile clean, including `armeb` and `aarch64_be` (musl toolchains,
+      see the note below). Static analysis is reassuring — the framing uses
+      `htonl`/`ntohl` against the server's `struct '!IB'`, payloads are
+      UTF-8 text and JSON, zstd's container is little-endian by spec, and no
+      multi-byte type-punning remains in `agent-c` after the `--update` fix.
+      But inspection is not execution, and byte-order bugs are invisible on
+      little-endian hardware by construction, which is precisely how they
+      survive. Both reference devices are little-endian. Accepted
+      deliberately as compile-only; do not record it as passing.
 - [ ] Two stale remote branches (`origin/stabilize-0.8.0`,
       `origin/copilot/review-security-issues`) — both fully merged
       ancestors of master. Left alone deliberately: deleting remote
@@ -164,10 +219,63 @@ the agent freeze.
       `perflens_status` now reports source mapping honestly, and
       `perflens_source_hotlines` returns the inner loop with context.
 
-Note for the next session: **a hybrid-CPU dev box is misleading for
-timing.** The capability probe took ~43 s here against a documented ~10-20 s;
-that is this hardware, not a regression. Use the reference devices for
-anything timing-sensitive, as this file has always said.
+### Validated on real devices (2026-08-14)
+
+All on the ARM bed unless noted. Details, including the per-device `serve`
+invocations, are in `~/.perflens-testbeds/config.yaml`.
+
+- [x] **Both connection patterns** — `--server` (agent dials out) and
+      `--listen` (server dials in via `POST /api/agent/connect`).
+- [x] **Token auth** — a wrong token is rejected server-side; the correct
+      one is accepted.
+- [x] **The full control surface** — pause/resume, live `configure`, event
+      subset selection, process switching, `list_processes`.
+- [x] **Per-thread and timeline reads** — `/api/threads`,
+      `/api/threads/<tid>`, `/api/window` with a `tid` filter. Thread
+      attribution is real, not smeared: `sort-engine-*` threads show
+      `merge`/`shellsort`, `matrix-worker-*` show `matrix_multiply_naive`.
+- [x] **Opt-in disk and thread metrics**, and metrics history (183 points
+      over 366 s, correctly spaced).
+- [x] **All six export paths**, live and from a saved session; SVG is valid
+      XML.
+- [x] **`perf.data` import**, replay and symbolization.
+- [x] **The distribution flows** — `install-agent.sh`, `push-agent`,
+      `agent --update` and `provision`, exercised against a local asset
+      server via `PERFLENS_UPDATE_URL` so the real download/verify/install
+      code runs without needing a re-release. `provision` was also forced
+      down its download path with an empty `PATH`, and the x86 `readelf` it
+      installed correctly read an AArch64 ELF.
+- [x] **`--output` headless mode** — two rounds, 39,464 samples, 26 tids,
+      and 13 perf-stat counters correctly merged across rounds by
+      `split_perf_data`.
+- [x] **32-bit ARM end to end.** The aarch64 kernel has `CONFIG_COMPAT=y`,
+      and the static-pie armv7 agent needs no armhf runtime — which is the
+      case the zero-dependency design exists for. Results were
+      indistinguishable from the 64-bit agent: 366k samples, 464 functions,
+      26 threads, 31/31 source files, `matrix_multiply.c` L14/L15 at
+      37.5%/30.1% against the 64-bit run's 36.9%/32.5%.
+
+Notes for the next session:
+
+- **A hybrid-CPU dev box is misleading for timing.** The capability probe
+  took ~43 s here against a documented ~10-20 s; that is this hardware, not
+  a regression.
+- **A hybrid-CPU dev box is also misleading for event names**, which is the
+  more dangerous half and was only caught by testing the API rather than the
+  UI. If a device reports PMU-qualified events, do not assume a bare event
+  name reaches anything.
+- **The armv7 and big-endian toolchains are not installable from either
+  machine's package manager.** Kali's `libc6-dev:armhf` wants
+  `linux-libc-dev 7.0.12` while its repo carries `6.16.0-1`, and the
+  workstation has no passwordless sudo. Static musl cross toolchains are
+  unpacked under `~/.perflens-testbeds/toolchains/`; put them on `PATH` and
+  the Makefile's `CROSS=` targets work. Note the Makefile names
+  `arm-linux-gnueabihf-`, which is *not* what is installed there — pass
+  `CROSS=arm-linux-musleabihf-`.
+- **`comm` truncates at 15 characters**, so `pgrep -x perflens-agent32`
+  silently matches nothing and a restart script's kill step becomes a no-op,
+  leaving two agents fighting over the server's single connection slot. The
+  32-bit binary is deployed as `perflens-a32` to stay under the limit.
 
 ## Previous phase — 0.8.0 released
 

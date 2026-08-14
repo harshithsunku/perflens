@@ -68,7 +68,7 @@
                 <tr><td><code>--readelf PATH</code></td><td>&mdash;</td><td>Custom <code>readelf</code> binary.</td></tr>
                 <tr><td><code>--toolchain-prefix PREFIX</code></td><td>&mdash;</td><td>Cross-compile prefix (e.g. <code>arm-linux-gnueabihf-</code>). Derives <code>addr2line</code> + <code>readelf</code>.</td></tr>
                 <tr><td><code>--sysroot DIR</code></td><td>&mdash;</td><td>Sysroot for resolving shared-library modules and source files.</td></tr>
-                <tr><td><code>--max-samples N</code></td><td><code>500000</code></td><td>Raw-sample ring buffer cap (aggregates always cover the full session).</td></tr>
+                <tr><td><code>--max-samples N</code></td><td><code>500000</code></td><td>Raw-sample ring buffer cap (aggregates always cover the full session). Roughly 1.7&nbsp;KB of RSS per retained sample, so the default plateaus near 1.1&nbsp;GB on a busy multi-threaded target.</td></tr>
                 <tr><td><code>--sessions-dir DIR</code></td><td><code>~/.perflens/sessions</code></td><td>Where saved sessions are stored (<code>PERFLENS_HOME</code> moves the whole <code>~/.perflens</code> root).</td></tr>
                 <tr><td><code>--http-bind ADDR</code></td><td><code>127.0.0.1</code></td><td>Web UI bind address (<code>0.0.0.0</code> to expose &mdash; the UI has no auth).</td></tr>
                 <tr><td><code>--browse-root DIR</code></td><td><code>~</code></td><td>Directory the wizard file picker is confined to.</td></tr>
@@ -147,7 +147,13 @@
         <p>
             The agent probes each event before use and only emits the ones the kernel
             actually supports. On hybrid CPUs, events are reported per-cluster &mdash;
-            e.g. <code>cpu_core/cycles/</code> and <code>cpu_atom/cycles/</code>.
+            e.g. <code>cpu_core/cycles/</code> and <code>cpu_atom/cycles/</code>, and
+            never a bare <code>cycles</code>. The names the agent's <code>start</code>
+            response lists are the ones it <em>asked</em> for, so on that hardware they
+            are not the keys the data arrives under: read the real names from the SSE
+            <code>data_version</code> stamp's <code>event_types</code>. The server will
+            resolve a bare name onto the per-cluster ones when that is unambiguous, and
+            name the candidates when it is not.
         </p>
         <table class="ref">
             <thead><tr><th>Event</th><th>Typical use</th><th>Mode</th></tr></thead>
@@ -231,7 +237,7 @@ claude mcp add perflens -- perflens mcp</code></pre>
             <code>.github/workflows/build.yml</code> lints (<code>ruff</code>),
             runs the tests, builds and smoke-runs the Python wheel, builds the
             static C agent for five architectures (x86_64, aarch64, aarch64_be,
-            armv7l, armeb), and builds static addr2line/readelf tools bundles
+            armv7, armeb), and builds static addr2line/readelf tools bundles
             for <code>perflens provision</code>. Big-endian agent targets use
             musl toolchains from <code>musl.cc</code> since Ubuntu only ships
             little-endian sysroots. Tagged pushes (<code>v*</code>) create a
@@ -257,8 +263,17 @@ claude mcp add perflens -- perflens mcp</code></pre>
         <h3 id="cant-connect">Agent can't connect</h3>
         <p>The server must be reachable on <code>--port</code>. Sanity-check with <code>nc -zv &lt;server-ip&gt; 9999</code>.</p>
 
-        <h3 id="container">LXC / container: <code>perf record -p &lt;pid&gt;</code> returns empty</h3>
-        <p>Some container environments strip the perf capability set. A system-wide <code>perf record -a</code> usually works; the agent's per-PID mode does not in that case.</p>
+        <h3 id="container">Container: one of the two <code>perf record</code> modes fails</h3>
+        <p>
+            Which one depends on the container, so probe rather than assume. Some
+            environments strip the perf capability set: <code>-p &lt;pid&gt;</code>
+            returns empty and a system-wide <code>perf record -a</code> works. An
+            unprivileged LXC container is the opposite case &mdash; at
+            <code>perf_event_paranoid=1</code>, per-PID recording works and
+            <code>-a</code> fails outright with &ldquo;Failure to open any events for
+            recording&rdquo;. <code>perf_event_paranoid</code> is not namespaced, so it
+            is read-only from inside the container and lowering it requires the host.
+        </p>
 
         <h3 id="slow-start">Call-graph probing hangs / slow startup</h3>
         <p>Capability probing tests <code>fp</code>, <code>dwarf</code>, then <code>lbr</code> in sequence &mdash; this adds ~10&ndash;20 s on a typical target (longer on slow or hybrid-CPU hardware) on first connection. One-time cost; subsequent rounds skip probing.</p>

@@ -46,9 +46,9 @@ No Docker, no sudo. A modern React + TypeScript UI shipped **prebuilt** inside t
 - **Interactive SVG flame graphs** — hand-rolled layout engine (no d3); ancestry zoom, regex search, diff coloring, hover details
 - **Shareable URLs** — tab, event, thread filter, flame-graph zoom, and replayed session live in the URL hash; refresh or paste a link and land on the same view
 - **Cross-compilation toolchain support** — `--toolchain-prefix` derives addr2line and readelf from a single prefix; `--sysroot` resolves shared libraries and source files under a sysroot tree
-- **ARM + x86** — same agent code runs on aarch64, aarch64_be, armv7l, x86_64
+- **ARM + x86** — same agent code runs on aarch64, aarch64_be, armv7, armeb, x86_64
 - **Session save / replay** — raw chunks saved to disk, replayed lazily on demand via the UI's session list
-- **Static C agent** — single binary with vendored zstd, no runtime dependencies; cross-compiles to aarch64, aarch64_be, armv7l, armeb, x86_64; one-line curl install and built-in self-update
+- **Static C agent** — single binary with vendored zstd, no runtime dependencies; cross-compiles to aarch64, aarch64_be, armv7, armeb, x86_64; one-line curl install and built-in self-update
 - **Zero-friction server install** — `uvx perflens` (or `pipx` / `pip install --user`); everything resolves user-space, no sudo, corporate-machine friendly. Missing binutils? `perflens provision` downloads static addr2line/readelf into `~/.perflens/bin`
 - **Capability probing** — the agent discovers which perf events and call-graph modes (`fp` / `dwarf` / `lbr`) actually work on the target before collecting
 - **Zstd compression** — typical perf script payloads compress 20–40× before hitting the wire
@@ -156,8 +156,10 @@ Release assets published on every tagged release:
 | `perflens-agent-linux-x86_64` | Agent — static binary, Linux x86_64 |
 | `perflens-agent-linux-aarch64` | Agent — static binary, Linux aarch64 |
 | `perflens-agent-linux-aarch64_be` | Agent — static binary, Linux aarch64 BE |
-| `perflens-agent-linux-armv7l` | Agent — static binary, Linux armv7l |
+| `perflens-agent-linux-armv7` | Agent — static binary, Linux armv7 (32-bit LE) |
 | `perflens-agent-linux-armeb` | Agent — static binary, Linux armv7 BE |
+
+The asset suffix is the normalized arch, not `uname -m`: a device reporting `armv7l` fetches `perflens-agent-linux-armv7`.
 | `perflens-tools-linux-{x86_64,aarch64}.tar.gz` | Static addr2line+readelf for `perflens provision` |
 
 ### Option B — build the agent yourself
@@ -227,7 +229,7 @@ Then browse to `http://<server-ip>:8080`.
 | `--readelf PATH` | — | Custom `readelf` binary |
 | `--toolchain-prefix PREFIX` | — | Cross-compilation prefix (e.g. `arm-linux-gnueabihf-`); derives addr2line and readelf |
 | `--sysroot DIR` | — | Sysroot for resolving shared library modules and source files |
-| `--max-samples N` | `500000` | Raw-sample ring buffer cap (aggregates always cover the full session) |
+| `--max-samples N` | `500000` | Raw-sample ring buffer cap (aggregates always cover the full session). Costs ~1.7 KB RSS per sample — the default plateaus near 1.1 GB on a busy target |
 | `--sessions-dir DIR` | `~/.perflens/sessions` | Where saved sessions are stored (`PERFLENS_HOME` moves the whole `~/.perflens` root) |
 | `--http-bind ADDR` | `127.0.0.1` | Web UI bind address (`0.0.0.0` to expose — the UI has no auth) |
 | `--browse-root DIR` | `~` | Directory the wizard's file picker is confined to |
@@ -398,7 +400,7 @@ dist/
 
 [`.github/workflows/test.yml`](.github/workflows/test.yml) runs the pytest suite on Python 3.10–3.13 (parser, aggregator differentials against device-captured fixtures, source mapper, HTTP API, MCP tools, provisioning against a fake release server, and the C-agent wire protocol driven through a fake framing server with a `perf` shim), and gates every PR on `ruff` and `tools/check_version.py`. A frontend job adds the OpenAPI schema drift check, the TypeScript typegen drift check, vitest unit tests, a self-contained Playwright browser E2E (`frontend/e2e/`) that replays a fixture session through the real UI, and a smoke run of the docs screenshot harness (`frontend/docs-shots/`) that asserts the images come out non-blank.
 
-[`.github/workflows/build.yml`](.github/workflows/build.yml) lints (`ruff`), runs the pytest suite, builds and smoke-runs the Python wheel (with a wheel-contents check), builds the static C agent for five architectures (x86_64, aarch64, aarch64_be, armv7l, armeb), and builds static addr2line/readelf tools bundles (x86_64, aarch64) for `perflens provision`. Big-endian agent targets use musl toolchains from musl.cc since Ubuntu only ships little-endian sysroots. Tagged pushes (`v*`) create a GitHub Release and attach all artifacts — including raw `perflens-agent-linux-<arch>` binaries with stable names that `install-agent.sh` and the agent's `--update` fetch from `releases/latest/download/`. Tagged pushes also publish the package to [PyPI](https://pypi.org/project/perflens/) via Trusted Publishing (OIDC — no stored tokens).
+[`.github/workflows/build.yml`](.github/workflows/build.yml) lints (`ruff`), runs the pytest suite, builds and smoke-runs the Python wheel (with a wheel-contents check), builds the static C agent for five architectures (x86_64, aarch64, aarch64_be, armv7, armeb), and builds static addr2line/readelf tools bundles (x86_64, aarch64) for `perflens provision`. Big-endian agent targets use musl toolchains from musl.cc since Ubuntu only ships little-endian sysroots. Tagged pushes (`v*`) create a GitHub Release and attach all artifacts — including raw `perflens-agent-linux-<arch>` binaries with stable names that `install-agent.sh` and the agent's `--update` fetch from `releases/latest/download/`. Tagged pushes also publish the package to [PyPI](https://pypi.org/project/perflens/) via Trusted Publishing (OIDC — no stored tokens).
 
 ---
 
@@ -462,7 +464,7 @@ sudo sysctl -w kernel.perf_event_paranoid=1
 
 **Agent can't connect.** The server must be reachable on `--port`. Check with `nc -zv <server-ip> 9999`.
 
-**LXC / container: `perf record -p <pid>` is empty.** Some container environments strip the perf capability set. A system-wide `perf record -a` usually works; the agent's `-p <pid>` mode does not.
+**Container: one of the two `perf record` modes fails.** Which one depends on the container, so probe rather than assume. Some environments strip the perf capability set: `-p <pid>` returns empty and a system-wide `perf record -a` works. An unprivileged LXC container is the opposite case — at `perf_event_paranoid=1`, per-PID recording works and `-a` fails with "Failure to open any events for recording". `perf_event_paranoid` is not namespaced, so it is read-only from inside the container and lowering it requires the host.
 
 **Call-graph probing hangs / slow startup.** Call-graph probing tests `fp`, `dwarf`, then `lbr` in sequence — this adds ~10-20 s on a typical target, longer on slow or hybrid-CPU hardware on first connection. Normal.
 

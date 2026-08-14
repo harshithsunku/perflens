@@ -368,9 +368,25 @@ Options:
 - In continuous mode, `perf record` flushes its ring buffer in batches, so
   the first chunk or two after `start` may carry only PERF_STAT data before
   samples begin flowing.
-- Some container environments don't support `perf record -p <pid>`. The
-  agent's per-PID mode returns empty in that case; a system-wide
-  `perf record -a` usually works as a fallback.
+- Container behaviour cuts both ways, so probe rather than assume. Some
+  environments don't support `perf record -p <pid>` and a system-wide
+  `perf record -a` works as a fallback. An unprivileged LXC container is
+  the *opposite* case, measured 2026-08-14: at `perf_event_paranoid=1`
+  per-PID recording works and `-a` fails outright with "Failure to open any
+  events for recording". `perf_event_paranoid` is not namespaced, so
+  `/proc/sys/kernel/perf_event_paranoid` is read-only from inside the
+  container and lowering it needs the host.
+- **Hybrid P/E-core CPUs split every event per PMU.** Six requested events
+  arrive as twelve streams named `cpu_core/cycles/`, `cpu_atom/cycles/` and
+  so on; a bare `cycles` is never reported. The agent's `start` response
+  still lists the plain names it asked for, so that list is not the set of
+  snapshot keys. Read event names from the SSE `data_version` stamp's
+  `event_types`. The server resolves a base name onto the PMU-qualified
+  ones where that is unambiguous, and names the candidates where it is not.
+- Retained samples cost roughly 1.7 KB of RSS each, so the default
+  `--max-samples 500000` plateaus near 1.1 GB on a busy multi-threaded
+  target and gets there in minutes. Lower it when history depth matters
+  less than footprint.
 - `addr2line` source mapping requires a binary compiled with `-g` debug
   symbols and not stripped.
 - The source view renders up to ~2000 lines (or hottest line ± 100,

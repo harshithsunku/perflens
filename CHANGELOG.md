@@ -9,9 +9,60 @@ releases may break APIs between minor versions when needed.
 
 The hands-on validation pass 0.8.0 shipped without. Everything below was
 found by running the profiler against a real 25-thread workload and looking
-at the output — not by an assertion.
+at the output — not by an assertion. The second half of the pass moved off
+the dev box entirely and onto two reference devices: an ARM64 phone running
+Kali and an x86_64 LXC container on a hybrid P/E-core host.
 
 ### Fixed
+
+- **On a hybrid P/E-core CPU, asking for `cycles` returned nothing.** Such a
+  machine never reports a bare `cycles`; it reports `cpu_core/cycles/` and
+  `cpu_atom/cycles/` — twelve event streams for the six events the agent
+  requested. The agent's `start` response still advertises the plain names
+  it asked for, so every caller that trusted that list asked for an event
+  that does not exist.
+
+  `/api/snapshot?event=cycles` returning 404 was the visible half. The quiet
+  half was worse: `filter_samples_by_event` compared names with `==`, so
+  `/api/threads`, `/api/window`, `/api/source` and the live exports all
+  default to `event=cycles` and returned an empty, entirely plausible
+  result. The UI escaped only because it selects the first name the SSE
+  stamp offers.
+
+  Event names now resolve against the names actually present — exact match
+  first, then base name, so `cycles` finds both PMUs' cycles. An ambiguous
+  request names its candidates instead of 404ing, and a miss lists what is
+  available. MCP's `pick_event` needed the same treatment: on hybrid
+  hardware its fallback sorted alphabetically and quietly analysed
+  `branch-instructions`.
+- **The same event arrived spelled two ways.** A live agent round yields
+  `cpu_atom/cycles/`; the identical event imported from a `perf.data` yields
+  `cpu_atom/cycles/P`, because the modifier rides after the last `/` where
+  `_normalize_event` was only looking behind a `:`. Both spellings now
+  normalize to one.
+- **`agent --update` could replace a 32-bit install with the 64-bit
+  binary.** `detect_asset_arch()` read `uname()`, which reports the
+  *kernel's* architecture: on a 64-bit kernel the armv7 build and the
+  aarch64 build both answer `aarch64`. Asking the kernel was the wrong
+  question — a binary knows what it was compiled as. The asset now comes
+  from `__x86_64__` / `__aarch64__` / `__arm__` and the `__AARCH64EB__` /
+  `__ARMEB__` byte-order macros, which also retires a runtime endianness
+  probe that was inferring something the compiler already knew.
+
+  This is the second deliberate exception to the agent freeze in this
+  release. The wire protocol is unchanged.
+- **32-bit ARM could not install, push or self-update.** The release matrix
+  published `perflens-agent-linux-armv7l`, the string `uname -m` reports,
+  but nothing asks for it under that name: `install-agent.sh` maps `arm*` to
+  `armv7`, `push-agent`'s `_ARCH_MAP` maps `armv7l` to `armv7`, and the
+  agent's `--update` resolves `armv7`. Confirmed against the live v0.8.0
+  release, where that URL is the only 404 of the five. Every other target
+  already agreed with its consumers, which is what makes `armv7l` the
+  outlier rather than the convention.
+- **`POST /api/agent/command` accepted stray top-level fields.** Command
+  parameters belong inside `args`; spelling them at the top level returned
+  `ok:true` and changed nothing, so a caller typo looked like success.
+  Unknown keys are now rejected.
 
 - **Line-level source annotation reported each function's declaration line
   instead of its hot line.** The agent asked `perf script` for `sym` but not
@@ -77,6 +128,22 @@ at the output — not by an assertion.
 - `tests/test_aggregator_diff.py` deleted. It defined no `test_` function,
   so pytest collected nothing from it, and the invariant it claimed to pin
   is covered by `test_aggregator.py::test_incremental_matches_batch`.
+- **The parser retains roughly half the memory it used to.** Every frame
+  field was a fresh string: a real ARM session held 426,284 function-name
+  objects for 408 distinct names. Interning the four frame fields plus
+  `comm` and `event_type` takes a sample from ~3.3 KB to ~1.7 KB retained.
+  Addresses and offsets are interned too — measurement, not assumption:
+  profiling is repetitive, and that session showed 4,360 distinct addresses
+  and 516 distinct offsets across 426,284 frames.
+
+  Measured on the device rather than in a microbenchmark, the default
+  `--max-samples 500000` now plateaus near 1.1 GB of RSS instead of 1.9 GB.
+  `--max-samples` help text states the per-sample cost so the trade against
+  history depth can be made deliberately.
+- `DELETE /api/agent` documents what it actually does. It ends and saves the
+  session, but an agent started with `--server` dials back in within
+  seconds by design, so for that deployment it is a session reset rather
+  than a disconnect.
 
 ### Added
 
@@ -84,6 +151,10 @@ at the output — not by an assertion.
 - Regression tests for ip-based line recovery (including equivalence with
   the exact `symoff` path), startup pre-indexing, the `/api/index/status`
   response shape, and MCP source-path resolution.
+- Regression tests for hybrid-CPU event names: modifier normalization, base
+  name resolution across PMUs, the live-vs-import spelling agreement, the
+  ambiguous/missing HTTP responses, MCP event selection, and a test pinning
+  that repeated symbols share one string object.
 
 ## [0.8.0] — 2026-08-13
 

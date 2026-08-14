@@ -12,8 +12,12 @@ Thanks for taking the time. PerfLens is small on purpose, so a short list covers
 - **Node is dev/CI-only.** The UI is React 19 + TypeScript + Vite in
   `frontend/`, but the wheel ships the prebuilt assets, so `uvx perflens`
   never needs npm. Keep it that way.
-- **The agent is frozen.** `agent-c/` and the TCP wire protocol do not
-  change; everything server-side of the socket is fair game.
+- **The agent is stable by default.** `agent-c/` and the TCP wire protocol
+  change only by explicit decision, and a PR touching them needs to say why
+  in the description; everything server-side of the socket is fair game.
+  The wire protocol has not changed since it was documented. Agent changes
+  also need a real Linux target — the CI matrix cross-compiles five
+  architectures but runs none of them.
 - **Defensive parsing.** `perf script` output drifts across kernel versions. Add tests under `tests/` if your change touches `parser.py`.
 - **No proprietary names** in code, docs, comments, or commit messages. The repo is meant to stay generic.
 
