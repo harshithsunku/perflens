@@ -4,7 +4,7 @@ Cross-session working state. Update at the start and end of every working
 session. Release history lives in [CHANGELOG.md](CHANGELOG.md); this file
 is what is *currently true* and what is *left to do*.
 
-## Current phase — 0.9.0 in progress: the hands-on validation pass
+## Current phase — 0.9.0 released: the hands-on validation pass
 
 **0.9.0 is the validation 0.8.0 shipped without, and it found a real one.**
 The scope decision was taken deliberately (2026-08-13): rather than pick new
@@ -72,15 +72,16 @@ Current counts: **192 pytest** (was 165, then 152), 24 vitest, 10 Playwright.
 
 ### Where the work lives
 
-On branch **`validate-0.9.0`**, eleven commits, **not merged and not
-released**. Nothing is tagged and nothing went to PyPI. The first eight are
-pushed; the three device fixes are local at time of writing.
+Merged to master via [PR #2](https://github.com/harshithsunku/perflens/pull/2)
+and released as `v0.9.0`.
 
-Pushing the branch deliberately runs no CI: `test.yml` triggers on
-`push` to main/master plus `pull_request`, and `build.yml` on push to
-main/master plus `v*` tags. With no PR open, a feature-branch push fires
-neither. Opening a PR is what runs the gates — and is the next step when
-someone wants to review this.
+Worth keeping: pushing a feature branch runs **no** CI. `test.yml` triggers
+on push to main/master plus `pull_request`, `build.yml` on push to
+main/master plus `v*` tags, so a branch push with no PR open fires neither.
+Opening the PR is what ran the gates — and it failed on the first attempt,
+on `ruff` F811 (a duplicated import), which the local loop had never run.
+`ruff check src/ tests/ tools/` is step 2 of that job and belongs in any
+pre-push check.
 
 | | commit | what |
 |---|---|---|
@@ -95,6 +96,9 @@ someone wants to review this.
 | 9 | `24ffee2` | hybrid-CPU event resolution + halved per-sample memory |
 | 10 | `9bc4296` | agent `--update` asset from compile-time macros |
 | 11 | `3fcf947` | publish the 32-bit agent as `armv7` |
+| 12 | `8b526bc` | docs: the device pass, and what the devices disproved |
+| 13 | `35ca9d6` | drop a duplicated pytest import (ruff F811, caught by CI) |
+| 14 | (release) | version 0.9.0, CHANGELOG entry, regenerated docs assets |
 
 Verified green on the branch: 192 pytest, `check_version.py`, 24 vitest, 10
 Playwright, OpenAPI + typegen regenerated, and pytest in CI's no-UI
@@ -133,20 +137,28 @@ deliberate exception to the agent freeze.
       resolved fastapi 0.141.1 / starlette 1.6.0 / uvicorn 0.52.2 — newer
       than the dev venv and inside the upper bounds, so the caps were
       exercised rather than merely declared.
-- [ ] **Docs screenshots need regenerating.** `docs/screenshots/03-source.png`
-      now advertises the bug: it was captured 2026-08-13 07:25, before the
-      annotation fix, so it shows heat on a function's declaration line.
-      Run **both** halves — `npm run shots` then `npm run shots:live` —
-      never the first alone. `shots` overwrites the committed assets in
-      place from a fixture that has no resolvable binary, so committing its
-      output on its own downgrades seven shots to an `[unknown]`-at-73%
-      replay. That trap is now written down in `tools/README.md`; it caught
-      this session, mid-verification.
-- [ ] **The version is still 0.8.0, deliberately.** Not bumped: the fixes
-      are on a branch, unreviewed and unmerged, and bumping is step 1 of the
-      release recipe rather than part of the work. When it is time, bump
-      *before* reshooting the screenshots — the docs drawer renders the
-      version and is itself one of the shots.
+- [x] **Docs screenshots regenerated for 0.9.0.** `03-source.png` had been
+      advertising the bug — captured before the annotation fix, showing heat
+      on a function's declaration line. It now shows the inner loop at 61.8%
+      on L14. Both halves were run, in order, after the version bump.
+
+      The first live capture was re-shot: it caught the workload at a quiet
+      moment (11.7K samples, 36.9% CPU) and made a visibly weaker hero than
+      0.8.0's. `MIN_SAMPLES=90000` gave a denser one — 32.6K samples in the
+      selected event, 98.5% CPU, 384 functions. Worth knowing that the floor
+      is tunable and that the default is not always enough for the hero.
+
+      Both the old and new hero render PMU-qualified event names
+      (`CPU_ATOM/CY…`, `cpu_core/cycles/`) because the dev box is hybrid.
+      That is the status quo rather than a regression — 0.8.0's committed
+      shot has exactly the same naming — and `reference.html` now explains
+      it. A non-hybrid capture would read better; it needs a non-hybrid
+      machine.
+- [x] **Version bumped to 0.9.0** across all seven locations, agent rebuilt
+      (`VERSION` is compiled in), schema and typegen regenerated. The bump
+      landed *before* the screenshots on purpose: the docs drawer renders
+      the version and is itself one of the shots — `11-docs-drawer.png` now
+      reads v0.9.0.
 - [ ] **The response-model contract is still unenforced** — planned this
       pass, not done. `_json` returns a raw Starlette `Response`, and
       FastAPI skips `response_model` entirely when a handler does that, so

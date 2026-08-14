@@ -7,11 +7,32 @@ releases may break APIs between minor versions when needed.
 
 ## [Unreleased]
 
+Nothing yet. Three items were deliberately deferred from 0.9.0 rather than
+held for it:
+
+- Server RSS still drifts ~3 MB/min after the sample ring fills, and did not
+  flatten within a 22-minute soak. The interning work below moved the
+  plateau from ~1.9 GB to ~1.1 GB but did not end the drift.
+- Big-endian is compile-only. All five agent targets build and the
+  byte-order audit is clean, but no big-endian hardware was available and
+  byte-order bugs are invisible on little-endian by construction.
+- `build.yml` still has no `pull_request` trigger, so wheel packaging and
+  the five agent cross-compiles remain post-merge discoveries.
+
+## [0.9.0] — 2026-08-14
+
 The hands-on validation pass 0.8.0 shipped without. Everything below was
 found by running the profiler against a real 25-thread workload and looking
 at the output — not by an assertion. The second half of the pass moved off
 the dev box entirely and onto two reference devices: an ARM64 phone running
 Kali and an x86_64 LXC container on a hybrid P/E-core host.
+
+**Upgrading:** no API or wire-protocol changes. The agent changed twice, and
+both are backward compatible — a 0.8.0 agent works against a 0.9.0 server,
+and the server recovers line numbers from the raw ip for agents that predate
+the `symoff` request. Users on 32-bit ARM should note that the release asset
+is now `perflens-agent-linux-armv7`; the `armv7l` name published for 0.8.0
+was never the one any installer asked for.
 
 ### Fixed
 
