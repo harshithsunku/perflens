@@ -13,29 +13,38 @@
  * inode until restarted.
  * -------------------------------------------------------------------------- */
 
+/* Which release asset replaces *this* binary.
+ *
+ * Resolved at compile time, not from uname(). A 32-bit agent running on a
+ * 64-bit kernel is a normal arrangement, and there uname() reports the
+ * kernel's aarch64 — so asking it would quietly pull the 64-bit asset over
+ * a 32-bit install. The binary already knows what it was built as.
+ */
+#if defined(__x86_64__)
+#  define ASSET_ARCH "x86_64"
+#elif defined(__aarch64__)
+#  if defined(__AARCH64EB__)
+#    define ASSET_ARCH "aarch64_be"
+#  else
+#    define ASSET_ARCH "aarch64"
+#  endif
+#elif defined(__arm__)
+#  if defined(__ARMEB__)
+#    define ASSET_ARCH "armeb"
+#  else
+#    define ASSET_ARCH "armv7"
+#  endif
+#endif
+
 static int detect_asset_arch(char *buf, size_t buflen)
 {
-    struct utsname u;
-    if (uname(&u) != 0)
-        return -1;
-    const char *m = u.machine;
-
-    union { uint16_t v; uint8_t b[2]; } probe;
-    probe.v = 1;
-    int little = (probe.b[0] == 1);
-
-    if (strcmp(m, "x86_64") == 0)
-        snprintf(buf, buflen, "x86_64");
-    else if (strncmp(m, "aarch64", 7) == 0)
-        snprintf(buf, buflen, "%s", little ? "aarch64" : "aarch64_be");
-    else if (strncmp(m, "armeb", 5) == 0 ||
-             (strncmp(m, "arm", 3) == 0 && !little))
-        snprintf(buf, buflen, "armeb");
-    else if (strncmp(m, "arm", 3) == 0)
-        snprintf(buf, buflen, "armv7");
-    else
-        return -1;
+#ifdef ASSET_ARCH
+    snprintf(buf, buflen, "%s", ASSET_ARCH);
     return 0;
+#else
+    (void)buf; (void)buflen;
+    return -1;
+#endif
 }
 
 /* Download url to dest via curl (preferred) or wget. exec failure = 127. */

@@ -312,11 +312,16 @@ Options:
 
 - **The agent changes only by explicit decision.** `agent-c/` and the TCP
   wire protocol are stable by default; everything server-side of the socket
-  is fair game. Unfrozen once, in 0.9.0, to add `symoff` to `SCRIPT_FIELDS`
-  — without it `perf script` prints a bare symbol name and line-level
-  annotation collapses onto each function's declaration line. The wire
-  protocol did not change, and the server still recovers line numbers from
-  the raw ip for agents that predate it.
+  is fair game. Unfrozen twice, both in 0.9.0:
+  - to add `symoff` to `SCRIPT_FIELDS` — without it `perf script` prints a
+    bare symbol name and line-level annotation collapses onto each
+    function's declaration line. The server still recovers line numbers
+    from the raw ip for agents that predate it.
+  - to resolve `--update`'s release asset from compile-time macros instead
+    of `uname()`. A 32-bit agent under a 64-bit kernel is a normal
+    arrangement, and `uname()` reports the kernel's `aarch64` there, so
+    self-update quietly pulled the 64-bit asset over a 32-bit install.
+  Neither changed the wire protocol.
 - **Simplicity first.** A small, deliberate server dependency set
   (fastapi, uvicorn, orjson, zstandard, pydantic — all user-space).
   The UI is React + TS + Vite, but Node is dev/CI-only: the wheel ships
