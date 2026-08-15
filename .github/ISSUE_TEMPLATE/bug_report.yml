@@ -1,0 +1,65 @@
+name: Bug report
+description: Something behaves differently than documented
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please do **not** report security vulnerabilities here — see
+        [SECURITY.md](../blob/master/SECURITY.md) for private reporting.
+
+        Profiles and logs can contain source paths, symbol names and process
+        command lines. Redact before pasting.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you expected, and what you got instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Started the agent with: perflens-agent --listen ...
+        2. Started the server with: perflens serve ...
+        3. In the UI: ...
+    validations:
+      required: true
+
+  - type: input
+    id: server-version
+    attributes:
+      label: Server version
+      description: Output of `perflens version`
+    validations:
+      required: true
+
+  - type: input
+    id: agent-version
+    attributes:
+      label: Agent version and device architecture
+      description: "`perflens-agent --version` plus `uname -srm` on the device"
+
+  - type: textarea
+    id: perf
+    attributes:
+      label: perf environment on the device
+      description: |
+        Often decisive — `perf` output varies a lot across kernels, and
+        container and permission settings change what works.
+      placeholder: |
+        perf --version
+        cat /proc/sys/kernel/perf_event_paranoid
+        container? (docker / LXC / bare metal)
+    render: shell
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: Server stderr and/or the agent's log. Redact as needed.
+      render: shell

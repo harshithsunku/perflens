@@ -112,6 +112,32 @@ The protocol is bidirectional — data and health metrics flow agent → server,
 
 The server reads the 5 header bytes first, then exactly `LEN` more. Compression is in-process zstd on both ends (vendored in the agent, the `zstandard` package on the server, external `zstd` binary as a fallback). Typical ratio on real `perf script` output is **20–40×**.
 
+### Handshake
+
+The agent speaks first, then refuses every command until the server proves it knows the agent's pairing code:
+
+```
+agent  → server   flag 3   {"type":"hello","auth":"token","platform":{...}}   ← no secret
+server → agent    flag 2   {"cmd":"auth","args":{"token":"<pairing code>"}}
+agent  → server   flag 3   {"ok":true}
+                                    … commands accepted from here on
+```
+
+The hello deliberately carries no secret: it goes to whoever completed the TCP handshake, before that peer has proved anything. Three wrong codes, or 30 seconds without a valid one, and the agent drops the connection.
+
+---
+
+## Security
+
+The short version:
+
+- **The agent authenticates its peer.** It generates a pairing code at startup (or takes one via `--token`) and runs no command — not profiling, not process listing, not metrics, not self-update — until the server presents it.
+- **The channel is plaintext.** There is no encryption and no MITM protection. On an untrusted network, tunnel over ssh: `perflens-agent --listen --bind 127.0.0.1` plus `ssh -N -L 9999:127.0.0.1:9999 user@device`.
+- **The web UI has no login.** It binds `127.0.0.1` by default. Don't put `--http-bind 0.0.0.0` on a shared network.
+- **Profiles are sensitive.** They carry symbol names, source paths and — via `list_processes` — every process's command line.
+
+Full threat model, upgrade notes and the deprecation timeline: **[SECURITY.md](SECURITY.md)**.
+
 ---
 
 ## Quick Start
@@ -139,7 +165,11 @@ curl -fsSL https://raw.githubusercontent.com/harshithsunku/perflens/master/insta
 
 # Option 2: agent listens, server connects to agent
 ~/.perflens/bin/perflens-agent --listen
-# Then use the Live Debug wizard in the UI to connect to <device-ip>:9999
+#   Prints a pairing code:  [perflens-agent]   Pairing code: 3f9a...
+#   The server must present it before the agent will accept any command.
+#   Enter it in the Live Debug wizard along with <device-ip>:9999.
+#   Running detached? Read it back with:
+#     grep -i "pairing code" /tmp/agent.log
 
 # Update later (downloads, verifies, atomically replaces itself):
 ~/.perflens/bin/perflens-agent --update
@@ -177,7 +207,7 @@ make CROSS=armeb-linux-musleabihf-      # ARMv7 big-endian
 scp perflens-agent user@device:/tmp/
 ssh user@device
 /tmp/perflens-agent --server <server-ip>        # connects to server
-/tmp/perflens-agent --listen                     # or: wait for server to connect in
+/tmp/perflens-agent --listen                     # or: wait for server (prints a pairing code)
 ```
 
 The agent is a single static binary (~2 MB) with zstd built in.
@@ -197,7 +227,7 @@ uv venv && uv pip install -e .
 cd agent-c && make && scp perflens-agent user@device:/tmp/
 ssh user@device
 /tmp/perflens-agent --server <server-ip>   # connects to server
-/tmp/perflens-agent --listen                # or: wait for server
+/tmp/perflens-agent --listen                # or: wait for server (prints a pairing code)
 ```
 
 Then browse to `http://<server-ip>:8080`.
@@ -231,9 +261,9 @@ Then browse to `http://<server-ip>:8080`.
 | `--sysroot DIR` | — | Sysroot for resolving shared library modules and source files |
 | `--max-samples N` | `500000` | Raw-sample ring buffer cap (aggregates always cover the full session). Costs ~1.7 KB RSS per sample — the default plateaus near 1.1 GB on a busy target |
 | `--sessions-dir DIR` | `~/.perflens/sessions` | Where saved sessions are stored (`PERFLENS_HOME` moves the whole `~/.perflens` root) |
-| `--http-bind ADDR` | `127.0.0.1` | Web UI bind address (`0.0.0.0` to expose — the UI has no auth) |
+| `--http-bind ADDR` | `127.0.0.1` | Web UI bind address. **`0.0.0.0` exposes a UI with no login** — see [SECURITY.md](SECURITY.md) |
 | `--browse-root DIR` | `~` | Directory the wizard's file picker is confined to |
-| `--token SECRET` | — | Shared secret agents must present (or `PERFLENS_TOKEN`) |
+| `--token SECRET` | — | Pairing code to present to the agent (or `PERFLENS_TOKEN`). The wizard can supply one per connection instead |
 | `--inline` / `--no-inline` | on | Enable/disable inline function resolution via `addr2line -i` |
 | `--import FILE` | — | Import a `perf.data` file at startup and make it available as a session |
 
@@ -256,7 +286,8 @@ Options:
 | `--frequency HZ` | `99` | `perf record -F` sampling frequency |
 | `--duration SECS` | `8` | Length of each collection round |
 | `--rounds N` | `1` | Number of collection rounds (`--output` mode only) |
-| `--token SECRET` | — | Shared secret sent to the server in the hello (or `PERFLENS_TOKEN`) |
+| `--bind ADDR` | `0.0.0.0` | Address to listen on in `--listen` mode |
+| `--token SECRET` | — | Pairing code the server must present (or `PERFLENS_TOKEN`). In `--listen` mode one is generated and logged if you don't supply it. **Never sent over the wire.** |
 | `--update` | — | Self-update from the latest GitHub release, then exit |
 | `--version` | — | Print version and exit |
 
@@ -463,6 +494,10 @@ sudo sysctl -w kernel.perf_event_paranoid=1
 **No source line mapping.** Double-check `--binary` points at the exact unstripped binary running on the target and `--source-dir` contains the source files. Use `--path-map /build/src=/home/me/src` when your build was done under a different root.
 
 **Agent can't connect.** The server must be reachable on `--port`. Check with `nc -zv <server-ip> 9999`.
+
+**Every command comes back `unauthenticated`.** The server has not presented the agent's pairing code. The agent prints it at startup — `grep -i "pairing code" /tmp/agent.log` on the device — and it goes in the wizard's *Pairing code* field, or in the server's `--token`. The code rotates on every agent restart.
+
+**Agent logs "No valid pairing code within 30s".** Either the code is wrong, or the server predates 0.10.0 and cannot authenticate at all. Upgrade the server first, then the agents — a 0.10.0 agent sends no hello token, so an older server with `--token` set will reject it.
 
 **Container: one of the two `perf record` modes fails.** Which one depends on the container, so probe rather than assume. Some environments strip the perf capability set: `-p <pid>` returns empty and a system-wide `perf record -a` works. An unprivileged LXC container is the opposite case — at `perf_event_paranoid=1`, per-PID recording works and `-a` fails with "Failure to open any events for recording". `perf_event_paranoid` is not namespaced, so it is read-only from inside the container and lowering it requires the host.
 

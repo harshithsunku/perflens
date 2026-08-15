@@ -72,7 +72,7 @@
                 <tr><td><code>--sessions-dir DIR</code></td><td><code>~/.perflens/sessions</code></td><td>Where saved sessions are stored (<code>PERFLENS_HOME</code> moves the whole <code>~/.perflens</code> root).</td></tr>
                 <tr><td><code>--http-bind ADDR</code></td><td><code>127.0.0.1</code></td><td>Web UI bind address (<code>0.0.0.0</code> to expose &mdash; the UI has no auth).</td></tr>
                 <tr><td><code>--browse-root DIR</code></td><td><code>~</code></td><td>Directory the wizard file picker is confined to.</td></tr>
-                <tr><td><code>--token SECRET</code></td><td>&mdash;</td><td>Shared secret agents must present in their hello (or <code>PERFLENS_TOKEN</code>).</td></tr>
+                <tr><td><code>--token SECRET</code></td><td>&mdash;</td><td>Pairing code to present to the agent (or <code>PERFLENS_TOKEN</code>). The Live Debug wizard can supply one per connection instead.</td></tr>
                 <tr><td><code>--inline</code> / <code>--no-inline</code></td><td>on</td><td>Enable/disable inline-function resolution via <code>addr2line -i</code>.</td></tr>
                 <tr><td><code>--import FILE</code></td><td>&mdash;</td><td>Import a <code>perf.data</code> file at startup as a session.</td></tr>
             </tbody>
@@ -98,7 +98,8 @@
                 <tr><td><code>--frequency HZ</code></td><td><code>99</code></td><td><code>perf record -F</code> sampling frequency.</td></tr>
                 <tr><td><code>--duration SECS</code></td><td><code>8</code></td><td>Length of each collection round.</td></tr>
                 <tr><td><code>--rounds N</code></td><td><code>1</code></td><td>Number of rounds (<code>--output</code> mode).</td></tr>
-                <tr><td><code>--token SECRET</code></td><td>&mdash;</td><td>Shared secret sent to the server in the hello (or <code>PERFLENS_TOKEN</code>).</td></tr>
+                <tr><td><code>--bind ADDR</code></td><td><code>0.0.0.0</code></td><td>Address to listen on in <code>--listen</code> mode.</td></tr>
+                <tr><td><code>--token SECRET</code></td><td>&mdash;</td><td>Pairing code the server must present before any command runs (or <code>PERFLENS_TOKEN</code>). Generated and written to the agent log in <code>--listen</code> mode when not supplied. Never sent over the wire.</td></tr>
                 <tr><td><code>--update</code></td><td>&mdash;</td><td>Self-update from the latest GitHub release, then exit.</td></tr>
                 <tr><td><code>--version</code></td><td>&mdash;</td><td>Print version and exit.</td></tr>
             </tbody>
@@ -127,7 +128,7 @@
                 <tr><td><code>/api/metrics/history?type=&amp;start=</code></td><td>GET</td><td>Health metrics time series.</td></tr>
                 <tr><td><code>/api/agent</code></td><td>GET</td><td>Agent connection info (address + hello/platform).</td></tr>
                 <tr><td><code>/api/agent</code></td><td>DELETE</td><td>Disconnect the active agent (triggers a normal session save).</td></tr>
-                <tr><td><code>/api/agent/connect</code></td><td>POST</td><td>Connect out to a <code>--listen</code> agent (<code>{"host": &hellip;, "port": &hellip;}</code>).</td></tr>
+                <tr><td><code>/api/agent/connect</code></td><td>POST</td><td>Connect out to a <code>--listen</code> agent (<code>{"host": &hellip;, "port": &hellip;, "token": &hellip;}</code>).</td></tr>
                 <tr><td><code>/api/agent/command</code></td><td>POST</td><td>Relay a command to the connected agent (<code>start</code>, <code>stop</code>, <code>pause</code>, <code>resume</code>, <code>configure</code>, <code>configure_metrics</code>, <code>list_processes</code>, <code>reprobe</code>, <code>verify_pid</code>, <code>verify_perf</code>, <code>ping</code>, <code>status</code>, <code>update</code>).</td></tr>
                 <tr><td><code>/api/wizard</code></td><td>GET/PUT</td><td>Persisted Live Debug wizard state.</td></tr>
                 <tr><td><code>/api/browse?path=</code></td><td>GET</td><td>File picker listing (confined to <code>--browse-root</code>).</td></tr>

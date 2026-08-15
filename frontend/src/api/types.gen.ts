@@ -511,17 +511,23 @@ export interface components {
         /**
          * AgentHello
          * @description The agent's flag-3 hello payload (frozen wire JSON).
+         *
+         *     Deliberately carries no `token`. Agents from 0.10.0 on never put their
+         *     secret in the hello, and the server strips it from older agents' hellos
+         *     before this model is ever built — this payload is served to browsers via
+         *     GET /api/agent, so a token field here would republish the secret over
+         *     HTTP. See agentlink.authenticate_agent.
          */
         AgentHello: {
+            /**
+             * Auth
+             * @default null
+             */
+            auth: string | null;
             /** Platform */
             platform?: {
                 [key: string]: unknown;
             };
-            /**
-             * Token
-             * @default null
-             */
-            token: string | null;
             /**
              * Type
              * @default hello
@@ -669,6 +675,8 @@ export interface components {
              * @default 9999
              */
             port: number;
+            /** Token */
+            token?: string | null;
         };
         /** ConnectResponse */
         ConnectResponse: {
@@ -972,6 +980,17 @@ export interface components {
             per_event: {
                 [key: string]: components["schemas"]["PerEventEntry"];
             };
+        };
+        /**
+         * SnapshotAllResponse
+         * @description GET /api/snapshot (no event param)
+         */
+        SnapshotAllResponse: {
+            /** Per Event */
+            per_event: {
+                [key: string]: components["schemas"]["PerEventEntry"];
+            };
+            version: components["schemas"]["DataVersion"];
         };
         /**
          * SnapshotResponse
@@ -1830,7 +1849,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SnapshotResponse"];
+                    "application/json": components["schemas"]["SnapshotResponse"] | components["schemas"]["SnapshotAllResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
             /** @description Not Found */

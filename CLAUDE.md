@@ -41,6 +41,11 @@ shipped without — see [STATUS.md](STATUS.md) for what it has turned up.
 
 ### Wire protocol
 - 5-byte header: 4-byte uint32 big-endian payload length + 1-byte flag.
+- Handshake: the agent sends `hello` (no secret in it — it goes to whoever
+  completed the TCP handshake), then rejects every command with
+  `unauthenticated` until the server presents the agent's pairing code via
+  `{"cmd":"auth","args":{"token":...}}`. Three failures or 30s without a
+  valid code drops the connection. See SECURITY.md.
 - Flag values:
   - `0` = raw perf data (agent → server)
   - `1` = zstd-compressed perf data (agent → server)
@@ -278,7 +283,8 @@ missing, 409 wrong server state, 413 too large, 502 agent transport).
 --sessions-dir DIR    Saved-session location      (default ~/.perflens/sessions)
 --http-bind ADDR      Web UI bind address         (default 127.0.0.1)
 --browse-root DIR     File-picker confinement root (default: home dir)
---token SECRET        Shared secret agents must present (or PERFLENS_TOKEN)
+--token SECRET        Pairing code to present to the agent (or PERFLENS_TOKEN);
+                      the wizard can supply one per connection instead
 --inline / --no-inline  Enable/disable inline function resolution (default: on)
 --import FILE         Import a perf.data file at startup as a session
 ```
@@ -301,7 +307,10 @@ Options:
 --frequency HZ        perf record -F              (default 99)
 --duration SECS       Length of each round         (default 8)
 --rounds N            Number of rounds (--output mode only)
---token SECRET        Shared secret sent in hello (or PERFLENS_TOKEN env)
+--bind ADDR           Listen address for --listen  (default 0.0.0.0)
+--token SECRET        Pairing code the server must present (or PERFLENS_TOKEN).
+                      Generated and logged in --listen mode if not given.
+                      Never sent over the wire.
 --update              Self-update from latest GitHub release, then exit
 --version             Print version and exit
 ```
@@ -321,7 +330,18 @@ Options:
     of `uname()`. A 32-bit agent under a 64-bit kernel is a normal
     arrangement, and `uname()` reports the kernel's `aarch64` there, so
     self-update quietly pulled the 64-bit asset over a 32-bit install.
-  Neither changed the wire protocol.
+
+  Neither of those changed the wire protocol. **The third unfreeze, in
+  0.10.0, did** — pairing-code authentication. Before it, `--listen` bound
+  every interface, accepted any peer, and executed all 13 commands with no
+  authentication, while `--token` made things *worse*: the agent embedded it
+  in the hello, which goes to whoever completes the TCP handshake, so a port
+  scanner harvested the shared secret. The agent now holds a secret always
+  (generated and logged when not supplied), sends none of it over the wire,
+  and gates `dispatch_command` on a peer proving knowledge of it. Added
+  `auth` to `CMD_TABLE` and a `--bind` flag; existing flags and frame types
+  are unchanged, and a 0.10.0 server still accepts a pre-0.10.0 agent on its
+  hello token with a warning.
 - **Simplicity first.** A small, deliberate server dependency set
   (fastapi, uvicorn, orjson, zstandard, pydantic — all user-space).
   The UI is React + TS + Vite, but Node is dev/CI-only: the wheel ships

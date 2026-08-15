@@ -123,6 +123,9 @@ def download_tools_bundle(quiet=False):
             _fetch(url, tarball)
             _fetch(url + '.sha256', tarball + '.sha256')
         except Exception as e:
+            # Broad on purpose, as in cli._download: urllib's failure
+            # set is wide, and every one of them means the same thing
+            # to the user, who gets the recovery hint below.
             say(f'download failed: {e}')
             say('to fix: retry with `perflens provision`, install binutils '
                 'via your package manager, or pass --addr2line/--readelf')

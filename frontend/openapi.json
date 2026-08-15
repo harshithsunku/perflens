@@ -118,14 +118,9 @@
       },
       "AgentHello": {
         "additionalProperties": true,
-        "description": "The agent's flag-3 hello payload (frozen wire JSON).",
+        "description": "The agent's flag-3 hello payload (frozen wire JSON).\n\nDeliberately carries no `token`. Agents from 0.10.0 on never put their\nsecret in the hello, and the server strips it from older agents' hellos\nbefore this model is ever built \u2014 this payload is served to browsers via\nGET /api/agent, so a token field here would republish the secret over\nHTTP. See agentlink.authenticate_agent.",
         "properties": {
-          "platform": {
-            "additionalProperties": true,
-            "title": "Platform",
-            "type": "object"
-          },
-          "token": {
+          "auth": {
             "anyOf": [
               {
                 "type": "string"
@@ -135,7 +130,12 @@
               }
             ],
             "default": null,
-            "title": "Token"
+            "title": "Auth"
+          },
+          "platform": {
+            "additionalProperties": true,
+            "title": "Platform",
+            "type": "object"
           },
           "type": {
             "const": "hello",
@@ -498,6 +498,17 @@
             "default": 9999,
             "title": "Port",
             "type": "integer"
+          },
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token"
           }
         },
         "required": [
@@ -1136,6 +1147,27 @@
         "title": "SessionReplayResponse",
         "type": "object"
       },
+      "SnapshotAllResponse": {
+        "description": "GET /api/snapshot (no event param)",
+        "properties": {
+          "per_event": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/PerEventEntry"
+            },
+            "title": "Per Event",
+            "type": "object"
+          },
+          "version": {
+            "$ref": "#/components/schemas/DataVersion"
+          }
+        },
+        "required": [
+          "per_event",
+          "version"
+        ],
+        "title": "SnapshotAllResponse",
+        "type": "object"
+      },
       "SnapshotResponse": {
         "description": "GET /api/snapshot?event=<evt>",
         "properties": {
@@ -1614,7 +1646,7 @@
   },
   "info": {
     "title": "PerfLens",
-    "version": "0.9.0"
+    "version": "0.10.0"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -2444,11 +2476,29 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SnapshotResponse"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/SnapshotResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SnapshotAllResponse"
+                    }
+                  ],
+                  "title": "Response Api Snapshot Api Snapshot Get"
                 }
               }
             },
             "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
           },
           "404": {
             "content": {

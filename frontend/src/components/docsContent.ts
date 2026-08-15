@@ -35,7 +35,7 @@ perflens serve --source-dir /path/to/src --binary /path/to/binary</code></pre>
 
 # Or: agent listens, connect from the UI wizard
 ~/.perflens/bin/perflens-agent --listen</code></pre>
-  <p>With <code>--server</code>, the UI switches automatically when the agent connects. With <code>--listen</code>, use the <strong>Live Debug</strong> wizard.</p>
+  <p>With <code>--server</code>, the UI switches automatically when the agent connects. With <code>--listen</code>, use the <strong>Live Debug</strong> wizard — the agent prints a <strong>pairing code</strong> at startup that the wizard needs before it can drive the device.</p>
 </section>
 <section class="docs-section">
   <h3>Prerequisites</h3>
@@ -72,7 +72,7 @@ perflens serve --source-dir /path/to/src --binary /path/to/binary</code></pre>
       <tr><td><code>--import FILE</code></td><td>&mdash;</td><td>Import a perf.data file at startup as a session</td></tr>
       <tr><td><code>--http-bind ADDR</code></td><td>127.0.0.1</td><td>Web UI bind address (<code>0.0.0.0</code> exposes it — no auth)</td></tr>
       <tr><td><code>--browse-root DIR</code></td><td>home dir</td><td>Directory the file picker is confined to</td></tr>
-      <tr><td><code>--token SECRET</code></td><td>&mdash;</td><td>Shared secret agents must present (or <code>PERFLENS_TOKEN</code>)</td></tr>
+      <tr><td><code>--token SECRET</code></td><td>&mdash;</td><td>Pairing code to present to the agent (or <code>PERFLENS_TOKEN</code>)</td></tr>
       <tr><td><code>--sessions-dir DIR</code></td><td><code>~/.perflens/sessions</code></td><td>Where saved sessions are stored</td></tr>
     </tbody>
   </table>
@@ -97,7 +97,8 @@ perflens serve --source-dir /path/to/src --binary /path/to/binary</code></pre>
       <tr><td><code>--frequency HZ</code></td><td>99</td><td>perf record sampling frequency</td></tr>
       <tr><td><code>--duration SECS</code></td><td>8</td><td>Length of each collection round</td></tr>
       <tr><td><code>--rounds N</code></td><td>1</td><td>Number of rounds (<code>--output</code> mode only)</td></tr>
-      <tr><td><code>--token SECRET</code></td><td>&mdash;</td><td>Shared secret sent in the hello (or <code>PERFLENS_TOKEN</code>)</td></tr>
+      <tr><td><code>--bind ADDR</code></td><td><code>0.0.0.0</code></td><td>Listen address for <code>--listen</code> mode</td></tr>
+      <tr><td><code>--token SECRET</code></td><td>&mdash;</td><td>Pairing code the server must present. Generated and logged in <code>--listen</code> mode if not given; never sent over the wire</td></tr>
       <tr><td><code>--update</code></td><td>&mdash;</td><td>Self-update from the latest GitHub release and exit</td></tr>
     </tbody>
   </table>

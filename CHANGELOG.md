@@ -7,17 +7,120 @@ releases may break APIs between minor versions when needed.
 
 ## [Unreleased]
 
-Nothing yet. Three items were deliberately deferred from 0.9.0 rather than
-held for it:
+Nothing yet.
+
+## [0.10.0] — unreleased
+
+The pre-launch stabilization pass. The project has never been shared
+publicly; this closes what an audit turned up before it is.
+
+**Upgrading — read this first.** The agent now requires a peer to
+authenticate, and the hello no longer carries a token.
+
+- **Upgrade the server first, then the agents.** A 0.10.0 agent sends no
+  hello token, so an older server started with `--token` will reject it. A
+  0.10.0 server accepts a pre-0.10.0 agent on its hello token, with a
+  warning.
+- **`--listen` now needs a pairing code.** The agent prints one at startup
+  when you don't supply `--token`; the server must present it. In the UI it
+  goes in the Live Debug wizard's new *Pairing code* field. Read it back on
+  the device with `grep -i "pairing code" /tmp/agent.log`.
+- `--bind` defaults to `0.0.0.0`, unchanged.
+
+### Security
+
+- **Authenticated agent control.** `--listen` bound every interface, accepted
+  any peer, and executed all 13 commands with no authentication — profiling
+  any PID, enumerating every process and command line, and triggering a
+  self-update. The agent now always holds a secret (`--token`, or one
+  generated from `/dev/urandom` and written to its log) and gates
+  `dispatch_command` on the peer proving knowledge of it. Three failures, or
+  30 seconds without a valid code, drops the connection.
+- **The agent no longer transmits its secret.** `--token` used to be embedded
+  in the hello — which, in `--listen` mode, is sent to whoever completes the
+  TCP handshake, before that peer has proved anything. A port scanner could
+  harvest the shared secret. The hello now carries no token at all.
+- **The server no longer republishes agent tokens over HTTP.** `AgentHello`
+  had a `token` field returned verbatim by `GET /api/agent`. Removed, and
+  stripped from legacy agents' hellos on the compatibility path.
+- **Device metrics no longer stream before authentication.** The metrics
+  thread started on connect, sending CPU, memory, temperature and
+  per-process detail to unproven peers every 2s.
+- `update` is refused on a session with no configured pairing code, and
+  `PERFLENS_UPDATE_URL` pointing at a plaintext `http://` origin is refused.
+- Release assets now publish `.sha256` sidecars, verified by
+  `install-agent.sh` and `perflens push-agent`. The C agent does not verify
+  them — it carries no hash implementation. See SECURITY.md for what that
+  does and does not cover.
+- New **[SECURITY.md](SECURITY.md)**: threat model, what is deliberately not
+  protected (the channel is plaintext), and the deprecation timeline.
+
+### Fixed
+
+- **`GET /api/snapshot` declared the wrong response schema.** Without
+  `?event=` it returns `{per_event, version}`, but declared
+  `SnapshotResponse`, which requires `event` + `data`. The correct model
+  existed and was referenced by no route. The wrong type had already
+  propagated into `frontend/openapi.json` and the generated TypeScript.
+- **`--binary` was applied to every frame**, including libc, libm and kernel
+  ones — 62k of 124k frames in the committed ARM fixture. Those addresses do
+  not exist in that file; it is also why ip-based line recovery needs its
+  span check. Shared objects and perf's bracketed pseudo-modules now resolve
+  against their own module path.
+- `make all-cross` left the last-built architecture's binary at
+  `agent-c/perflens-agent`, so a cross-compile silently replaced the native
+  binary and the protocol tests failed with `Exec format error` instead of
+  skipping. Each architecture now builds into `build/<arch>/`, and the skip
+  guard checks that the binary actually runs on this host rather than only
+  that it is executable.
+- A `--server` agent that connected but failed to authenticate reset the
+  reconnect backoff, so a misconfigured fleet would reconnect once a second
+  per device indefinitely.
+
+### Added
+
+- `--bind ADDR` on the agent, for narrowing `--listen` to a single interface.
+- Type checking, in a codebase that had none: `mypy` over `src/perflens`
+  (clean), and `frontend/tsconfig.test.json` covering the ten `.ts` files
+  that were in no tsconfig project — the vitest specs, the Playwright e2e
+  spec, the docs-shots harness and `playwright.config.ts`. Both run in CI.
+- `build.yml` gained a `pull_request` trigger. Wheel packaging and the five
+  agent cross-compiles were post-merge discoveries.
+- Issue templates and a pull-request template.
+
+### Still open
+
+Carried forward from 0.9.0, unaddressed by this pass:
 
 - Server RSS still drifts ~3 MB/min after the sample ring fills, and did not
-  flatten within a 22-minute soak. The interning work below moved the
-  plateau from ~1.9 GB to ~1.1 GB but did not end the drift.
-- Big-endian is compile-only. All five agent targets build and the
-  byte-order audit is clean, but no big-endian hardware was available and
-  byte-order bugs are invisible on little-endian by construction.
-- `build.yml` still has no `pull_request` trigger, so wheel packaging and
-  the five agent cross-compiles remain post-merge discoveries.
+  flatten within a 22-minute soak. The 0.9.0 interning work moved the plateau
+  from ~1.9 GB to ~1.1 GB but did not end the drift.
+- Big-endian remains compile-only. All five agent targets build and the
+  byte-order audit is clean, but no big-endian hardware was available, and
+  byte-order bugs are invisible on little-endian by construction. The new
+  pairing-code code is byte-order independent (it compares hex strings), so
+  this pass did not widen the exposure.
+
+### Tests
+
+308 pytest (was 192), 24 vitest, 10 Playwright.
+
+- `tests/test_line_oracle.py` — line-level annotation checked against marker
+  comments in a hand-written C file rather than against captured output.
+  Both existing fixtures were produced by running the agent, so when
+  annotation regressed to reporting declaration lines, the fixtures recorded
+  the broken behaviour and 165 tests agreed with it. Verified non-vacuous:
+  fed the frame shape the regression produced, it fails.
+- `tests/test_response_models.py` — validates every JSON route's real body
+  against its declared `response_model`. Handlers return pre-serialized
+  orjson, so FastAPI skips validation and all 26 declared schemas went
+  unchecked. This is what found the `/api/snapshot` bug above.
+- `tests/test_agentlink_auth.py`, driven by a pure-Python fake agent so the
+  server's half of the handshake is tested even when `agent-c` is not built.
+- `tests/test_export.py`, `tests/test_cli.py` — first coverage for either.
+- Agent protocol tests grew a `--listen` harness mode (that direction had
+  never been tested at all) and auth coverage, including a regression test
+  that no metrics frame arrives before authentication.
 
 ## [0.9.0] — 2026-08-14
 

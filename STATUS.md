@@ -4,7 +4,89 @@ Cross-session working state. Update at the start and end of every working
 session. Release history lives in [CHANGELOG.md](CHANGELOG.md); this file
 is what is *currently true* and what is *left to do*.
 
-## Current phase — 0.9.0 released: the hands-on validation pass
+## Current phase — 0.10.0 in progress: the pre-launch stabilization pass
+
+**The project has never been shared publicly.** This pass closes what a
+pre-launch audit turned up, so the first people who look at it find something
+that holds up. Nothing is tagged, nothing is on PyPI, and no release job has
+run.
+
+**The headline finding: `--listen` was an unauthenticated remote-control
+daemon.** It bound every interface, accepted any peer, and executed all 13
+commands — profiling any PID, enumerating every process and command line, and
+triggering a self-update that downloads and runs a binary. `--token` made it
+*worse*, not better: the agent embedded the secret in its hello, which goes to
+whoever completes the TCP handshake before that peer has proved anything, so a
+port scanner harvested it. The server then republished it over HTTP via
+`GET /api/agent`.
+
+Fixed with **pairing-code authentication** (design chosen deliberately over
+mutual HMAC — this runs in controlled environments, and a per-start random code
+copied out of band is the `adb pair` model, needs no vendored crypto in the
+agent, and makes the tokenless default *secure* rather than open, which is why
+`--listen` can safely keep binding `0.0.0.0`). This is the **third** agent
+unfreeze and the first that changes the wire protocol.
+
+### Verified on hardware
+
+Driven end to end on the ARM64 bed (`ssh kali@kali`, aarch64, kernel 6.12.92,
+perf 7.0.12, paranoid=-1): pairing code generated and read back from the log
+the way an operator does, wrong code rejected, correct code accepted, 6 events
+probed, 7,483 samples collected, stop clean. `--server` mode verified with a
+matching token, and rejected with a mismatched one.
+
+**That is where a real bug in this pass's own fix surfaced.** The reconnect
+backoff for an unauthenticated session incremented a delay that nothing ever
+slept on, so a misconfigured fleet still reconnected once a second — 90
+connections in 90 seconds, measured. The connect loop's backoff never engages
+here because the TCP connect *succeeds* every time; only the auth fails. Fixed
+with an explicit wait, re-measured at 1/2/4/8/16/30/30s, and covered by
+`test_failed_auth_backs_off_instead_of_spinning`, which was then verified
+non-vacuous by removing the sleep and watching it fail with 0.08s gaps.
+
+### The methodology item, which mattered most
+
+`tests/test_line_oracle.py` derives its expected line numbers from marker
+comments in a hand-written C file rather than from captured output. Both
+existing fixtures were produced by running the agent, which is exactly why the
+0.8.0 declaration-line regression survived 165 tests and reached a docs
+screenshot — a fixture cannot falsify the tool that generated it. Verified
+non-vacuous: fed the frame shape the regression produced, it fails.
+
+`tests/test_response_models.py` closes the same class of gap on the HTTP side,
+and found a live bug immediately: `/api/snapshot` declared `SnapshotResponse`
+for a body that is `SnapshotAllResponse`, and the wrong type had already
+reached `frontend/openapi.json` and the generated TypeScript.
+
+### State
+
+- **Tests: 309 pytest** (was 192), 24 vitest, 10 Playwright, 10 docs shots.
+- Green: pytest, ruff, **mypy** (new, clean), `check_version` on 0.10.0,
+  vitest, **tsc typecheck** (new — covers the 10 `.ts` files that were in no
+  tsconfig project), Playwright, OpenAPI + typegen no-drift, and pytest in
+  CI's no-UI configuration (308 passed, 2 skipped).
+- Docs screenshots regenerated with **both** halves (`shots` then
+  `shots:live`), demo GIF re-encoded, `wire-protocol.svg` gained the
+  handshake.
+- New: `SECURITY.md`, issue templates, PR template.
+
+### Still open
+
+- [ ] **Not committed or pushed yet** at the time of writing. No tag, no PyPI,
+      no GitHub Release — the version bump is part of the work, releasing is a
+      separate decision.
+- [ ] **Three merged remote branches** (`origin/stabilize-0.8.0`,
+      `origin/copilot/review-security-issues`, `origin/validate-0.9.0`) still
+      want deleting. Outward-facing, so it needs a deliberate call.
+- [ ] **The x86_64 LXC bed was not re-run** this pass. The ARM bed covered the
+      auth work; a confirmation run on the constrained/hybrid-CPU bed would
+      close the loop on the restricted-permission and PMU-split paths.
+- [ ] Server RSS still drifts ~3 MB/min after the sample ring fills
+      (carried from 0.9.0, untouched here).
+- [ ] Big-endian remains compile-only. The pairing code compares hex strings,
+      so this pass did not widen that exposure.
+
+## Previous phase — 0.9.0 released: the hands-on validation pass
 
 **0.9.0 is the validation 0.8.0 shipped without, and it found a real one.**
 The scope decision was taken deliberately (2026-08-13): rather than pick new

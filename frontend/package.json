@@ -1,11 +1,12 @@
 {
   "name": "perflens-frontend",
   "private": true,
-  "version": "0.9.0",
+  "version": "0.10.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "typecheck": "tsc -b && tsc -p tsconfig.test.json",
     "typegen": "openapi-typescript openapi.json -o src/api/types.gen.ts",
     "test": "vitest run",
     "e2e": "playwright test --project=chromium",
