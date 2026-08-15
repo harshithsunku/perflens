@@ -72,15 +72,25 @@ reached `frontend/openapi.json` and the generated TypeScript.
 
 ### Still open
 
-- [ ] **Not committed or pushed yet** at the time of writing. No tag, no PyPI,
-      no GitHub Release — the version bump is part of the work, releasing is a
-      separate decision.
-- [ ] **Three merged remote branches** (`origin/stabilize-0.8.0`,
-      `origin/copilot/review-security-issues`, `origin/validate-0.9.0`) still
-      want deleting. Outward-facing, so it needs a deliberate call.
-- [ ] **The x86_64 LXC bed was not re-run** this pass. The ARM bed covered the
-      auth work; a confirmation run on the constrained/hybrid-CPU bed would
-      close the loop on the restricted-permission and PMU-split paths.
+- [x] **Released.** Pushed to master, tagged `v0.10.0`. The push to master was
+      the dress rehearsal — full `build.yml` green (wheel, five agent
+      architectures, two tools bundles) with `publish to PyPI` and `release`
+      showing `skipped`, confirming the tag guard by observation rather than
+      by reading the YAML. `test.yml` green on 3.10–3.13. The wheel was also
+      clean-room installed from a fresh 3.12 venv before tagging: serves the
+      UI from inside the wheel, reports 0.10.0, `/api/snapshot` returns the
+      shape it now declares.
+- [x] **Three merged remote branches deleted** (`stabilize-0.8.0`,
+      `copilot/review-security-issues`, `validate-0.9.0`) — each verified an
+      ancestor of master first. `origin/master` is now the only branch.
+- [ ] **The x86_64 LXC bed was not re-run** this pass — it was offline
+      (`192.168.0.49` unreachable, hostname does not resolve). The ARM bed
+      covered the auth work end to end. What remains unconfirmed on hardware
+      is that the auth change is orthogonal to the constrained-permission
+      (`paranoid=1`, `-a` fails) and PMU-split event-name paths. Neither is
+      touched by this pass and both are covered by the automated suite, but
+      "not touched, therefore fine" is the reasoning that shipped the symoff
+      bug. Re-run it when the bed is back.
 - [ ] Server RSS still drifts ~3 MB/min after the sample ring fills
       (carried from 0.9.0, untouched here).
 - [ ] Big-endian remains compile-only. The pairing code compares hex strings,
