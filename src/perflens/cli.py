@@ -75,21 +75,53 @@ def _agent_cache_dir():
     return d
 
 
+def _fetch_sha256(url):
+    """Fetch a published <asset>.sha256 sidecar. None when absent."""
+    import urllib.error
+    import urllib.request
+    try:
+        with urllib.request.urlopen(url + '.sha256', timeout=30) as resp:
+            return resp.read().decode('ascii', 'replace').split()[0].strip()
+    except (urllib.error.URLError, OSError, IndexError, ValueError):
+        return None
+
+
 def _download(url, dest):
-    """Download url to dest with urllib (stdlib — no curl dependency)."""
+    """Download url to dest with urllib (stdlib — no curl dependency).
+
+    Verifies the release's .sha256 sidecar when one is published. That catches
+    truncation, corruption and a poisoned single object; it does not
+    authenticate the release, since the same origin serves both files.
+    """
+    import hashlib
     import urllib.request
     tmp = dest + '.download.%d' % os.getpid()
     try:
+        digest = hashlib.sha256()
         with urllib.request.urlopen(url, timeout=60) as resp, \
                 open(tmp, 'wb') as f:
             while True:
                 chunk = resp.read(1 << 16)
                 if not chunk:
                     break
+                digest.update(chunk)
                 f.write(chunk)
+
+        expected = _fetch_sha256(url)
+        if expected and expected != digest.hexdigest():
+            print(f'error: checksum mismatch for {url}\n'
+                  f'  expected: {expected}\n'
+                  f'  actual:   {digest.hexdigest()}\n'
+                  f'  Refusing to install.', file=sys.stderr)
+            os.unlink(tmp)
+            return False
+
         os.replace(tmp, dest)
         return True
     except Exception as e:
+        # Broad on purpose: urllib raises a wide and version-dependent
+        # set (URLError, HTTPError, ssl, socket, OSError). A failed
+        # download is reported and returns False either way.
         print(f'error: download failed: {e}\n  {url}', file=sys.stderr)
         try:
             os.unlink(tmp)

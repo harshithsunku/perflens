@@ -287,15 +287,25 @@ class WizardState(BaseModel):
 class ConnectRequest(BaseModel):
     host: str
     port: int = 9999
+    # The pairing code the agent printed at startup. Falls back to the
+    # server's --token when omitted.
+    token: Optional[str] = None
 
 
 class AgentHello(BaseModel):
-    """The agent's flag-3 hello payload (frozen wire JSON)."""
+    """The agent's flag-3 hello payload (frozen wire JSON).
+
+    Deliberately carries no `token`. Agents from 0.10.0 on never put their
+    secret in the hello, and the server strips it from older agents' hellos
+    before this model is ever built — this payload is served to browsers via
+    GET /api/agent, so a token field here would republish the secret over
+    HTTP. See agentlink.authenticate_agent.
+    """
     model_config = ConfigDict(extra='allow')
     type: Literal['hello'] = 'hello'
     version: str = ''
+    auth: Optional[str] = None      # 'token' on 0.10.0+; absent on older
     platform: dict[str, Any] = Field(default_factory=dict)
-    token: Optional[str] = None
 
 
 class ConnectResponse(BaseModel):

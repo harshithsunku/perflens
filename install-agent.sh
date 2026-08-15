@@ -55,12 +55,41 @@ tmp="${dest}.download.$$"
 trap 'rm -f "$tmp"' EXIT
 
 # --- Download (curl preferred, wget fallback) -------------------------------
-if command -v curl >/dev/null 2>&1; then
-    curl -fSL --connect-timeout 20 -o "$tmp" "$url" || fail "download failed: $url"
-elif command -v wget >/dev/null 2>&1; then
-    wget -q -T 20 -O "$tmp" "$url" || fail "download failed: $url"
+fetch() {  # fetch <url> <dest>  — quiet, returns non-zero on failure
+    if command -v curl >/dev/null 2>&1; then
+        curl -fSL --connect-timeout 20 -o "$2" "$1"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q -T 20 -O "$2" "$1"
+    else
+        fail "neither curl nor wget found"
+    fi
+}
+
+fetch "$url" "$tmp" || fail "download failed: $url"
+
+# --- Verify the published checksum ------------------------------------------
+# Every release publishes a <asset>.sha256 sidecar. This catches truncation,
+# corruption and a poisoned single object. It does NOT authenticate the
+# release: an attacker who controls the origin controls both files. See
+# SECURITY.md.
+sumfile="${tmp}.sha256"
+if command -v sha256sum >/dev/null 2>&1; then
+    if fetch "${url}.sha256" "$sumfile" 2>/dev/null; then
+        expected="$(cut -d' ' -f1 < "$sumfile")"
+        actual="$(sha256sum "$tmp" | cut -d' ' -f1)"
+        rm -f "$sumfile"
+        [ "$expected" = "$actual" ] || fail \
+            "checksum mismatch for ${url}
+  expected: ${expected}
+  actual:   ${actual}
+Refusing to install. Retry, or report this if it persists."
+        say "  sha256:  verified"
+    else
+        rm -f "$sumfile"
+        say "  sha256:  no sidecar published for this asset — skipping"
+    fi
 else
-    fail "neither curl nor wget found"
+    say "  sha256:  sha256sum not available — skipping checksum verification"
 fi
 
 chmod 0755 "$tmp"

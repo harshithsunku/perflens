@@ -128,8 +128,8 @@ export const api = {
   saveWizardState: (updates: Record<string, unknown>) =>
     sendJson<WizardState>('PUT', '/api/wizard', updates),
 
-  connect: (host: string, port: number) =>
-    sendJson<ConnectResponse>('POST', '/api/agent/connect', { host, port }),
+  connect: (host: string, port: number, token?: string) =>
+    sendJson<ConnectResponse>('POST', '/api/agent/connect', { host, port, token }),
 
   agentCommand: (cmd: string, args: Record<string, unknown> = {}, timeout = 30) =>
     sendJson<AgentCommandResult>('POST', '/api/agent/command',

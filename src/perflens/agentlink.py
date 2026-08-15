@@ -9,6 +9,7 @@ All socket work runs on plain threads with blocking I/O; the HTTP layer
 talks to it only through AppContext.
 """
 
+import hmac
 import json
 import os
 import socket
@@ -39,7 +40,7 @@ MAX_FRAME_SIZE = 128 * 1024 * 1024
 try:
     import zstandard as _zstd
 except ImportError:
-    _zstd = None
+    _zstd = None  # type: ignore[assignment]
 
 
 def recv_exactly(conn, n):
@@ -85,7 +86,8 @@ def decompress_payload(cfg, payload, comp_flag):
                 print(f"[server] zstd decompress failed: {r.stderr.decode(errors='replace')}",
                       file=sys.stderr)
                 return None
-        except Exception as e:
+        except (OSError, subprocess.SubprocessError,
+                UnicodeDecodeError) as e:
             print(f"[server] zstd decompress error: {e}", file=sys.stderr)
             return None
 
@@ -95,17 +97,126 @@ def decompress_payload(cfg, payload, comp_flag):
 
 
 def check_agent_token(cfg, hello):
-    """Validate the hello token against cfg.token (if configured).
+    """Validate a legacy hello token against cfg.token (if configured).
+
+    Pre-0.10.0 agents put their shared secret directly in the hello frame.
+    That is why it was replaced: in --listen mode the hello goes to whoever
+    completes the TCP handshake, so the agent handed its secret to any port
+    scanner. Modern agents send no token and prove the server's knowledge of
+    the pairing code instead (see authenticate_agent).
+
+    This remains only as the compatibility path for agents that predate that
+    change. The fail-open when cfg.token is unset is deliberate, not an
+    oversight: it is what makes authentication opt-in for existing tokenless
+    deployments.
 
     Returns None when accepted, or an error string when rejected.
     """
     if not cfg or not cfg.token:
         return None
-    import hmac
     presented = hello.get('token') or ''
     if not hmac.compare_digest(str(presented), cfg.token):
         return 'agent token mismatch'
     return None
+
+
+def send_frame(sock, payload, flag):
+    """Write one framed message: 4-byte BE length + 1-byte flag + payload."""
+    sock.sendall(struct.pack('!IB', len(payload), flag) + payload)
+
+
+def read_json_frame(sock, expect_flag=FLAG_CMD_RESPONSE,
+                    skip_flags=(FLAG_METRICS,)):
+    """Read one JSON frame, skipping frames of the types in skip_flags.
+
+    The skip matters during the handshake: an agent that predates the auth
+    gate starts streaming metrics the moment it connects, so a flag-4 frame
+    can arrive before the response we are waiting for. Raises RuntimeError on
+    disconnect, a wrong flag, or malformed JSON.
+    """
+    while True:
+        header = recv_exactly(sock, 5)
+        if header is None:
+            raise RuntimeError('agent disconnected')
+
+        length, flag = struct.unpack('!IB', header)
+        if length > MAX_FRAME_SIZE:
+            raise RuntimeError(f'oversized frame ({length} bytes)')
+
+        payload = recv_exactly(sock, length) if length else b''
+        if payload is None:
+            raise RuntimeError('agent disconnected mid-frame')
+
+        if flag in skip_flags:
+            continue
+        if flag != expect_flag:
+            raise RuntimeError(f'expected flag {expect_flag}, got flag {flag}')
+
+        try:
+            return json.loads(payload.decode('utf-8', errors='replace'))
+        except ValueError as e:
+            raise RuntimeError(f'invalid JSON in frame: {e}') from e
+
+
+def read_hello(sock):
+    """Read and validate the agent's opening hello frame."""
+    hello = read_json_frame(sock)
+    if hello.get('type') != 'hello':
+        raise RuntimeError(f'expected hello message, got type={hello.get("type")}')
+    return hello
+
+
+def authenticate_agent(cfg, sock, hello, addr_str, token=None):
+    """Prove knowledge of the agent's pairing code, then accept the session.
+
+    The agent prints a pairing code (or takes one via --token) and refuses
+    every command until the server presents it. Returns None when the session
+    is authenticated, or an error string when it must be rejected.
+
+    Also strips any legacy token from `hello` in place: the hello is handed
+    out over the HTTP API, and republishing a secret there would reintroduce
+    the leak from the agent side.
+    """
+    secret = token or (cfg.token if cfg else None)
+
+    if not secret:
+        # Nothing configured to prove. Only reachable for --server agents,
+        # which expose no listening socket of their own.
+        hello.pop('token', None)
+        return None
+
+    try:
+        send_frame(sock, json.dumps({
+            'id': uuid.uuid4().hex[:12],
+            'cmd': 'auth',
+            'args': {'token': secret},
+        }).encode('utf-8'), FLAG_CMD_REQUEST)
+        resp = read_json_frame(sock)
+    except (IOError, OSError, RuntimeError) as e:
+        return f'auth exchange failed: {e}'
+
+    if resp.get('ok'):
+        hello.pop('token', None)
+        return None
+
+    error = str(resp.get('error') or 'auth failed')
+
+    # An agent from before the pairing handshake answers with the dispatcher's
+    # unknown-command reply rather than failing to respond, which is precisely
+    # what makes it distinguishable. Fall back to the old hello token.
+    if 'unknown command' in error:
+        legacy_err = check_agent_token(cfg, hello)
+        hello.pop('token', None)
+        if legacy_err:
+            return legacy_err
+        print(f"[server] WARNING: agent {addr_str} "
+              f"(v{hello.get('agent_version', '?')}) predates pairing-code "
+              f"authentication and was accepted on its hello token. That "
+              f"token crossed the wire in the clear — upgrade the agent.",
+              file=sys.stderr)
+        return None
+
+    return f'agent rejected the pairing code: {error}'
 
 
 class AgentSlot:
@@ -256,7 +367,10 @@ class AgentSession:
                                 self._responses[cmd_id] = resp
                                 event.set()
                             # else: unsolicited (e.g. hello) — ignore
-                    except Exception as e:
+                    except (ValueError, TypeError, AttributeError) as e:
+                        # Malformed JSON, or valid JSON of the wrong
+                        # shape. Log and keep the session alive: one bad
+                        # frame should not drop a live capture.
                         print(f"[server] Bad agent response: {e}",
                               file=sys.stderr)
 
@@ -404,15 +518,25 @@ def stop_agent(ctx):
     if session and session.connected:
         try:
             session.send_command('stop', timeout=5)
-        except Exception:
+        except (IOError, OSError, RuntimeError):
+            # Deliberately swallowed: we are tearing the session down
+            # anyway, and the common reason the stop fails is that the
+            # agent already went away. close() below is what matters.
             pass
         session.close()
         return {'stopped': True}
     return {'stopped': False, 'reason': 'no agent connected'}
 
 
-def connect_to_agent(ctx, host, port, timeout=10):
-    """Connect to a listen-mode agent. Returns AgentSession or raises."""
+def connect_to_agent(ctx, host, port, timeout=10, token=None):
+    """Connect to a listen-mode agent. Returns AgentSession or raises.
+
+    `token` is the pairing code the agent printed at startup, supplied by the
+    operator through the Live Debug wizard; it falls back to the server's
+    --token when omitted. Mirrors handle_inbound_agent after TCP setup — both
+    go through read_hello + authenticate_agent, so the two paths cannot drift.
+    """
+    addr_str = f'{host}:{port}'
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.settimeout(timeout)
     try:
@@ -420,46 +544,25 @@ def connect_to_agent(ctx, host, port, timeout=10):
     except (IOError, OSError) as e:
         sock.close()
         raise RuntimeError(
-            f'Cannot connect to agent at {host}:{port}: {e}') from e
+            f'Cannot connect to agent at {addr_str}: {e}') from e
 
-    # Read hello message (flag 3)
-    header = recv_exactly(sock, 5)
-    if header is None:
-        sock.close()
-        raise RuntimeError('Agent disconnected before hello')
-
-    length, flag = struct.unpack('!IB', header)
-    if flag != FLAG_CMD_RESPONSE:
-        sock.close()
-        raise RuntimeError(f'Expected hello (flag 3), got flag {flag}')
-    if length > MAX_FRAME_SIZE:
-        sock.close()
-        raise RuntimeError(f'Oversized hello frame ({length} bytes)')
-
-    payload = recv_exactly(sock, length)
-    if payload is None:
-        sock.close()
-        raise RuntimeError('Agent disconnected during hello')
-
+    # The handshake runs before AgentSession exists, so these are plain
+    # blocking reads under the connect timeout set above — no interaction
+    # with the recv loop.
     try:
-        hello = json.loads(payload.decode('utf-8', errors='replace'))
-    except ValueError as e:
+        hello = read_hello(sock)
+    except (IOError, OSError, RuntimeError) as e:
         sock.close()
-        raise RuntimeError(f'Invalid hello JSON: {e}') from e
+        raise RuntimeError(f'Agent handshake failed: {e}') from e
 
-    if hello.get('type') != 'hello':
+    auth_err = authenticate_agent(ctx.config, sock, hello, addr_str, token)
+    if auth_err:
         sock.close()
-        raise RuntimeError(f'Expected hello message, got: {hello.get("type")}')
-
-    token_err = check_agent_token(ctx.config, hello)
-    if token_err:
-        sock.close()
-        raise RuntimeError(token_err)
+        raise RuntimeError(auth_err)
 
     # Clear connection timeout — recv loop must block indefinitely
     sock.settimeout(None)
 
-    addr_str = f'{host}:{port}'
     session = AgentSession(ctx, sock, addr_str)
     session.hello = hello
     install_agent_session(ctx, session)
@@ -481,59 +584,25 @@ def handle_inbound_agent(ctx, conn, addr):
     addr_str = f'{addr[0]}:{addr[1]}'
     print(f"[server] Agent connected from {addr_str}", file=sys.stderr)
 
+    def reject(reason):
+        print(f"[server] Inbound agent {addr_str} rejected: {reason}",
+              file=sys.stderr)
+        try:
+            conn.close()
+        except OSError:
+            pass
+
     # Read hello message (flag 3) — agent always sends hello first
     try:
         conn.settimeout(10)
-        header = recv_exactly(conn, 5)
-        if header is None:
-            print(f"[server] Inbound agent {addr_str} disconnected before hello",
-                  file=sys.stderr)
-            conn.close()
-            return
-
-        length, flag = struct.unpack('!IB', header)
-        if flag != FLAG_CMD_RESPONSE:
-            print(f"[server] Inbound agent {addr_str}: expected hello (flag 3), "
-                  f"got flag {flag}", file=sys.stderr)
-            conn.close()
-            return
-        if length > MAX_FRAME_SIZE:
-            print(f"[server] Inbound agent {addr_str}: oversized hello "
-                  f"({length} bytes)", file=sys.stderr)
-            conn.close()
-            return
-
-        payload = recv_exactly(conn, length)
-        if payload is None:
-            print(f"[server] Inbound agent {addr_str} disconnected during hello",
-                  file=sys.stderr)
-            conn.close()
-            return
-
-        hello = json.loads(payload.decode('utf-8', errors='replace'))
-        if hello.get('type') != 'hello':
-            print(f"[server] Inbound agent {addr_str}: expected hello message, "
-                  f"got type={hello.get('type')}", file=sys.stderr)
-            conn.close()
-            return
-
-    except (IOError, OSError, ValueError) as e:
-        print(f"[server] Inbound agent {addr_str} hello failed: {e}",
-              file=sys.stderr)
-        try:
-            conn.close()
-        except OSError:
-            pass
+        hello = read_hello(conn)
+    except (IOError, OSError, RuntimeError) as e:
+        reject(f'handshake failed: {e}')
         return
 
-    token_err = check_agent_token(ctx.config, hello)
-    if token_err:
-        print(f"[server] Inbound agent {addr_str} rejected: {token_err}",
-              file=sys.stderr)
-        try:
-            conn.close()
-        except OSError:
-            pass
+    auth_err = authenticate_agent(ctx.config, conn, hello, addr_str)
+    if auth_err:
+        reject(auth_err)
         return
 
     # Clear connection timeout — recv loop must block indefinitely

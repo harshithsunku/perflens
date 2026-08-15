@@ -662,10 +662,85 @@ static void cmd_configure_metrics(struct agent_state *a, const char *cmd_id,
     agent_send_response(a, resp);
 }
 
+/* The pairing handshake. The server presents the code the operator read off
+ * this agent's log (or configured with --token); nothing is sent back but a
+ * verdict. The code itself never travels agent -> server. */
+static void cmd_auth(struct agent_state *a, const char *cmd_id,
+                     const char *json)
+{
+    char resp[256];
+
+    if (a->authed) {
+        snprintf(resp, sizeof(resp),
+            "{\"id\":\"%s\",\"ok\":true,\"already\":true}", cmd_id);
+        agent_send_response(a, resp);
+        return;
+    }
+
+    if (!a->token || !a->token[0]) {
+        /* Only reachable if a session started tokenless and the server sent
+         * auth anyway; nothing to check against. */
+        snprintf(resp, sizeof(resp),
+            "{\"id\":\"%s\",\"ok\":false,"
+            "\"error\":\"agent has no pairing code configured\"}", cmd_id);
+        agent_send_response(a, resp);
+        return;
+    }
+
+    const char *args = json_find_object(json, "args");
+    char presented[256] = "";
+    if (args)
+        json_get_str(args, "token", presented, sizeof(presented));
+
+    if (!agent_consttime_eq(presented, a->token)) {
+        a->auth_failures++;
+        agent_log("Rejected pairing code (attempt %d of %d)",
+                  a->auth_failures, AUTH_MAX_FAILURES);
+        if (a->token_is_generated)
+            agent_log("  Pairing code: %s", a->token);
+
+        snprintf(resp, sizeof(resp),
+            "{\"id\":\"%s\",\"ok\":false,\"error\":\"auth failed\"}", cmd_id);
+        agent_send_response(a, resp);
+
+        /* 128 bits of entropy makes brute force irrelevant; this just stops a
+         * peer sitting on the single --listen slot guessing indefinitely. */
+        if (a->auth_failures >= AUTH_MAX_FAILURES) {
+            agent_log("Too many failed pairing attempts — closing session.");
+            a->session_done = 1;
+        }
+        return;
+    }
+
+    a->authed = 1;
+    agent_log("Server authenticated.");
+
+    /* Metrics were held back until the peer proved itself. */
+    start_metrics_thread(a);
+
+    snprintf(resp, sizeof(resp), "{\"id\":\"%s\",\"ok\":true}", cmd_id);
+    agent_send_response(a, resp);
+}
+
 static void cmd_update(struct agent_state *a, const char *cmd_id,
                        const char *json)
 {
     (void)json;
+
+    /* The one command that fetches and executes new code. Refuse it on a
+     * session with no pairing code at all: such a session is only reachable
+     * in --server mode, and `perflens-agent --update` over ssh (or
+     * `perflens push-agent`) covers that case without exposing the primitive
+     * to whatever the agent happened to connect to. */
+    if (!a->token || !a->token[0]) {
+        char resp[256];
+        snprintf(resp, sizeof(resp),
+            "{\"id\":\"%s\",\"ok\":false,"
+            "\"error\":\"update requires a configured pairing code\"}", cmd_id);
+        agent_send_response(a, resp);
+        return;
+    }
+
     char msg[512];
     int rc = self_update(msg, sizeof(msg));
     agent_log("Self-update: %s", msg);
@@ -692,6 +767,7 @@ struct cmd_dispatch_entry {
 };
 
 static const struct cmd_dispatch_entry CMD_TABLE[] = {
+    { "auth",               cmd_auth },
     { "ping",               cmd_ping },
     { "status",             cmd_status },
     { "list_processes",     cmd_list_processes },
@@ -716,6 +792,22 @@ void dispatch_command(struct agent_state *a, const char *json)
 
     if (!cmd[0]) {
         agent_log("Received command with no 'cmd' field");
+        return;
+    }
+
+    /* The authentication gate.
+     *
+     * Placed here rather than in the receiver thread so it covers every entry
+     * in CMD_TABLE, and every future one, by construction. Answering instead
+     * of dropping is deliberate: silence is indistinguishable from a stalled
+     * link, and this is exactly the case an operator running an older server
+     * needs to be able to diagnose. */
+    if (!a->authed && strcmp(cmd, "auth") != 0) {
+        char resp[256];
+        snprintf(resp, sizeof(resp),
+            "{\"id\":\"%s\",\"ok\":false,\"error\":\"unauthenticated\"}",
+            cmd_id);
+        agent_send_response(a, resp);
         return;
     }
 

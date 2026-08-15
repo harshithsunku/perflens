@@ -101,6 +101,17 @@ int self_update(char *msg, size_t msglen)
     if (!base || !base[0])
         base = UPDATE_URL_BASE;
 
+    /* The downloaded file is made executable and run, so refuse an origin
+     * that offers no transport authentication at all. The compiled-in default
+     * is https; this only bites an operator who pointed the agent at a
+     * plaintext mirror. */
+    if (strncmp(base, "http://", 7) == 0) {
+        snprintf(msg, msglen,
+                 "refusing to update over plaintext http:// "
+                 "(set PERFLENS_UPDATE_URL to an https:// origin)");
+        return -1;
+    }
+
     char url[512];
     snprintf(url, sizeof(url), "%s/perflens-agent-linux-%s", base, arch);
 

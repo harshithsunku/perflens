@@ -57,6 +57,8 @@ export default function WizardView() {
   const [indexStatus, setIndexStatus] = useState<WizStatus | null>(null);
   const [browse, setBrowse] = useState<BrowseRequest | null>(null);
 
+  const [token, setToken] = useState('');
+
   // Options
   const [frequency, setFrequency] = useState('99');
   const [duration, setDuration] = useState('8');
@@ -89,7 +91,9 @@ export default function WizardView() {
     }
     setConnecting(true);
     setConnectStatus({ text: `Connecting to ${h}:${p}...`, cls: 'info' });
-    api.connect(h, p).then((data) => {
+    // Deliberately not persisted to the wizard state: it is written to disk
+    // and served back over the API, and it rotates on every agent restart.
+    api.connect(h, p, token.trim() || undefined).then((data) => {
       setConnecting(false);
       setConnected(true);
       setAgentHello(data.hello ?? null);
@@ -325,6 +329,17 @@ export default function WizardView() {
               <input type="number" id="wiz-port" value={port}
                      onChange={(e) => setPort(e.target.value)} />
             </div>
+            <div className="wiz-row">
+              <label>Pairing code</label>
+              <input type="password" id="wiz-token" autoComplete="off"
+                     placeholder="printed in the agent's log at startup"
+                     value={token} onChange={(e) => setToken(e.target.value)} />
+            </div>
+            <p className="wiz-hint">
+              The agent prints a pairing code when it starts and refuses commands
+              until the server presents it. Leave blank to use the server's
+              <code>--token</code>.
+            </p>
             <button id="wiz-connect-btn" className="wiz-btn wiz-btn-primary"
                     disabled={connecting} onClick={connect}>
               Connect

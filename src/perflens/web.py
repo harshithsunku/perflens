@@ -30,7 +30,7 @@ import sys
 import tempfile
 import threading
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Union
 
 import uvicorn
 from fastapi import APIRouter, Depends, FastAPI, Request
@@ -135,8 +135,10 @@ def api_status(ctx=Ctx):
     })
 
 
-@router.get('/api/snapshot', response_model=models.SnapshotResponse,
-            responses={404: _ERR})
+@router.get('/api/snapshot',
+            response_model=Union[models.SnapshotResponse,
+                                 models.SnapshotAllResponse],
+            responses={400: _ERR, 404: _ERR})
 def api_snapshot(request: Request, event: Optional[str] = None, ctx=Ctx):
     """Pull the cached per-event snapshot (one event, or all). Pairs with
     the 'data_version' SSE notify: browsers fetch only the event they're
@@ -433,6 +435,10 @@ async def api_sessions_import(request: Request, ctx=Ctx):
     except RuntimeError as e:
         return _err('import_failed', str(e), 500)
     except Exception as e:
+        # Broad on purpose: this is the outermost handler for an
+        # arbitrary uploaded perf.data, parsed by a forgiving parser and
+        # an external perf binary. Anything that escapes becomes a 500
+        # with the reason, rather than a stack trace to the browser.
         return _err('import_failed', f'import failed: {e}', 500)
     finally:
         try:
@@ -472,7 +478,7 @@ def api_threads(event: str = 'cycles', ctx=Ctx):
         count = len(info['samples'])
         expanded = (mapper.expand_inline_frames(info['samples'])
                     if mapper else info['samples'])
-        func_counts = {}
+        func_counts: dict[str, int] = {}
         for s in expanded:
             if s['frames']:
                 fn = s['frames'][0]['func']
@@ -480,7 +486,7 @@ def api_threads(event: str = 'cycles', ctx=Ctx):
         top_func = ''
         top_func_samples = 0
         if func_counts:
-            top_func = max(func_counts, key=func_counts.get)
+            top_func = max(func_counts, key=lambda k: func_counts[k])
             top_func_samples = func_counts[top_func]
 
         top_funcs = sorted(func_counts.items(),
@@ -718,7 +724,10 @@ async def api_agent_connect(body: models.ConnectRequest, ctx=Ctx):
 
     try:
         session = await run_in_threadpool(agentlink.connect_to_agent,
-                                          ctx, host, body.port)
+                                          ctx, host, body.port, 10, body.token)
+        # The pairing code is deliberately not persisted into the wizard
+        # state: it is written to disk and served back over the API, and the
+        # code rotates on every agent restart anyway.
         ctx.update_wizard({
             'agent_host': host,
             'agent_port': body.port,

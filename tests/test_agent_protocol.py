@@ -12,6 +12,7 @@ headless --output mode (multi-round markers).
 import json
 import os
 import queue
+import re
 import socket
 import struct
 import subprocess
@@ -22,11 +23,12 @@ import uuid
 import pytest
 import zstandard
 
-from conftest import AGENT_BIN
+from conftest import AGENT_BIN, agent_binary_runs
 
 pytestmark = pytest.mark.skipif(
-    not os.access(AGENT_BIN, os.X_OK),
-    reason='agent binary not built (run `make -C agent-c`)')
+    not agent_binary_runs(),
+    reason='agent binary missing, stale, or built for another architecture '
+           '(run `make -C agent-c`)')
 
 FLAG_DATA_RAW = 0
 FLAG_DATA_ZSTD = 1
@@ -170,16 +172,23 @@ def recv_exactly(sock, n):
 
 
 class AgentHarness:
-    """Fake server end of the wire protocol driving a real agent
-    subprocess in --server mode."""
+    """Fake server end of the wire protocol driving a real agent subprocess.
 
-    def __init__(self, shim_dir, tmp_path, agent_args=(), env=None):
-        self.listener = socket.socket()
-        self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.listener.bind(('127.0.0.1', 0))
-        self.listener.listen(1)
-        self.listener.settimeout(15)
-        port = self.listener.getsockname()[1]
+    mode='server' (default) — the agent dials us; we listen.
+    mode='listen'           — the agent listens; we dial it.
+
+    The two differ only in how the socket is obtained. Everything after that
+    goes through _attach, which mirrors the server's own two entry points
+    being identical after TCP setup.
+    """
+
+    def __init__(self, shim_dir, tmp_path, agent_args=(), env=None,
+                 mode='server', log_path=None):
+        self.mode = mode
+        self.listener = None
+        self.conn = None
+        self.frames = None
+        self._reader = None
 
         full_env = dict(os.environ)
         full_env['PATH'] = f'{shim_dir}:{full_env["PATH"]}'
@@ -187,28 +196,89 @@ class AgentHarness:
         full_env.update(env or {})
         self.shim_log = full_env['PERF_SHIM_LOG']
 
-        self.proc = subprocess.Popen(
-            [AGENT_BIN, '--server', '127.0.0.1', '--port', str(port),
-             *agent_args],
-            env=full_env, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL)
+        # The agent's own log, so tests can read a generated pairing code the
+        # way an operator does.
+        self.log_path = log_path or str(tmp_path / 'agent.log')
+        self._log_fh = open(self.log_path, 'wb')
 
-        self.conn = None
-        self.frames = None
-        self._reader = None
-        self.accept()
+        if mode == 'server':
+            self.listener = socket.socket()
+            self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.listener.bind(('127.0.0.1', 0))
+            self.listener.listen(1)
+            self.listener.settimeout(15)
+            self.port = self.listener.getsockname()[1]
+            argv = [AGENT_BIN, '--server', '127.0.0.1',
+                    '--port', str(self.port), *agent_args]
+        else:
+            # Reserve a port by binding and releasing. That leaves a race with
+            # the agent's own bind, which the connect retry loop below absorbs.
+            probe = socket.socket()
+            probe.bind(('127.0.0.1', 0))
+            self.port = probe.getsockname()[1]
+            probe.close()
+            argv = [AGENT_BIN, '--listen', '--bind', '127.0.0.1',
+                    '--port', str(self.port), *agent_args]
+
+        self.proc = subprocess.Popen(
+            argv, env=full_env, stdout=self._log_fh, stderr=subprocess.STDOUT)
+
+        if mode == 'server':
+            self.accept()
+        else:
+            self.dial()
 
     def accept(self):
-        """(Re-)accept the agent's connection and restart the reader.
+        """(Re-)accept the agent's connection and restart the reader."""
+        conn, _ = self.listener.accept()
+        self._attach(conn)
+
+    def dial(self, timeout=30):
+        """Connect to a --listen agent, retrying until its socket is up."""
+        deadline = time.monotonic() + timeout
+        last = None
+        while time.monotonic() < deadline:
+            try:
+                self._attach(socket.create_connection(
+                    ('127.0.0.1', self.port), timeout=10))
+                return
+            except (ConnectionError, OSError) as e:
+                last = e
+                time.sleep(0.25)
+        raise AssertionError(f'could not connect to --listen agent: {last}')
+
+    def _attach(self, conn):
+        """Take ownership of a connected socket and start reading frames.
+
         A fresh queue per connection: the previous reader's disconnect
         sentinel must not leak into the new session."""
-        self.conn, _ = self.listener.accept()
+        self.conn = conn
         self.frames = queue.Queue()
         self.conn.settimeout(30)
         self._reader = threading.Thread(
             target=self._read_loop, args=(self.conn, self.frames),
             daemon=True)
         self._reader.start()
+
+    def read_log(self):
+        self._log_fh.flush()
+        with open(self.log_path) as f:
+            return f.read()
+
+    def pairing_code(self, timeout=30):
+        """The generated code, read from the agent's log as an operator would."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            m = re.search(r'Pairing code: (\w+)', self.read_log())
+            if m:
+                return m.group(1)
+            time.sleep(0.25)
+        raise AssertionError(
+            f'no pairing code in agent log:\n{self.read_log()}')
+
+    def authenticate(self, token, timeout=30):
+        """Complete the pairing handshake; returns the agent's response."""
+        return self.command('auth', timeout=timeout, args={'token': token})
 
     @staticmethod
     def _read_loop(conn, frames):
@@ -261,6 +331,7 @@ class AgentHarness:
         for s in (self.conn, self.listener):
             if s is not None:
                 s.close()
+        self._log_fh.close()
 
 
 @pytest.fixture()
@@ -282,21 +353,156 @@ def test_hello(harness):
         assert hello['agent_version'] == f.read().strip()
     assert hello['platform']['perf_version'].startswith('perf version 6.99')
     assert 'arch' in hello['platform']
+    assert hello['auth'] == 'token'
     assert 'token' not in hello
 
 
-def test_hello_with_token(shim_dir, tmp_path):
+# ---------------------------------------------------------------------------
+# Pairing-code authentication
+#
+# The hello goes to whoever completed the TCP handshake, before that peer has
+# proved anything. Everything here exists to keep secrets out of it and to
+# keep commands behind the gate.
+# ---------------------------------------------------------------------------
+
+def test_hello_never_carries_an_explicit_token(shim_dir, tmp_path):
     h = AgentHarness(shim_dir, tmp_path, agent_args=['--token', 's3cret'])
     try:
-        assert h.read_hello()['token'] == 's3cret'
+        hello = h.read_hello()
+        assert 'token' not in hello
+        assert 's3cret' not in json.dumps(hello)
     finally:
         h.close()
 
 
-def test_hello_token_from_env(shim_dir, tmp_path):
+def test_hello_never_carries_an_env_token(shim_dir, tmp_path):
     h = AgentHarness(shim_dir, tmp_path, env={'PERFLENS_TOKEN': 'envtok'})
     try:
-        assert h.read_hello()['token'] == 'envtok'
+        hello = h.read_hello()
+        assert 'token' not in hello
+        assert 'envtok' not in json.dumps(hello)
+    finally:
+        h.close()
+
+
+@pytest.mark.parametrize('cmd', ['ping', 'status', 'list_processes',
+                                 'start', 'reprobe', 'update'])
+def test_commands_rejected_before_auth(shim_dir, tmp_path, cmd):
+    """The gate sits in dispatch_command, so it covers the whole table."""
+    h = AgentHarness(shim_dir, tmp_path, agent_args=['--token', 's3cret'])
+    try:
+        h.read_hello()
+        resp = h.command(cmd)
+        assert resp['ok'] is False
+        assert resp['error'] == 'unauthenticated'
+    finally:
+        h.close()
+
+
+def test_auth_then_commands_accepted(shim_dir, tmp_path):
+    h = AgentHarness(shim_dir, tmp_path, agent_args=['--token', 's3cret'])
+    try:
+        h.read_hello()
+        assert h.authenticate('s3cret')['ok'] is True
+        assert h.command('ping')['ok'] is True
+    finally:
+        h.close()
+
+
+def test_auth_wrong_code_leaves_session_locked(shim_dir, tmp_path):
+    """A failed attempt must not leave a half-open state."""
+    h = AgentHarness(shim_dir, tmp_path, agent_args=['--token', 's3cret'])
+    try:
+        h.read_hello()
+        resp = h.authenticate('wrong')
+        assert resp['ok'] is False
+        assert resp['error'] == 'auth failed'
+        assert h.command('ping')['error'] == 'unauthenticated'
+        # ...and the right code still works afterwards.
+        assert h.authenticate('s3cret')['ok'] is True
+        assert h.command('ping')['ok'] is True
+    finally:
+        h.close()
+
+
+def test_auth_failure_cap_closes_session(shim_dir, tmp_path):
+    h = AgentHarness(shim_dir, tmp_path, agent_args=['--token', 's3cret'])
+    try:
+        h.read_hello()
+        for _ in range(3):
+            assert h.authenticate('wrong')['ok'] is False
+        # The agent drops the peer rather than letting it guess forever.
+        flag, _ = h.frames.get(timeout=15)
+        assert flag is None, 'expected the agent to close the session'
+    finally:
+        h.close()
+
+
+def test_no_metrics_before_auth(shim_dir, tmp_path):
+    """Metrics carry CPU/memory/temperature and per-process detail. They must
+    not stream to a peer that has not proved itself — this is the regression
+    test for the thread being started before the gate."""
+    h = AgentHarness(shim_dir, tmp_path, agent_args=['--token', 's3cret'])
+    try:
+        h.read_hello()
+        deadline = time.monotonic() + 5      # metrics interval is 2s
+        while time.monotonic() < deadline:
+            try:
+                flag, _ = h.frames.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            assert flag != FLAG_METRICS, 'metrics leaked before authentication'
+
+        assert h.authenticate('s3cret')['ok'] is True
+        h.wait_frame({FLAG_METRICS}, timeout=15)
+    finally:
+        h.close()
+
+
+def test_tokenless_server_mode_needs_no_auth(harness):
+    """--server mode dials an operator-chosen address and exposes no
+    listening socket, so a secret stays optional there."""
+    harness.read_hello()
+    assert harness.command('ping')['ok'] is True
+
+
+def test_update_refused_without_a_pairing_code(harness):
+    """The one command that fetches and executes new code."""
+    harness.read_hello()
+    resp = harness.command('update')
+    assert resp['ok'] is False
+    assert 'pairing code' in resp['error']
+
+
+# ---------------------------------------------------------------------------
+# --listen mode — the direction that had no coverage at all
+# ---------------------------------------------------------------------------
+
+def test_listen_mode_generates_and_logs_a_pairing_code(shim_dir, tmp_path):
+    h = AgentHarness(shim_dir, tmp_path, mode='listen')
+    try:
+        code = h.pairing_code()
+        assert len(code) == 32 and all(c in '0123456789abcdef' for c in code)
+
+        hello = h.read_hello()
+        assert 'token' not in hello
+        assert code not in json.dumps(hello), 'code leaked in the hello'
+
+        assert h.command('ping')['error'] == 'unauthenticated'
+        assert h.authenticate(code)['ok'] is True
+        assert h.command('ping')['ok'] is True
+    finally:
+        h.close()
+
+
+def test_listen_mode_honours_an_explicit_token(shim_dir, tmp_path):
+    h = AgentHarness(shim_dir, tmp_path, mode='listen',
+                     agent_args=['--token', 'explicit-code'])
+    try:
+        h.read_hello()
+        assert 'Pairing code:' not in h.read_log(), \
+            'should not generate a code when one was supplied'
+        assert h.authenticate('explicit-code')['ok'] is True
     finally:
         h.close()
 
@@ -490,6 +696,30 @@ def test_reconnects_after_disconnect(harness):
     assert harness.command('ping')['ok'] is True
 
 
+def test_reconnect_requires_authenticating_again(shim_dir, tmp_path):
+    """Authentication is per-session state.
+
+    Both run modes loop over sessions, so an `authed` flag that survived
+    teardown would let one authenticated peer authorize whoever connected
+    next — which, in --listen mode, is anyone.
+    """
+    h = AgentHarness(shim_dir, tmp_path, agent_args=['--token', 's3cret'])
+    try:
+        h.read_hello()
+        assert h.authenticate('s3cret')['ok'] is True
+        assert h.command('ping')['ok'] is True
+
+        h.conn.close()
+        h.accept()
+        h.read_hello()
+
+        assert h.command('ping')['error'] == 'unauthenticated'
+        assert h.authenticate('s3cret')['ok'] is True
+        assert h.command('ping')['ok'] is True
+    finally:
+        h.close()
+
+
 # ---------------------------------------------------------------------------
 # Headless --output mode
 # ---------------------------------------------------------------------------
@@ -508,3 +738,53 @@ def test_output_mode_multi_round(shim_dir, tmp_path, target_pid):
     # One PERF_STAT section per round — the multi-round marker layout
     # split_perf_data must handle (phase-1c regression)
     assert text.count('### PERF_STAT ###') == 2
+
+
+def test_failed_auth_backs_off_instead_of_spinning(shim_dir, tmp_path):
+    """A --server agent whose session ends unauthenticated must back off.
+
+    The TCP connect succeeds every time here — only the auth fails — so the
+    connect loop's own backoff never engages. Without a separate wait the
+    agent reconnects about once a second, per device, indefinitely.
+
+    Found on hardware, not here: the first version of the fix incremented the
+    delay but nothing ever slept on it, and still produced 90 connections in
+    90 seconds.
+
+    Each session is ended with three wrong codes, which trips the failure cap
+    and makes the agent close from its own side — deterministic, and much
+    faster than waiting out the 30s auth deadline.
+    """
+    def burn_session(h):
+        """Fail auth until the agent drops us."""
+        h.read_hello()
+        for _ in range(3):
+            try:
+                h.authenticate('wrong', timeout=10)
+            except (AssertionError, ConnectionError, OSError):
+                break
+
+    h = AgentHarness(shim_dir, tmp_path, agent_args=['--token', 's3cret'])
+    try:
+        burn_session(h)
+
+        stamps = []
+        for _ in range(3):
+            try:
+                h.listener.settimeout(20)
+                conn, _ = h.listener.accept()
+            except (TimeoutError, socket.timeout, OSError):
+                break
+            stamps.append(time.monotonic())
+            h._attach(conn)
+            burn_session(h)
+
+        assert len(stamps) >= 3, (
+            f'expected the agent to keep reconnecting, got {len(stamps)}')
+
+        gaps = [b - a for a, b in zip(stamps, stamps[1:], strict=False)]
+        # 1s, then 2s, then 4s... A spin would give three gaps under a second.
+        assert gaps[-1] > gaps[0], f'delays are not increasing: {gaps}'
+        assert gaps[-1] >= 1.5, f'no meaningful backoff between retries: {gaps}'
+    finally:
+        h.close()

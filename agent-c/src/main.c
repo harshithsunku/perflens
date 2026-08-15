@@ -110,6 +110,10 @@ static void agent_state_init(struct agent_state *a)
     a->frequency = DEFAULT_FREQ;
     a->duration = DEFAULT_DURATION;
     a->token = NULL;
+    a->generated_token[0] = '\0';
+    a->token_is_generated = 0;
+    a->authed = 0;
+    a->auth_failures = 0;
     a->sel_events[0] = '\0';
     memset(&a->platform, 0, sizeof(a->platform));
     a->caps = NULL;
@@ -197,60 +201,102 @@ static void *recv_thread_fn(void *arg)
  * Interactive session (shared by --listen and --server modes)
  * -------------------------------------------------------------------------- */
 
-static void run_interactive(struct agent_state *a)
+/* Start the metrics thread if it is not already running.
+ *
+ * Idempotent, because it has two callers: run_interactive when the session
+ * needs no authentication, and cmd_auth once a peer has proved itself. It must
+ * not run before that — the frames carry CPU, memory, temperature and
+ * per-process detail, and streaming them to an unproven peer is the leak the
+ * auth gate exists to close. */
+void start_metrics_thread(struct agent_state *a)
 {
-    /* Fresh per-session state */
+    if (a->metrics_thread_active)
+        return;
+    if (pthread_create(&a->metrics_thread, NULL, metrics_thread_fn, a) == 0)
+        a->metrics_thread_active = 1;
+}
+
+/* Returns 1 if the session authenticated, 0 otherwise. run_connect uses this
+ * to decide whether the reconnect backoff should reset. */
+static int run_interactive(struct agent_state *a)
+{
+    /* Fresh per-session state. authed and auth_failures must reset here and
+     * not once at startup: both run modes loop over sessions, and a sticky
+     * flag would let one authenticated peer authorize its successor. */
     a->session_done = 0;
     a->collect_stop = 0;
+    a->auth_failures = 0;
+    a->metrics_thread_active = 0;
 
-    /* Send hello handshake (agent always sends hello first) */
+    /* No secret configured means no authentication is required. That only
+     * happens in --server mode, where the agent dials an address the operator
+     * chose and exposes no listening socket. --listen always has a token,
+     * generated at startup when the operator did not supply one. */
+    a->authed = (a->token && a->token[0]) ? 0 : 1;
+
+    /* Send hello handshake (agent always sends hello first).
+     *
+     * The hello deliberately carries no token. It goes to whoever completed
+     * the TCP handshake, before that peer has proved anything, so anything in
+     * it is public. The secret travels the other way, in the auth command. */
     char esc_pv[256];
     json_escape(esc_pv, sizeof(esc_pv), a->platform.perf_version);
-
-    char token_field[300] = "";
-    if (a->token && a->token[0]) {
-        char esc_tok[256];
-        json_escape(esc_tok, sizeof(esc_tok), a->token);
-        snprintf(token_field, sizeof(token_field),
-                 ",\"token\":\"%s\"", esc_tok);
-    }
 
     char hello[1536];
     snprintf(hello, sizeof(hello),
         "{\"type\":\"hello\",\"version\":1,\"agent\":\"perflens\","
-        "\"agent_version\":\"%s\"%s,"
+        "\"agent_version\":\"%s\",\"auth\":\"token\","
         "\"platform\":{\"arch\":\"%s\",\"kernel\":\"%s\","
         "\"perf_version\":\"%s\",\"perf_event_paranoid\":%d}}",
-        AGENT_VERSION, token_field,
+        AGENT_VERSION,
         a->platform.arch, a->platform.kernel,
         esc_pv, a->platform.perf_event_paranoid);
 
     if (agent_send_response(a, hello) < 0) {
         agent_log("Failed to send hello: %s", strerror(errno));
-        return;
+        return 0;
     }
 
     /* Start receiver thread */
     pthread_t recv_tid;
     if (pthread_create(&recv_tid, NULL, recv_thread_fn, a) != 0) {
         agent_warn("Failed to create recv thread");
-        return;
+        return 0;
     }
 
-    /* Start metrics thread */
-    a->metrics_thread_active = 0;
-    if (pthread_create(&a->metrics_thread, NULL, metrics_thread_fn, a) == 0) {
-        a->metrics_thread_active = 1;
+    if (a->token_is_generated) {
+        agent_log("Pairing code: %s", a->token);
+        agent_log("  Enter it on the server to start this session.");
     }
 
-    /* Command processing loop */
+    /* Metrics wait for authentication; see start_metrics_thread(). */
+    if (a->authed)
+        start_metrics_thread(a);
+
+    /* Command processing loop.
+     *
+     * The auth deadline rides the existing 1s cmdq_pop timeout rather than
+     * introducing a blocking socket read, so no socket timeout has to change.
+     * Without it an unauthenticated peer could hold the single --listen slot
+     * open indefinitely. */
+    time_t auth_deadline = a->authed ? 0 : time(NULL) + AUTH_TIMEOUT_SECS;
+
     while (!g_shutdown && !a->session_done) {
+        if (auth_deadline && !a->authed && time(NULL) > auth_deadline) {
+            agent_log("No valid pairing code within %ds — closing session.",
+                      AUTH_TIMEOUT_SECS);
+            agent_log("  (A server older than 0.10.0 cannot authenticate; "
+                      "upgrade the server first.)");
+            break;
+        }
+
         char *json = cmdq_pop(&a->cmdq, 1000);
         if (!json) continue;
 
         dispatch_command(a, json);
         free(json);
     }
+    int authenticated = a->authed;
 
     /* --- Cleanup session --- */
     agent_log("Ending interactive session");
@@ -289,6 +335,8 @@ static void run_interactive(struct agent_state *a)
 
     /* Drain command queue */
     cmdq_drain(&a->cmdq);
+
+    return authenticated;
 }
 
 /* --------------------------------------------------------------------------
@@ -324,9 +372,21 @@ static void get_local_ip(char *buf, size_t buflen)
  * Run modes
  * -------------------------------------------------------------------------- */
 
-static void run_listen(struct agent_state *a, int port)
+static void run_listen(struct agent_state *a, const char *bind_addr, int port)
 {
     detect_platform(&a->platform);
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((uint16_t)port);
+
+    /* Resolve the bind address before opening the socket, and refuse rather
+     * than silently falling back to every interface if it does not parse. */
+    if (inet_pton(AF_INET, bind_addr, &addr.sin_addr) != 1) {
+        agent_log("Invalid --bind address: %s", bind_addr);
+        return;
+    }
 
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd < 0) {
@@ -336,12 +396,6 @@ static void run_listen(struct agent_state *a, int port)
 
     int reuse = 1;
     setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons((uint16_t)port);
 
     if (bind(listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         agent_log("bind() failed: %s", strerror(errno));
@@ -355,12 +409,24 @@ static void run_listen(struct agent_state *a, int port)
         return;
     }
 
-    agent_log("Listening on port %d", port);
+    agent_log("Listening on %s:%d", bind_addr, port);
     agent_log("Waiting for server connection...");
 
-    char local_ip[INET_ADDRSTRLEN];
-    get_local_ip(local_ip, sizeof(local_ip));
-    agent_log("  Connect from server: %s:%d", local_ip, port);
+    /* When bound to a specific address, that address is the answer. Only
+     * guess via an outbound route when listening on every interface. */
+    if (strcmp(bind_addr, "0.0.0.0") == 0) {
+        char local_ip[INET_ADDRSTRLEN];
+        get_local_ip(local_ip, sizeof(local_ip));
+        agent_log("  Connect from server: %s:%d", local_ip, port);
+    } else {
+        agent_log("  Connect from server: %s:%d", bind_addr, port);
+    }
+
+    if (a->token_is_generated) {
+        agent_log("  Pairing code: %s", a->token);
+        agent_log("  The server must present this code before it can drive "
+                  "this agent.");
+    }
 
     while (!g_shutdown) {
         /* Accept with poll timeout for shutdown check */
@@ -406,9 +472,14 @@ static void run_connect(struct agent_state *a, const char *host, int port)
 {
     detect_platform(&a->platform);
 
+    /* The backoff lives outside the session loop so a session that connects
+     * but never authenticates does not reset it. Otherwise a fleet pointed at
+     * a server with the wrong pairing code reconnects once a second, per
+     * device, forever — the TCP connect succeeds every time, so the failure
+     * looks like success to a per-iteration backoff. */
+    double delay = 1.0;
+
     while (!g_shutdown) {
-        /* Connect with exponential backoff */
-        double delay = 1.0;
         int sock = -1;
 
         while (!g_shutdown) {
@@ -487,10 +558,33 @@ static void run_connect(struct agent_state *a, const char *host, int port)
         tcp_enable_keepalive(sock);
         a->sock_fd = sock;
         g_agent_sock_fd = sock;
-        run_interactive(a);
+
+        int authenticated = run_interactive(a);
+
+        if (authenticated) {
+            /* A session that authenticated is a working server; start the
+             * next reconnect from the short delay again. */
+            delay = 1.0;
+        }
 
         if (!g_shutdown)
             agent_log("Session ended, reconnecting...");
+
+        /* A session that connected but never authenticated has to back off
+         * here, not in the connect loop above: the TCP connect succeeds every
+         * time, so that loop never sleeps and the retry would be a tight
+         * 1/second spin against the server — per device, indefinitely. */
+        if (!authenticated && !g_shutdown) {
+            agent_log("  (not authenticated — retrying in %.0fs)", delay);
+            int wait_ms = (int)(delay * 1000);
+            struct timespec tick = {0, 200000000L};
+            while (wait_ms > 0 && !g_shutdown) {
+                nanosleep(&tick, NULL);
+                wait_ms -= 200;
+            }
+            if (delay < RECONNECT_MAX) delay *= 2;
+            if (delay > RECONNECT_MAX) delay = RECONNECT_MAX;
+        }
     }
 }
 
@@ -501,7 +595,7 @@ static void run_connect(struct agent_state *a, const char *host, int port)
 static void print_usage(const char *prog)
 {
     fprintf(stderr,
-        "usage: %s --listen [--port PORT]\n"
+        "usage: %s --listen [--bind ADDR] [--port PORT]\n"
         "       %s --server HOST [--port PORT]\n"
         "       %s --output FILE --pid PID [options]\n"
         "\n"
@@ -514,12 +608,16 @@ static void print_usage(const char *prog)
         "\n"
         "Options:\n"
         "  --pid PID         Process to profile (required for --output)\n"
+        "  --bind ADDR       Address to listen on in --listen mode\n"
+        "                    (default: 0.0.0.0 — every interface)\n"
         "  --port PORT       TCP port (default: %d)\n"
         "  --frequency HZ    Sampling frequency in Hz (default: %d)\n"
         "  --duration SECS   Duration of each collection in seconds (default: %d)\n"
         "  --rounds N        Collection rounds in --output mode (default: 1)\n"
-        "  --token SECRET    Shared secret sent to the server in the hello\n"
-        "                    (or set PERFLENS_TOKEN)\n"
+        "  --token SECRET    Pairing code the server must present before it can\n"
+        "                    drive this agent (or set PERFLENS_TOKEN). In\n"
+        "                    --listen mode one is generated and logged if you\n"
+        "                    do not supply one. Never sent over the wire.\n"
         "  --update          Self-update from the latest GitHub release and exit\n"
         "                    (override base URL with PERFLENS_UPDATE_URL)\n"
         "  --version         Print version and exit\n"
@@ -544,12 +642,14 @@ int main(int argc, char *argv[])
     int do_update = 0;
     char *output = NULL;
     const char *token = getenv("PERFLENS_TOKEN");
+    const char *bind_addr = "0.0.0.0";
 
-    enum { OPT_ROUNDS = 1000, OPT_TOKEN, OPT_UPDATE, OPT_VERSION };
+    enum { OPT_ROUNDS = 1000, OPT_TOKEN, OPT_UPDATE, OPT_VERSION, OPT_BIND };
     static struct option long_opts[] = {
         {"pid",       required_argument, NULL, 'p'},
         {"server",    required_argument, NULL, 's'},
         {"port",      required_argument, NULL, 'P'},
+        {"bind",      required_argument, NULL, OPT_BIND},
         {"frequency", required_argument, NULL, 'f'},
         {"duration",  required_argument, NULL, 'd'},
         {"listen",    no_argument,       NULL, 'l'},
@@ -575,6 +675,7 @@ int main(int argc, char *argv[])
         case 'o': output    = optarg;       break;
         case OPT_ROUNDS:  rounds = atoi(optarg); break;
         case OPT_TOKEN:   token  = optarg;       break;
+        case OPT_BIND:    bind_addr = optarg;    break;
         case OPT_UPDATE:  do_update = 1;         break;
         case OPT_VERSION:
             printf("perflens-agent %s\n", AGENT_VERSION);
@@ -687,11 +788,30 @@ int main(int argc, char *argv[])
     agent.token = token;
     if (pid >= 0) agent.pid = pid;
 
+    /* Resolve the pairing code.
+     *
+     * --listen accepts connections from anyone who can reach the port, so it
+     * always needs a secret; generate one and log it when the operator did not
+     * supply it. --server dials an address the operator chose and exposes no
+     * listening socket, so a secret is optional there — and a generated one
+     * would be useless, since the server cannot know it in advance. */
+    if (listen_mode && !(agent.token && agent.token[0])) {
+        if (agent_generate_token(agent.generated_token,
+                                 sizeof(agent.generated_token)) != 0) {
+            fprintf(stderr,
+                "Error: cannot read /dev/urandom to generate a pairing code.\n"
+                "Pass --token SECRET explicitly (or set PERFLENS_TOKEN).\n");
+            return 1;
+        }
+        agent.token = agent.generated_token;
+        agent.token_is_generated = 1;
+    }
+
     /* Register global pointer for signal handler */
     g_agent = &agent;
 
     if (listen_mode) {
-        run_listen(&agent, port);
+        run_listen(&agent, bind_addr, port);
     } else {
         run_connect(&agent, server, port);
     }

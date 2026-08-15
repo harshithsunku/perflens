@@ -78,6 +78,21 @@
 #define RECONNECT_MAX    30.0
 #define ZSTD_LEVEL       1
 
+/* Pairing-code authentication.
+ *
+ * The agent always holds a secret: --token/PERFLENS_TOKEN when given, or one
+ * generated at startup and printed to the log for the operator to copy into
+ * the server. A peer must present it before any command runs, so there is no
+ * unauthenticated state and --listen can safely keep its 0.0.0.0 default.
+ *
+ * The code is 16 random bytes as lowercase hex. That is 128 bits, so the
+ * failure cap below is defence in depth rather than the thing standing
+ * between an attacker and the agent. */
+#define TOKEN_BYTES       16
+#define TOKEN_HEX_LEN     (TOKEN_BYTES * 2)   /* 32 chars, +1 for NUL */
+#define AUTH_TIMEOUT_SECS 30    /* peer must authenticate within this */
+#define AUTH_MAX_FAILURES 3     /* wrong codes before the session is dropped */
+
 /* Wire protocol flags (5-byte header: 4-byte length + 1-byte flag) */
 #define FLAG_DATA_RAW     0   /* agent -> server: raw perf data */
 #define FLAG_DATA_ZSTD    1   /* agent -> server: zstd-compressed perf data */
@@ -180,7 +195,19 @@ struct agent_state {
     int pid;
     int frequency;
     int duration;
-    const char *token;          /* optional shared secret, sent in hello */
+
+    /* The shared secret a peer must present before any command runs. Either
+     * --token/PERFLENS_TOKEN (borrowed, points into argv or the environment)
+     * or generated_token below. Never written to the socket. */
+    const char *token;
+    char generated_token[TOKEN_HEX_LEN + 1];
+    int token_is_generated;     /* the operator has to copy it from the log */
+
+    /* Per-session auth state. Reset on every session: run_listen and
+     * run_connect both loop, and a sticky flag would let one authenticated
+     * session authorize its successor. */
+    volatile int authed;
+    int auth_failures;
 
     /* Record-event selection: comma-joined subset of the probed record
      * events actually sampled (set at start; empty = all probed) */
@@ -281,6 +308,20 @@ int  run_cmd_to_sink(char *const argv[], struct sink *sink,
                      struct buf *err, int timeout_sec);
 
 /* --------------------------------------------------------------------------
+ * auth.c
+ * -------------------------------------------------------------------------- */
+
+/* Fill out[] with TOKEN_HEX_LEN lowercase hex chars from /dev/urandom.
+ * Returns 0 on success, -1 on failure — callers must fail closed rather than
+ * fall back to a predictable source. out_cap must be > TOKEN_HEX_LEN. */
+int  agent_generate_token(char *out, size_t out_cap);
+
+/* Constant-time string equality. Compares the full length of both strings
+ * regardless of where they differ, so a peer cannot learn the secret one
+ * character at a time from response timing. */
+int  agent_consttime_eq(const char *a, const char *b);
+
+/* --------------------------------------------------------------------------
  * probe.c
  * -------------------------------------------------------------------------- */
 
@@ -315,6 +356,10 @@ void *metrics_thread_fn(void *arg);
  * -------------------------------------------------------------------------- */
 
 void dispatch_command(struct agent_state *a, const char *json);
+
+/* Defined in main.c; called by cmd_auth once a peer has proved itself.
+ * Idempotent — metrics must not stream before authentication. */
+void start_metrics_thread(struct agent_state *a);
 
 /* --------------------------------------------------------------------------
  * update.c
