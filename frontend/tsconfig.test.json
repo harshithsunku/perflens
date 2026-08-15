@@ -1,0 +1,37 @@
+{
+  // The files CI actually runs but nothing ever typechecked.
+  //
+  // tsconfig.app.json includes only `src` and explicitly excludes `src/**/*.test.ts`
+  // and `e2e`; tsconfig.node.json includes only vite.config.ts. That left the
+  // vitest specs, the Playwright e2e spec, the docs-shots harness and
+  // playwright.config.ts outside every project — and since vitest and Playwright
+  // transpile without typechecking, a type error in them shipped silently.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "types": ["node", "vite/client"],
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "strict": true,
+    "noFallthroughCasesInSwitch": true,
+    "paths": { "@/*": ["./src/*"] },
+    "baseUrl": "."
+  },
+  // `src` is included as well, not just the test files: the specs import the
+  // modules they exercise, and a project that lists only the specs cannot
+  // resolve those imports (TS6307). This is a standalone project rather than
+  // a reference from tsconfig.json, so `tsc -b` keeps building exactly what
+  // ships and this runs alongside it.
+  "include": [
+    "src",
+    "e2e/**/*.ts",
+    "docs-shots/**/*.ts",
+    "playwright.config.ts"
+  ]
+}

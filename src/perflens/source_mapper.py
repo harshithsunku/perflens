@@ -158,8 +158,8 @@ class Addr2LinePipe:
                 try:
                     self._proc.kill()
                     self._proc.wait(timeout=2)
-                except Exception:
-                    pass
+                except (OSError, subprocess.SubprocessError):
+                    pass    # already dead, or refusing to die in 2s
             self._proc = None
 
         return results
@@ -216,8 +216,8 @@ class Addr2LinePipe:
                 try:
                     self._proc.kill()
                     self._proc.wait(timeout=2)
-                except Exception:
-                    pass
+                except (OSError, subprocess.SubprocessError):
+                    pass    # already dead, or refusing to die in 2s
             self._proc = None
 
         return results
@@ -680,7 +680,7 @@ class SourceMapper:
             if not sample['frames']:
                 continue
             frame = sample['frames'][0]
-            binary = self.binary_path or self._resolve_module_path(frame.get('module', ''))
+            binary = self._binary_for_frame(frame)
             if not binary:
                 continue
             vaddr = self._compute_vaddr(frame, binary)
@@ -701,6 +701,43 @@ class SourceMapper:
                 line_data[file_path][line_no]['samples'] += 1
 
         return dict(line_data)
+
+    # Modules that are certainly not the executable named by --binary:
+    # shared objects, and perf's bracketed pseudo-modules
+    # ([kernel.kallsyms], [unknown], [vdso], ...).
+    _SO_SUFFIX = re.compile(r'\.so(\.\d+)*$')
+
+    def _is_main_binary(self, module):
+        """Whether `module` plausibly refers to the --binary executable.
+
+        Deliberately conservative. It cannot be a basename comparison: the
+        documented cross-compilation workflow points --binary at a separate
+        unstripped build (matrixlab.sym) whose name does not match the path
+        perf reports for the running process (/opt/matrixlab). So instead of
+        proving a match, rule out the cases that are certainly not it.
+        """
+        if not module:
+            return True             # nothing better to try
+        if module.startswith('['):  # [kernel.kallsyms], [unknown], [vdso]
+            return False
+        return not self._SO_SUFFIX.search(module)
+
+    def _binary_for_frame(self, frame):
+        """The binary whose symbols should resolve this frame.
+
+        --binary names the unstripped build of the profiled executable, and
+        applying it to every frame asks addr2line for addresses that are not
+        in that file. Usually the lookup simply fails — but it is also why
+        ip-based line recovery needs its span check, because a libc ip minus
+        the main binary's load base can land inside a real function there and
+        yield a confidently wrong source line. On a typical capture most
+        frames are libc/libm/kernel, so this is the common case, not an edge
+        one.
+        """
+        module = frame.get('module', '') or ''
+        if self.binary_path and self._is_main_binary(module):
+            return self.binary_path
+        return self._resolve_module_path(module)
 
     def _resolve_module_path(self, module):
         """Resolve a module path from perf output to a local binary.
@@ -912,7 +949,7 @@ class SourceMapper:
             if not sample['frames']:
                 continue
             frame = sample['frames'][0]
-            binary = self.binary_path or self._resolve_module_path(frame.get('module', ''))
+            binary = self._binary_for_frame(frame)
             vaddr = self._compute_vaddr(frame, binary)
             if vaddr is not None:
                 fpath, lineno = self._addr2line_cache.get(
@@ -953,7 +990,7 @@ class SourceMapper:
         to_resolve = defaultdict(list)
         for sample in samples:
             for frame in sample['frames']:
-                binary = self.binary_path or self._resolve_module_path(frame.get('module', ''))
+                binary = self._binary_for_frame(frame)
                 if not binary:
                     continue
                 if binary not in self._inline_loaded:
@@ -991,7 +1028,7 @@ class SourceMapper:
         for sample in samples:
             new_frames = []
             for frame in sample['frames']:
-                binary = self.binary_path or self._resolve_module_path(frame.get('module', ''))
+                binary = self._binary_for_frame(frame)
                 vaddr = self._compute_vaddr(frame, binary) if binary else None
                 chain = self._inline_cache.get((binary, vaddr)) if vaddr else None
 

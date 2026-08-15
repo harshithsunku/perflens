@@ -58,6 +58,8 @@ class AppContext:
             try:
                 fn(event_type, data)
             except Exception as e:
+                # Broad on purpose: one misbehaving subscriber must not
+                # stop the broadcast reaching the others.
                 print(f"[server] SSE sink error: {e}", file=sys.stderr)
 
     def update_wizard(self, updates):

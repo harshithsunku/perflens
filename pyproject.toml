@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "perflens"
-version = "0.9.0"
+version = "0.10.0"
 description = "Real-time remote Linux performance profiler with a live web UI (perf + flame graphs + line-level source annotation)"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -46,7 +46,10 @@ dependencies = [
 mcp = ["mcp>=2,<3", "httpx>=0.27,<1.0"]
 # ruff is pinned exactly: it is the one tool where a minor bump lands new
 # rules and reddens an unrelated PR. Keep in step with build.yml.
-dev = ["pytest>=7", "httpx>=0.27,<1.0", "build", "ruff==0.15.22", "mcp>=2,<3"]
+dev = ["pytest>=7", "httpx>=0.27,<1.0", "build", "ruff==0.15.22", "mcp>=2,<3",
+       # Pinned to a minor for the same reason as ruff: a bump lands new
+       # checks and reddens an unrelated PR. Keep in step with test.yml.
+       "mypy>=1.14,<1.19"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -90,3 +93,13 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "F", "W", "B"]
 ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+# Deliberately not strict. This is a floor that catches genuine type errors
+# in a codebase that was never annotated, not a push toward full annotation:
+# the server is duck-typed around parsed perf dicts, and demanding types for
+# those would be a rewrite rather than a check.
+ignore_missing_imports = true
+warn_unused_ignores = true
+exclude = ["^build/", "^dist/"]

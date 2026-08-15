@@ -226,3 +226,52 @@ def test_path_map_remaps_compile_prefix(fixture_binary, perflens_home,
     annotated = mapper.annotate_source(fpath, lines)
     assert annotated, 'annotation through path_map failed'
     mapper.close()
+
+
+# ---------------------------------------------------------------------------
+# Module attribution
+#
+# --binary names the unstripped build of the profiled executable. Applying it
+# to every frame regardless of module asks addr2line for addresses that are
+# not in that file — and on a real capture most frames are libc/libm/kernel,
+# not the executable. In the committed ARM fixture that is 62k of 124k frames.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize('module', [
+    '/usr/lib/aarch64-linux-gnu/libc.so.6',
+    '/usr/lib/x86_64-linux-gnu/libm.so.6',
+    '/lib/ld-linux-x86-64.so.2',
+    'libfoo.so',
+    '[kernel.kallsyms]',
+    '[unknown]',
+    '[vdso]',
+])
+def test_shared_and_kernel_frames_are_not_attributed_to_binary(
+        fixture_binary, perflens_home, module):
+    mapper = make_mapper(fixture_binary, perflens_home)
+    chosen = mapper._binary_for_frame({'func': 'x', 'module': module})
+    assert chosen != fixture_binary, (
+        f'{module} frames must not resolve against --binary')
+
+
+@pytest.mark.parametrize('module', [
+    '/opt/app/matrixlab',       # the running executable, renamed vs --binary
+    '/home/kali/perflens-test/sample_workload',
+    'workload',
+    '',                         # perf gave us nothing better
+])
+def test_executable_frames_still_use_binary(fixture_binary, perflens_home,
+                                            module):
+    """Must not become a basename comparison: the documented cross-compile
+    workflow points --binary at a separately-named unstripped build."""
+    mapper = make_mapper(fixture_binary, perflens_home)
+    chosen = mapper._binary_for_frame({'func': 'x', 'module': module})
+    assert chosen == fixture_binary
+
+
+def test_line_mapping_unaffected_for_main_binary_frames(fixture_binary,
+                                                        perflens_home):
+    """The narrowing must not cost the case --binary exists for."""
+    mapper = make_mapper(fixture_binary, perflens_home)
+    line_data = mapper.map_samples_to_lines(samples_for(fixture_binary))
+    assert line_data, 'main-binary frames should still resolve to source lines'

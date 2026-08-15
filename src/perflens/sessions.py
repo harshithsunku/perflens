@@ -130,6 +130,9 @@ def save_session(session_dir, session_id, agent_addr, chunk_count,
         print(f"[server] Session saved: {session_id} ({len(all_samples)} samples)",
               file=sys.stderr)
     except Exception as e:
+        # Broad on purpose: this runs on the recv thread as a session
+        # ends, and failing to persist a capture must never take the
+        # server down with it. The error is reported, not swallowed.
         print(f"[server] Error saving session: {e}", file=sys.stderr)
 
 
@@ -154,7 +157,9 @@ def _run_perf_script(cfg, perf_data_path):
     except subprocess.TimeoutExpired:
         raise RuntimeError(
             'perf script timed out (file too large?)') from None
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
+        # -F with this field list is not supported by every perf; fall
+        # through to the default output format below.
         pass
 
     # Fallback to plain perf script

@@ -147,7 +147,7 @@ def register(mcp, client):
     async def perflens_start_profiling(pid: int, events: str = '',
                                        frequency: int = 0, duration: int = 0,
                                        response_format: str = 'markdown') -> str:
-        args = {'pid': pid}
+        args: dict = {'pid': pid}
         if events:
             args['events'] = [e.strip() for e in events.split(',') if e.strip()]
         if frequency:

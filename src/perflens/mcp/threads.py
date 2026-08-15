@@ -44,7 +44,10 @@ def register(mcp, client):
             data = {'source': source, 'event': event_name,
                     'threads': window, 'page': info,
                     'note': 'per-thread sample counts are live-only'}
-            rows = [(t.get('tid', '?'), t.get('comm', '') or '-') for t in window]
+            # Widened because the live branch below builds wider rows and
+            # this assignment is what fixes the inferred element type.
+            rows: list = [(t.get('tid', '?'), t.get('comm', '') or '-')
+                          for t in window]
             body = [f'# Threads in session {source} ({event_name})', '',
                     fmt.table(['tid', 'comm'], rows), '',
                     '_Saved sessions record which threads were present, but '

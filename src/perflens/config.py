@@ -3,35 +3,36 @@
 import dataclasses
 import os
 import sys
+from typing import Optional
 
 try:
     import zstandard as _zstd
 except ImportError:
-    _zstd = None
+    _zstd = None  # type: ignore[assignment]
 
 
 @dataclasses.dataclass
 class ServerConfig:
     source_dir: str = '.'
-    binary_path: str = None
-    map_file_path: str = None
-    addr2line_bin: str = None
-    readelf_bin: str = None
-    dwarfdump_bin: str = None
-    zstd_bin: str = None
-    perf_bin: str = None
-    path_map: dict = None
-    sysroot: str = None
+    binary_path: Optional[str] = None
+    map_file_path: Optional[str] = None
+    addr2line_bin: Optional[str] = None
+    readelf_bin: Optional[str] = None
+    dwarfdump_bin: Optional[str] = None
+    zstd_bin: Optional[str] = None
+    perf_bin: Optional[str] = None
+    path_map: Optional[dict] = None
+    sysroot: Optional[str] = None
     sessions_dir: str = ''
     max_samples: int = 500000
     tcp_port: int = 9999
     http_port: int = 8080
     http_bind: str = '127.0.0.1'
     browse_root: str = ''
-    token: str = None
+    token: Optional[str] = None
     ui_dir: str = ''
     inline: bool = True
-    import_file: str = None
+    import_file: Optional[str] = None
 
 
 def _perflens_bin_dir():

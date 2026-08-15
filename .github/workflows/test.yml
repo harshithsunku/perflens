@@ -45,6 +45,13 @@ jobs:
       - name: Lint (ruff)
         run: ruff check src/ tests/ tools/
 
+      # Once, not per-matrix-entry: mypy's findings do not vary across the
+      # supported interpreters (python_version is pinned in pyproject), so
+      # four runs would just be four copies of the same output.
+      - name: Typecheck (mypy)
+        if: matrix.python == '3.12'
+        run: python -m mypy src/perflens
+
       # A hand-typed version in the UI once shipped a whole minor ahead of
       # the package it was built into. This asserts every location agrees.
       - name: Version consistency
@@ -83,6 +90,15 @@ jobs:
 
       - name: Install frontend deps
         run: npm --prefix frontend ci
+
+      # `npm run build` only typechecks what ships. The vitest specs, the
+      # Playwright e2e spec, the docs-shots harness and playwright.config.ts
+      # sat outside every tsconfig project, and both runners transpile without
+      # checking — so a type error in exactly the files CI executes shipped
+      # silently. tsconfig.test.json covers them; this runs before the
+      # five-minute Playwright install so it fails fast.
+      - name: Typecheck (tsc)
+        run: npm --prefix frontend run typecheck
 
       - name: OpenAPI schema drift check
         run: |

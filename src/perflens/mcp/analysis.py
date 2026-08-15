@@ -59,7 +59,7 @@ def register(mcp, client):
         sessions = await client.sessions(0, 1)
         index = await client.index_status()
 
-        events = []
+        events: list = []
         if status.get('total_samples'):
             head = await client.stream_head()
             events = (head.get('data_version') or {}).get('event_types') or []
@@ -250,11 +250,11 @@ def register(mcp, client):
         data = {'source': source, 'counters': counters, 'derived': derived}
 
         if not counters:
-            body = (f'# Hardware counters — {source}\n\n'
+            msg = (f'# Hardware counters — {source}\n\n'
                     '_No `perf stat` counters available for this source. '
                     'They arrive with the profiling stream; if collection has '
-                    'only just started, try again in a few seconds._')
-            return fmt.respond(data, body, response_format)
+                   'only just started, try again in a few seconds._')
+            return fmt.respond(data, msg, response_format)
 
         rows = []
         for name, value in sorted(counters.items()):
