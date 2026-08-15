@@ -4,6 +4,10 @@ on:
   push:
     branches: [main, master]
     tags: ['v*']
+  # Without this, wheel packaging and all five agent cross-compiles were only
+  # ever exercised after merge — a cross-compile break could not surface on the
+  # PR that caused it. The publish and release jobs stay guarded on refs/tags/v*.
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -285,26 +289,37 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Build C agent
+        id: agent
         shell: bash
         run: |
           cd agent-c
           make CROSS="${{ matrix.cross }}"
-          file perflens-agent
+          # A cross build lands in build/<arch>/, a native one at ./ — ask the
+          # Makefile rather than assuming, so the two stay in step.
+          BIN="$(make -s print-bin CROSS='${{ matrix.cross }}')"
+          file "$BIN"
+          echo "bin=agent-c/${BIN#./}" >> "$GITHUB_OUTPUT"
 
       - name: Package
         shell: bash
         run: |
           VERSION="${{ steps.ver.outputs.version }}"
+          BIN="${{ steps.agent.outputs.bin }}"
           mkdir -p dist
           # Raw static binary with the stable release-asset name that
           # install-agent.sh and the agent's --update both fetch from
           # releases/latest/download/.
-          cp agent-c/perflens-agent "dist/perflens-agent-linux-${{ matrix.arch }}"
-          chmod +x "dist/perflens-agent-linux-${{ matrix.arch }}"
+          ASSET="perflens-agent-linux-${{ matrix.arch }}"
+          cp "$BIN" "dist/${ASSET}"
+          chmod +x "dist/${ASSET}"
+          # Checksum sidecar, mirroring the tools bundle. install-agent.sh and
+          # push-agent verify against this; the C agent does not (it has no
+          # SHA-256 of its own and will not grow one just for this).
+          (cd dist && sha256sum "${ASSET}" > "${ASSET}.sha256")
           # Versioned tarball for manual downloads.
           PKG_NAME="perflens-agent-c-${VERSION}-linux-${{ matrix.arch }}"
           mkdir -p "build/${PKG_NAME}"
-          cp agent-c/perflens-agent "build/${PKG_NAME}/"
+          cp "$BIN" "build/${PKG_NAME}/perflens-agent"
           chmod +x "build/${PKG_NAME}/perflens-agent"
           cp VERSION "build/${PKG_NAME}/VERSION"
           (cd build && tar -czf "../dist/${PKG_NAME}.tar.gz" "${PKG_NAME}")
@@ -394,6 +409,7 @@ jobs:
             for f in release/perflens-*; do
               fname="$(basename "$f")"
               case "$fname" in
+                perflens-agent-linux-*.sha256) what="Agent binary checksum" ;;
                 perflens-agent-linux-*)   what="Agent — static binary (stable name; used by install-agent.sh and --update)" ;;
                 perflens-agent-c-*)       what="Agent — versioned tarball" ;;
                 perflens-tools-*.sha256)  what="Tools bundle checksum" ;;
