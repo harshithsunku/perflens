@@ -5,7 +5,7 @@
 #   make CROSS=aarch64-linux-gnu-      # ARM64 little-endian
 #   make CROSS=aarch64_be-linux-musl-   # ARM64 big-endian (musl)
 #   make CROSS=arm-linux-gnueabihf-    # ARMv7 32-bit little-endian
-#   make CROSS=armeb-linux-musleabihf- # ARMv7 32-bit big-endian (musl)
+#   make CROSS=armeb-linux-musleabi-   # ARMv7 32-bit big-endian (musl, soft-float)
 #   make CROSS=x86_64-linux-musl-      # x86_64 with musl (fully static)
 #   make all-cross                     # all cross targets
 #   make clean
@@ -14,8 +14,27 @@ CC      = $(CROSS)gcc
 VERSION := $(shell cat ../VERSION 2>/dev/null || echo dev)
 CFLAGS  = -std=c99 -O2 -Wall -Wextra -Wno-unused-parameter \
           -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE \
-          -DAGENT_VERSION=\"$(VERSION)\" -I.
+          -DAGENT_VERSION=\"$(VERSION)\" -I. $(ARCHFLAGS)
 LDFLAGS = -static -lpthread -lm
+
+# Big-endian ARM needs an explicit -march, and the soft-float toolchain.
+#
+# Two separate traps, both measured on a big-endian ARMv7 target (armv7b,
+# kernel 4.4) rather than reasoned about:
+#
+#   * The armeb toolchain defaults to ARMv5, which emits BE-32. ARMv6 and
+#     later implement BE-8 only, so a default-arch build dies on its first
+#     instruction. Without -march the hello-world binary is SIGILL.
+#   * That CPU reports no `vfp` and its own binaries are soft-float
+#     (e_flags & 0x200). A hard-float build is SIGILL there too, which is
+#     what `armeb-linux-musleabihf-` produced. Soft-float is also the
+#     strictly more portable choice for a single published asset: it runs on
+#     VFP hardware as well, where hard-float does not run without one.
+#
+# Verify with: readelf -h <bin> | grep Flags   ->  soft-float ABI, BE8
+ifneq (,$(findstring armeb,$(CROSS)))
+  ARCHFLAGS = -march=armv7-a
+endif
 
 TARGET  = perflens-agent
 SRCS    = $(wildcard src/*.c)
@@ -62,7 +81,7 @@ clean:
 
 # Cross-compile all supported targets — each into its own build/<arch>/.
 # No `clean` between arches: separate object dirs make the builds independent.
-CROSS_TARGETS = aarch64-linux-gnu- aarch64_be-linux-musl- arm-linux-gnueabihf- armeb-linux-musleabihf- x86_64-linux-musl-
+CROSS_TARGETS = aarch64-linux-gnu- aarch64_be-linux-musl- arm-linux-gnueabihf- armeb-linux-musleabi- x86_64-linux-musl-
 
 all-cross:
 	@for cross in $(CROSS_TARGETS); do \

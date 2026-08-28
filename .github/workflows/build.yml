@@ -254,10 +254,16 @@ jobs:
             cross: 'arm-linux-gnueabihf-'
             cross_pkg: 'gcc-arm-linux-gnueabihf'
             toolchain_asset: ''
+          # Soft-float, not hard-float. Real big-endian ARM embedded silicon
+          # reports no `vfp` and runs a soft-float userland, so the
+          # hard-float asset was SIGILL on it — measured on hardware.
+          # Soft-float also runs on VFP hardware, so one asset covers both.
+          # NOTE: needs armeb-linux-musleabi-cross.tgz on the `toolchains`
+          # release; the hard-float tarball will not build this target.
           - arch: armeb
-            cross: 'armeb-linux-musleabihf-'
+            cross: 'armeb-linux-musleabi-'
             cross_pkg: ''
-            toolchain_asset: 'armeb-linux-musleabihf-cross.tgz'
+            toolchain_asset: 'armeb-linux-musleabi-cross.tgz'
     steps:
       - name: Checkout
         uses: actions/checkout@v5

@@ -67,6 +67,14 @@ SRCS = \
 OBJS = $(patsubst $(SRCDIR)/%.c,$(BUILDDIR)/%.o,$(SRCS))
 
 # --- Common flags ---
+# Big-endian ARM needs an explicit -march: the armeb toolchain defaults to
+# ARMv5 and emits BE-32, while ARMv6 and later implement BE-8 only, so a
+# default-arch build is SIGILL on real hardware. Same trap as agent-c/Makefile
+# — see the longer note there.
+ifneq (,$(findstring armeb,$(CROSS)))
+  ARCHFLAGS = -march=armv7-a
+endif
+
 INCLUDES = -I$(SRCDIR)
 WARNINGS = -Wall -Wextra -Wno-unused-parameter -Wno-unused-variable -pedantic
 DEFINES  = -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE
@@ -74,13 +82,13 @@ LDFLAGS  = -lpthread -lm -rdynamic
 
 # --- Build profiles ---
 # Debug (default): full symbols, no optimization
-CFLAGS_DEBUG   = -std=c11 -g3 -O0 -fno-omit-frame-pointer $(WARNINGS) $(DEFINES) $(INCLUDES)
+CFLAGS_DEBUG   = -std=c11 -g3 -O0 -fno-omit-frame-pointer $(WARNINGS) $(DEFINES) $(INCLUDES) $(ARCHFLAGS)
 
 # Release: optimized
-CFLAGS_RELEASE = -std=c11 -O2 -fno-omit-frame-pointer $(WARNINGS) $(DEFINES) $(INCLUDES)
+CFLAGS_RELEASE = -std=c11 -O2 -fno-omit-frame-pointer $(WARNINGS) $(DEFINES) $(INCLUDES) $(ARCHFLAGS)
 
 # Symbols: optimized with debug info (best for perf)
-CFLAGS_SYMBOLS = -std=c11 -O2 -g3 -fno-omit-frame-pointer $(WARNINGS) $(DEFINES) $(INCLUDES)
+CFLAGS_SYMBOLS = -std=c11 -O2 -g3 -fno-omit-frame-pointer $(WARNINGS) $(DEFINES) $(INCLUDES) $(ARCHFLAGS)
 
 # Default to debug
 CFLAGS ?= $(CFLAGS_DEBUG)
@@ -145,7 +153,7 @@ disasm: symbols
 	@echo "Built: $(BINDIR)/$(TARGET).disasm"
 
 # --- Cross-compilation targets ---
-CROSS_TARGETS = aarch64-linux-gnu- arm-linux-gnueabihf- x86_64-linux-gnu-
+CROSS_TARGETS = aarch64-linux-gnu- arm-linux-gnueabihf- x86_64-linux-gnu- armeb-linux-musleabi-
 
 all-cross:
 	@for cross in $(CROSS_TARGETS); do \
