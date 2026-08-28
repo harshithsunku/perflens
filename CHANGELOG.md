@@ -83,10 +83,15 @@ capability probe were not.
 
 ### Known issues
 
-- Shared-library frames on a target whose `perf` cannot symbolize will usually
-  stay `[unknown]`: recovering a library's load base needs named frames to vote
-  with, and there are none. The main executable resolves. Closing this needs
-  the agent to ship `/proc/PID/maps`, which is deliberately deferred.
+- Whether a frame resolves depends on the **address form** perf emitted, not on
+  whether the module is a shared library. Per-round collection emits
+  file-relative offsets, which resolve for executables and `.so` files alike
+  given a local copy (`--binary`, `--sysroot` or `--module-map`). An
+  *absolute* runtime address cannot be resolved without the module's load
+  base, and that base can only be recovered by voting with named frames — of
+  which a libelf-less perf supplies none. Such frames stay `[unknown]` rather
+  than being guessed. Closing that case needs the agent to ship
+  `/proc/PID/maps`, deliberately deferred.
 - `/api/live/export` and `/api/sessions/<id>/export` still ignore `event` for
   `collapsed` and `json`, and still answer 200 for a bogus event name.
 

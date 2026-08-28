@@ -97,6 +97,16 @@ reached `frontend/openapi.json` and the generated TypeScript.
       soft-float emulation, called from `matrix_multiply_naive` /
       `matrix_multiply_blocked`. `/api/index/status` now reports the frame
       naming outcome so a blank profile is diagnosable rather than mysterious.
+
+      **Shared libraries resolve too**, which an earlier note in this file got
+      wrong by reasoning instead of testing. What decides it is the address
+      form, not whether the module is a library: per-round collection emits
+      file-relative offsets for `.so` frames as well (observed as
+      `6195 (/lib/libpthread-2.18.so)`), and those resolve given a local copy via
+      `--sysroot` or `--module-map`. Only an *absolute* address is
+      unresolvable, because the load base can only be recovered by voting
+      with named frames and a libelf-less perf never supplies any. Covered by
+      three tests.
 - [ ] Server RSS drift after the sample ring fills (carried from 0.9.0).
       **Re-measured 2026-08-15 under 0.10.0: the cap holds and the drift is
       no worse — +1.99 MB/min against 0.9.0's ~3 MB/min.** Cap reached at

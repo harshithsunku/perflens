@@ -375,3 +375,74 @@ def test_module_map_points_a_device_path_at_a_local_binary(fixture_binary,
     assert mapper.resolve_unknown_frames(samples) == 3
     assert samples[0]['frames'][0]['func'] == 'cpu_intensive'
     mapper.close()
+
+
+# ---------------------------------------------------------------------------
+# Shared libraries.
+#
+# Whether a .so frame resolves turns on the address form perf emitted, not on
+# it being a library. perf prints a file-relative offset when it worked out the
+# module's load base and the raw runtime address when it did not; only the
+# first is usable without a base, and a base can only be recovered by voting
+# with named frames — which a libelf-less perf never provides.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope='module')
+def fixture_so(tmp_path_factory):
+    d = tmp_path_factory.mktemp('so')
+    src = str(d / 'lib.c')
+    with open(src, 'w') as f:
+        f.write('#include <math.h>\n'
+                'double lib_hot_function(double x){return sin(x)*cos(x);}\n')
+    so = str(d / 'libthing.so')
+    subprocess.run(['gcc', '-g', '-O0', '-shared', '-fPIC', '-o', so, src,
+                    '-lm'], check=True, capture_output=True)
+    return so
+
+
+def _sysrooted(tmp_path, so, device_path='/lib/libthing.so'):
+    """Copy a .so where --sysroot will find it under its device path."""
+    root = tmp_path / 'sysroot'
+    (root / os.path.dirname(device_path.lstrip('/'))).mkdir(
+        parents=True, exist_ok=True)
+    shutil.copy(so, str(root) + device_path)
+    return str(root)
+
+
+def test_shared_library_resolves_from_a_file_relative_address(
+        fixture_so, perflens_home, tmp_path):
+    """The case that actually occurs in per-round collection."""
+    sysroot = _sysrooted(tmp_path, fixture_so)
+    addr = _addr_of(fixture_so, 'lib_hot_function')
+    samples = unknown_samples('/lib/libthing.so', format(addr + 8, 'x'), n=1)
+
+    mapper = make_mapper(None, perflens_home, sysroot=sysroot)
+    assert mapper.resolve_unknown_frames(samples) == 1
+    assert samples[0]['frames'][0]['func'] == 'lib_hot_function'
+    mapper.close()
+
+
+def test_shared_library_absolute_address_stays_unknown(fixture_so,
+                                                       perflens_home,
+                                                       tmp_path):
+    """No load base, no answer — and guessing one would be a wrong name."""
+    sysroot = _sysrooted(tmp_path, fixture_so)
+    addr = _addr_of(fixture_so, 'lib_hot_function')
+    samples = unknown_samples('/lib/libthing.so',
+                              format(0x7f9c00000000 + addr + 8, 'x'), n=1)
+
+    mapper = make_mapper(None, perflens_home, sysroot=sysroot)
+    assert mapper.resolve_unknown_frames(samples) == 0
+    assert samples[0]['frames'][0]['func'] == '[unknown]'
+    mapper.close()
+
+
+def test_shared_library_without_a_local_copy_stays_unknown(fixture_so,
+                                                           perflens_home):
+    addr = _addr_of(fixture_so, 'lib_hot_function')
+    samples = unknown_samples('/lib/libthing.so', format(addr + 8, 'x'), n=1)
+
+    mapper = make_mapper(None, perflens_home)
+    assert mapper.resolve_unknown_frames(samples) == 0
+    assert samples[0]['frames'][0]['func'] == '[unknown]'
+    mapper.close()
