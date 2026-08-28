@@ -49,7 +49,7 @@ SCRIPT_OUTPUT = (
     '\n'
 )
 
-PERF_SHIM = r'''#!/usr/bin/env python3
+PERF_SHIM_TEMPLATE = r'''#!/usr/bin/env python3
 """Fake `perf` for agent tests. Supports --version / stat / record /
 script; rejects events outside SUPPORTED and call-graph methods
 other than fp, like a restricted kernel would."""
@@ -140,7 +140,15 @@ if sub == 'script':
 
 sys.stderr.write('shim: unhandled perf invocation: %%r\n' %% args)
 sys.exit(1)
-''' % {'supported': SUPPORTED_EVENTS, 'script_output': SCRIPT_OUTPUT}
+'''
+
+
+def render_shim(supported=SUPPORTED_EVENTS, script_output=SCRIPT_OUTPUT):
+    return PERF_SHIM_TEMPLATE % {'supported': tuple(supported),
+                                 'script_output': script_output}
+
+
+PERF_SHIM = render_shim()
 
 
 @pytest.fixture(scope='module')
@@ -573,6 +581,8 @@ def test_lifecycle_and_data_frames(harness, target_pid):
     assert status['pid'] == target_pid
     assert status['capabilities']['record_events'] == [
         'cycles', 'instructions']
+    # Unchanged from before software-event fallback existed: the PMU offers
+    # record events here, so cpu-clock/task-clock are never probed at all.
     assert status['capabilities']['stat_only_events'] == ['page-faults']
     assert status['capabilities']['pipe_mode'] is True
 
@@ -786,5 +796,49 @@ def test_failed_auth_backs_off_instead_of_spinning(shim_dir, tmp_path):
         # 1s, then 2s, then 4s... A spin would give three gaps under a second.
         assert gaps[-1] > gaps[0], f'delays are not increasing: {gaps}'
         assert gaps[-1] >= 1.5, f'no meaningful backoff between retries: {gaps}'
+    finally:
+        h.close()
+
+
+# ---------------------------------------------------------------------------
+# PMU-less targets
+# ---------------------------------------------------------------------------
+
+# What a device with no wired-up PMU offers. Measured on a big-endian ARMv7
+# target (armv7b, kernel 4.4): `perf list hw sw` reports software events
+# only, and /proc/interrupts carries no arm-pmu line.
+PMULESS_EVENTS = ('cpu-clock', 'task-clock', 'page-faults',
+                  'context-switches', 'cpu-migrations')
+
+
+def test_pmuless_target_still_has_a_record_event(tmp_path, target_pid):
+    """A target with no PMU must still be profilable.
+
+    Every hardware candidate fails on such a device, and the three software
+    events that do survive there are all stat-only — so with only the
+    hardware candidates probed, record_events came back empty and `start`
+    could never succeed. That is not an exotic configuration: it is most
+    embedded hardware.
+    """
+    d = tmp_path / 'pmuless-shim'
+    d.mkdir()
+    shim = d / 'perf'
+    shim.write_text(render_shim(PMULESS_EVENTS))
+    shim.chmod(0o755)
+
+    h = AgentHarness(d, tmp_path)
+    try:
+        resp = h.command('start', args={'pid': target_pid})
+        assert resp['ok'] is True, resp
+        assert resp['events'], 'no record events on a PMU-less target'
+        assert 'cpu-clock' in resp['events']
+
+        caps = h.command('status')['capabilities']
+        assert 'cpu-clock' in caps['record_events']
+        for hw in ('cycles', 'instructions', 'cache-misses'):
+            assert hw not in caps['record_events']
+        # The stat-only survivors must not be mistaken for record events.
+        for so in ('page-faults', 'context-switches', 'cpu-migrations'):
+            assert so not in caps['record_events']
     finally:
         h.close()

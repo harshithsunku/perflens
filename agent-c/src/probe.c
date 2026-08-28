@@ -15,6 +15,22 @@ static const char *CANDIDATE_EVENTS[] = {
     NULL
 };
 
+/* Software sampling events, probed only when the PMU yields no record event.
+ *
+ * Plenty of embedded hardware ships without a wired-up ARM PMU.
+ * `perf list hw sw` then offers software events only, every hardware
+ * candidate above fails, and the three that survive are all stat-only —
+ * which leaves zero record events and a `start` that can never succeed.
+ * cpu-clock samples on a timer and needs no PMU at all.
+ *
+ * Deliberately a fallback rather than two more candidates: where counters do
+ * exist these add a seventh and eighth stream of samples measuring what
+ * `cycles` already covers, so listing them outright silently raised every
+ * existing target from six record events to eight. They cost nothing when
+ * they are not needed, and are the difference between profiling and not
+ * when they are. */
+static const char *FALLBACK_EVENTS[] = { "cpu-clock", "task-clock", NULL };
+
 static const char *CALLGRAPH_METHODS[] = { "fp", "dwarf", "lbr", NULL };
 
 static const char *SKIP_PATTERNS[] = {
@@ -133,6 +149,32 @@ static int callgraph_works(const char *method, int pid)
     return result;
 }
 
+/* Can this event actually drive `perf record`?
+ *
+ * event_works() probes with `perf stat`, and stat accepting an event does not
+ * mean record will take it — that inference is what the hardcoded
+ * STAT_ONLY_EVENTS list was papering over. Ask record directly, so the
+ * advertised record set is measured rather than assumed. Costs one short
+ * record per candidate that stat already accepted, and only for events not
+ * already known to be stat-only. */
+static int event_records(const char *event, int pid)
+{
+    char tmpl[] = "/tmp/perflens-probe-XXXXXX";
+    int fd = mkstemp(tmpl);
+    if (fd < 0) return 0;
+    close(fd);
+
+    char pid_str[16];
+    snprintf(pid_str, sizeof(pid_str), "%d", pid);
+    char *argv[] = {
+        PERF, "record", "-e", (char *)event, "-p", pid_str,
+        "-F", "99", "-o", tmpl, "--", "sleep", "1", NULL
+    };
+    int rc = run_cmd(argv, NULL, NULL, 15);
+    unlink(tmpl);
+    return rc == 0;
+}
+
 static int script_fields_work(int pid, const char *event)
 {
     char tmpl[] = "/tmp/perflens-probe-XXXXXX";
@@ -160,6 +202,44 @@ static int script_fields_work(int pid, const char *event)
     buf_free(&out);
     unlink(tmpl);
     return result;
+}
+
+/* Does this perf script output actually carry call chains?
+ *
+ * Pipe mode can emit samples while silently dropping their stacks. Measured
+ * on perf 4.4, on a big-endian ARMv7 target: the same capture written to a
+ * file gave ~10 frames per sample, while `record -o - | script -i -` gave
+ * exactly one leaf frame each. Both exit 0 with non-empty output, so "it
+ * produced something" cannot tell them apart — and taking pipe mode on that
+ * evidence flattens every flame graph to a single level, with nothing
+ * reporting an error.
+ *
+ * A sample line carries "<event>:"; a call-chain frame line does not. So
+ * more lines than samples means the chains survived. That holds for both the
+ * -F field list and the default output format, since both print the event
+ * name followed by a colon. */
+static int callchains_present(const struct buf *out, const char *event)
+{
+    char needle[64];
+    snprintf(needle, sizeof(needle), "%s:", event);
+    size_t nlen = strlen(needle);
+    if (!out->data || nlen == 0) return 0;
+
+    long lines = 0, samples = 0;
+    const char *p = out->data, *end = out->data + out->len;
+    while (p < end) {
+        const char *nl = memchr(p, '\n', (size_t)(end - p));
+        size_t len = nl ? (size_t)(nl - p) : (size_t)(end - p);
+        if (len > 0) {
+            lines++;
+            for (size_t i = 0; i + nlen <= len; i++) {
+                if (memcmp(p + i, needle, nlen) == 0) { samples++; break; }
+            }
+        }
+        if (!nl) break;
+        p = nl + 1;
+    }
+    return samples > 0 && lines > samples;
 }
 
 /* Probe continuous pipe mode with the exact argv shapes collection will
@@ -198,8 +278,45 @@ static int pipe_mode_works(const struct capabilities *caps, int pid)
     buf_init(&out);
     int rc = run_pipeline_once(argv_rec, argv_script, &out, 20);
     int ok = (rc == 0 && out.len > 0);
+    if (ok && caps->callgraph[0] &&
+        !callchains_present(&out, caps->record_events[0])) {
+        agent_log("  pipe mode produced samples but no call chains, "
+                  "falling back to discrete rounds");
+        ok = 0;
+    }
     buf_free(&out);
     return ok;
+}
+
+/* Probe one NULL-terminated event list, sorting each survivor into the
+ * record or stat-only bucket. */
+static void probe_event_list(const char **events, int pid,
+                             struct capabilities *caps)
+{
+    for (int i = 0; events[i]; i++) {
+        if (g_shutdown) return;
+        const char *ev = events[i];
+        if (!event_works(ev, pid)) {
+            agent_log("  %s: not available, skipping", ev);
+            continue;
+        }
+        char *dup = strdup(ev);
+        if (!dup) continue;
+        int stat_only = is_stat_only(ev) || !event_records(ev, pid);
+        if (stat_only) {
+            if (caps->stat_only_event_count < MAX_EVENTS)
+                caps->stat_only_events[caps->stat_only_event_count++] = dup;
+            else
+                free(dup);
+        } else {
+            if (caps->record_event_count < MAX_EVENTS)
+                caps->record_events[caps->record_event_count++] = dup;
+            else
+                free(dup);
+        }
+        agent_log("  %s: supported (%s)", ev,
+                  stat_only ? "stat only" : "record");
+    }
 }
 
 void probe_capabilities(int pid, struct capabilities *caps)
@@ -207,27 +324,14 @@ void probe_capabilities(int pid, struct capabilities *caps)
     memset(caps, 0, sizeof(*caps));
 
     agent_log("Probing perf event support...");
-    for (int i = 0; CANDIDATE_EVENTS[i]; i++) {
-        if (g_shutdown) return;
-        const char *ev = CANDIDATE_EVENTS[i];
-        if (event_works(ev, pid)) {
-            char *dup = strdup(ev);
-            if (!dup) continue;
-            if (is_stat_only(ev)) {
-                if (caps->stat_only_event_count < MAX_EVENTS)
-                    caps->stat_only_events[caps->stat_only_event_count++] = dup;
-                else
-                    free(dup);
-            } else {
-                if (caps->record_event_count < MAX_EVENTS)
-                    caps->record_events[caps->record_event_count++] = dup;
-                else
-                    free(dup);
-            }
-            agent_log("  %s: supported", ev);
-        } else {
-            agent_log("  %s: not available, skipping", ev);
-        }
+    probe_event_list(CANDIDATE_EVENTS, pid, caps);
+
+    /* Nothing the PMU offers can drive `perf record`. Try the software
+     * sampling events before giving up -- on a PMU-less target they are the
+     * only thing that works. */
+    if (caps->record_event_count == 0 && !g_shutdown) {
+        agent_log("No hardware record events; trying software sampling...");
+        probe_event_list(FALLBACK_EVENTS, pid, caps);
     }
 
     /* Build combined all_events list */
