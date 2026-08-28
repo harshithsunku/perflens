@@ -13,8 +13,43 @@ no SSH, no internet from the device).
 Byte order turned out to be correct all along; the build flags and the
 capability probe were not.
 
+### Added
+
+- **The server now names frames the target's `perf` could not.** A `perf` built
+  without libelf resolves kernel frames from kallsyms but returns `[unknown]`
+  for every userspace frame, however good the binary is — measured at 99.6%
+  of samples on one device, which makes the profile unusable. The server holds
+  the unstripped binary and a matching toolchain, so it now recovers the name
+  from the address. On a replayed capture from that device, one 99.6%
+  `[unknown]` row became **64 named functions** with every userspace frame
+  resolved.
+
+  Additive by construction: a frame is renamed only when the address lands
+  inside a known symbol **and** `addr2line` independently agrees. Anything less
+  certain keeps `[unknown]`, because a confidently wrong name is worse than an
+  honest blank. Applies to live capture, session replay and `perf.data` import
+  alike, and needs no agent change.
+- **`--module-map DEVICE=LOCAL`** points a device module path at a local
+  binary, for the case `--sysroot` cannot cover: a firmware path that exists
+  nowhere on the controller. Same `FROM=TO` shape as `--path-map`, and settable
+  at runtime via `PATCH /api/config`.
+- **`/api/index/status` reports frame naming** — how many userspace frames were
+  seen, how many are still unnamed, how many the server recovered, and a
+  one-line explanation. The UI shows it as a banner when symbolization is
+  degraded, so an all-`[unknown]` profile reads as a diagnosable condition
+  rather than a PerfLens bug. `perflens_status` (MCP) reports the measured
+  number instead of inferring from index counters.
+
 ### Fixed
 
+- **`--binary` was attributed to every module in one remaining call site.**
+  `source_mapper.py` had been fixed; `aggregator.py` had not, and it computed a
+  different binary than `map_samples_to_lines` did — so its `_addr2line_cache`
+  lookup used a mismatched key and the per-file function lists silently
+  under-reported for every non-main module.
+- **`addr2line` results were discarded whenever the line was unknown**, throwing
+  away a perfectly good function name. Ordinary for hand-written assembly,
+  which is exactly where a soft-float target spends its time.
 - **The `armeb` release asset could not run on real big-endian ARM.** It was
   built hard-float, and without `-march=armv7-a` the toolchain defaults to
   ARMv5 and emits BE-32 where ARMv6+ implements BE-8 only. Both faults are
@@ -48,11 +83,10 @@ capability probe were not.
 
 ### Known issues
 
-- Where the target's `perf` cannot symbolize userspace ELF (kernel frames
-  resolve from kallsyms, everything else is `[unknown]`), PerfLens shows an
-  unusable profile even though the server holds the unstripped binary and a
-  cross toolchain that resolves every address correctly. Reverse
-  address→symbol lookup is not yet wired up.
+- Shared-library frames on a target whose `perf` cannot symbolize will usually
+  stay `[unknown]`: recovering a library's load base needs named frames to vote
+  with, and there are none. The main executable resolves. Closing this needs
+  the agent to ship `/proc/PID/maps`, which is deliberately deferred.
 - `/api/live/export` and `/api/sessions/<id>/export` still ignore `event` for
   `collapsed` and `json`, and still answer 200 for a bogus event name.
 

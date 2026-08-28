@@ -87,6 +87,16 @@ reached `frontend/openapi.json` and the generated TypeScript.
       The auth change is confirmed orthogonal to the constrained-permission
       and PMU-split paths. The pass also found an unrelated export bug that
       neither bed had caught, for the same reason the symoff bug survived.
+- [x] **Frames the target's perf cannot name are now named server-side**
+      (2026-08-28). A `perf` built without libelf returns `[unknown]` for
+      every userspace frame; the server recovers the name from the address
+      against the unstripped binary. Verified on the big-endian bed by
+      replaying a saved session: **one 99.6% `[unknown]` row became 64 named
+      functions**, 13,534 of 13,534 userspace frames resolved, and the profile
+      reads correctly — `__aeabi_dmul` 53.4% + `__aeabi_dsub` 37.6%, i.e.
+      soft-float emulation, called from `matrix_multiply_naive` /
+      `matrix_multiply_blocked`. `/api/index/status` now reports the frame
+      naming outcome so a blank profile is diagnosable rather than mysterious.
 - [ ] Server RSS drift after the sample ring fills (carried from 0.9.0).
       **Re-measured 2026-08-15 under 0.10.0: the cap holds and the drift is
       no worse — +1.99 MB/min against 0.9.0's ~3 MB/min.** Cap reached at
@@ -107,6 +117,83 @@ reached `frontend/openapi.json` and the generated TypeScript.
       third bed, a big-endian ARMv7 embedded target. See the pass below. The
       byte-order surface came through clean; what the bed actually broke was
       everything *around* it.
+
+## Design — the symbolization pipeline
+
+**Principle: the agent captures and ships bytes; the controller interprets.**
+Measured against it, today's agent still runs `perf script` on the device, and
+that call *is* the interpretation step. It is why the device needs a capable
+`perf` at all, and it is the heaviest thing the agent runs (the code already
+wraps it in `nice 5`).
+
+This design note exists because a device turned up whose `perf` was built
+without libelf. It resolves kernel frames from `/proc/kallsyms` — plain text,
+no ELF parsing — and returns `[unknown]` for **every** userspace frame,
+including libc. 99.6% of samples landed in one bucket.
+
+### The four pipelines
+
+```
+P1  text       device: record + script    names from the device's perf     (today)
+P2  text       device: record + script    names from controller symbol lookup
+P3  perf.data  device: record only        names from controller perf --symfs
+P4  text       device: record + script    device first, controller fills gaps
+```
+
+### What was measured, not assumed
+
+| experiment | result |
+|---|---|
+| Push a `/tmp/perf-<pid>.map` to the device | **fails** — perf ignores it for file-backed mappings |
+| Controller `perf` 6.14 reading a big-endian armv7b `perf.data` from perf 4.4 | **works** — byte-swaps, header intact |
+| …with `--symfs` | **works** — `__subdf3+0xb4`, full symbols |
+| …on *pipe-mode* data | **works, and recovers call chains** — 201 frames from 92 samples, where the device's own `perf script` gave 0 |
+| Wire size, 8 s / 167 samples, compressed | text **1,861 B** vs perf.data **2,997 B** (~1.6× more) |
+
+Two conclusions worth keeping. **P3 costs ~1.6× the wire bytes** — perf.data is
+smaller raw but compresses far worse than repetitive text — which on an embedded
+target is a good trade, since the LAN is abundant and the single CPU is not.
+And **P3 independently fixes the call-graph loss**, because that loss was in the
+device's old `perf script`, not in `perf record`.
+
+### The decision ladder
+
+The trigger should be **the data, not a probe**. A probe is synthetic and tests
+one binary at one moment; a frame arriving as `[unknown]` is ground truth about
+this process, right now. The useful signal is the ratio, because the partial
+case (some modules resolve, some do not) is the common one and a probe misses
+it entirely.
+
+| observed | path |
+|---|---|
+| ~0% unknown | stay on P1 — cheapest wire, nothing to do |
+| high, local symbols available | **P2** — resolve server-side; also fixes saved sessions |
+| high, no local symbols, perf.data readable | **P3** — stop running `script` on the device |
+| neither | degrade honestly — keep `[unknown]` and **say why** |
+
+P3 needs negotiation rather than a flag, because it depends on the *version
+relationship* between two perfs and the failing direction is real: this
+project's own 2026-08-15 pass recorded controller 6.14.11 unable to read a
+7.0.12 device's perf.data.
+
+### Status
+
+**P2 is implemented** (see the pass below). P3 and a
+`--symbolize auto|device|server-symbols|server-perf` selector are **deferred by
+decision**, along with the enablers they need: build-id matching, and the agent
+shipping `/proc/PID/maps` so shared-library load bases can be recovered.
+
+### Two STATUS corrections this note carries
+
+- The 0.9.0-era item "`--binary` attributes every frame to that binary" was
+  **already fixed in `source_mapper.py`** by `_binary_for_frame()`, with tests.
+  It survived only in `aggregator.py`, where it caused a *different* bug: that
+  call site computed a different binary than `map_samples_to_lines` did, so its
+  `_addr2line_cache` lookup used a mismatched key and the per-file function
+  lists silently under-reported for every non-main module. Fixed here.
+- The 2026-08-28 note claiming this feature "collides with" that open item was
+  written from the stale entry rather than from the code. The blocker was much
+  smaller than stated.
 
 ## Test pass 2026-08-28 — the big-endian bed, and the five defects it found
 
@@ -222,11 +309,11 @@ arithmetic. So the server could name every frame and does not, because
 function names key off perf's `sym` field and `_base_candidate()` needs a
 known symbol name to derive the load base.
 
-Not fixed here on purpose: it is a feature (address→symbol reverse lookup with
-span validation), it is orthogonal to endianness, and it collides with the
-open item below that `--binary` attributes every frame to that binary — which
-would mis-resolve libc frames against the target binary. It wants its own
-design pass and its own validation on the little-endian beds.
+**Now fixed** — see the design note above and the implementation entry below.
+The server resolves these addresses itself, additively: a frame is renamed only
+when the address lands inside a known symbol *and* addr2line independently
+agrees, so an uncertain frame keeps `[unknown]` rather than acquiring a
+confidently wrong name.
 
 ### Also reproduced: the export event filter, more sharply than before
 
@@ -541,13 +628,18 @@ deliberate exception to the agent freeze.
       route bodies against their declared models would close it. The design
       itself is correct and should not change — orjson plus per-route gzip
       is the whole reason.
-- [ ] **`--binary` attributes every frame to that binary**, including libc
-      and kernel frames (`web.py`/`source_mapper.py`:
-      `self.binary_path or self._resolve_module_path(...)`). Pre-existing and
-      mostly harmless, because an unknown symbol name fails the lookup — but
-      it is what made ip-based recovery produce out-of-range addresses until
-      a span check was added, and it is why that check has to exist. Worth
-      revisiting as a real module-to-binary mapping.
+- [x] **`--binary` attributes every frame to that binary** — **closed
+      2026-08-28, in two stages.** `source_mapper.py` was fixed earlier by
+      `_binary_for_frame()`, which returns `--binary` only for a module that
+      is plausibly the executable (deliberately *not* a basename comparison —
+      the documented cross-compile workflow points `--binary` at a
+      differently-named unstripped build). The last call site, in
+      `aggregator.py`, was fixed with the symbolization work: it computed a
+      different binary than `map_samples_to_lines` did, so its
+      `_addr2line_cache` lookup used a mismatched key and the per-file
+      function lists under-reported for every non-main module. `--module-map`
+      now covers the remaining case, a device path that exists nowhere
+      locally.
 - [ ] **Test coverage gaps**, unchanged except for sessions:
       `agentlink.py` (569 lines) is the largest untested Python module — the
       15 agent-protocol tests drive the *C binary* and import no `perflens`
