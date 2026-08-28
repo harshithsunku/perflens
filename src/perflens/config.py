@@ -23,6 +23,7 @@ class ServerConfig:
     zstd_bin: Optional[str] = None
     perf_bin: Optional[str] = None
     path_map: Optional[dict] = None
+    module_map: Optional[dict] = None
     sysroot: Optional[str] = None
     sessions_dir: str = ''
     max_samples: int = 500000
@@ -174,6 +175,11 @@ def probe_tools(cfg):
         for k, v in cfg.path_map.items():
             print(f"[server]   path-map: {k} → {v}", file=sys.stderr)
 
+    # Module map
+    if cfg.module_map:
+        for k, v in cfg.module_map.items():
+            print(f"[server]   module-map: {k} → {v}", file=sys.stderr)
+
     # perf
     found = _find_binary('perf')
     if found:
@@ -206,6 +212,7 @@ def create_source_mapper(cfg):
         addr2line_bin=cfg.addr2line_bin,
         readelf_bin=cfg.readelf_bin,
         path_map=cfg.path_map or {},
+        module_map=cfg.module_map or {},
         inline=cfg.inline,
         sysroot=cfg.sysroot,
         dwarfdump_bin=cfg.dwarfdump_bin,
@@ -231,6 +238,10 @@ def config_from_args(argv=None):
     parser.add_argument('--path-map', type=str, default=None,
                         help='Compile-time path prefix mapping '
                              '(e.g., /build/src=/home/user/src)')
+    parser.add_argument('--module-map', type=str, default=None,
+                        help='Map a device module path to a local binary '
+                             '(e.g. /opt/app/foo=/build/foo.sym). Repeatable '
+                             'with commas.')
     parser.add_argument('--addr2line', type=str, default=None,
                         help='Path to custom addr2line binary')
     parser.add_argument('--readelf', type=str, default=None,
@@ -288,6 +299,14 @@ def config_from_args(argv=None):
                 src, dst = mapping.split('=', 1)
                 path_map[src] = dst
 
+    # Parse module-map, same FROM=TO shape
+    module_map = {}
+    if args.module_map:
+        for mapping in args.module_map.split(','):
+            if '=' in mapping:
+                src, dst = mapping.split('=', 1)
+                module_map[src] = dst
+
     # Toolchain prefix: derive addr2line and readelf from prefix
     if args.toolchain_prefix:
         prefix = args.toolchain_prefix
@@ -324,6 +343,7 @@ def config_from_args(argv=None):
         addr2line_bin=args.addr2line,
         readelf_bin=args.readelf,
         path_map=path_map or None,
+        module_map=module_map or None,
         sysroot=os.path.abspath(args.sysroot) if args.sysroot else None,
         sessions_dir=sessions_dir,
         max_samples=args.max_samples,

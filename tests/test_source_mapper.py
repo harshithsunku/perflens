@@ -275,3 +275,103 @@ def test_line_mapping_unaffected_for_main_binary_frames(fixture_binary,
     mapper = make_mapper(fixture_binary, perflens_home)
     line_data = mapper.map_samples_to_lines(samples_for(fixture_binary))
     assert line_data, 'main-binary frames should still resolve to source lines'
+
+
+# ---------------------------------------------------------------------------
+# Naming frames the target's perf could not.
+#
+# A perf built without libelf resolves kernel frames from kallsyms but returns
+# '[unknown]' for every userspace frame, however good the binary is. Measured
+# on one device at 99.6% of samples. The address survives, and the server has
+# the unstripped binary, so the name is recoverable here.
+# ---------------------------------------------------------------------------
+
+def _addr_of(binary, func):
+    """File vaddr of a function, straight from readelf."""
+    out = subprocess.run([shutil.which('readelf'), '-sW', binary],
+                         capture_output=True, text=True, check=True).stdout
+    for line in out.splitlines():
+        f = line.split()
+        if len(f) >= 8 and f[3] == 'FUNC' and f[7] == func:
+            return int(f[1], 16)
+    raise AssertionError(f'{func} not found in {binary}')
+
+
+def unknown_samples(module, addr_hex, n=3):
+    """Frames shaped the way a libelf-less perf emits them."""
+    return [{'comm': 'w', 'pid': 1, 'tid': 1, 'event_count': 1,
+             'event_type': 'cycles',
+             'frames': [{'addr': addr_hex, 'func': '[unknown]',
+                         'offset': '', 'module': module}]}
+            for _ in range(n)]
+
+
+def test_unknown_frame_gets_named_from_the_address(fixture_binary,
+                                                   perflens_home):
+    """The headline case: perf gave us an address and no name."""
+    mapper = make_mapper(fixture_binary, perflens_home)
+    addr = _addr_of(fixture_binary, 'cpu_intensive')
+    samples = unknown_samples(fixture_binary, format(addr + 4, 'x'))
+
+    named = mapper.resolve_unknown_frames(samples)
+
+    assert named == 3, 'expected every frame named'
+    assert samples[0]['frames'][0]['func'] == 'cpu_intensive'
+    mapper.close()
+
+
+def test_address_outside_any_symbol_stays_unknown(fixture_binary,
+                                                  perflens_home):
+    """The anti-invention guarantee.
+
+    A confidently wrong name is worse than an honest blank, so an address
+    that lands in no symbol must be left alone.
+    """
+    mapper = make_mapper(fixture_binary, perflens_home)
+    samples = unknown_samples(fixture_binary, format(0x7fffffff0000, 'x'))
+
+    named = mapper.resolve_unknown_frames(samples)
+
+    assert named == 0
+    assert samples[0]['frames'][0]['func'] == '[unknown]'
+    mapper.close()
+
+
+def test_unmapped_shared_object_stays_unknown(fixture_binary, perflens_home):
+    """A .so with no local file must not be resolved against --binary.
+
+    This is the additive-only rule: resolving a libc address against the
+    executable's symbol table yields a real name for the wrong function.
+    """
+    mapper = make_mapper(fixture_binary, perflens_home)
+    addr = _addr_of(fixture_binary, 'cpu_intensive')
+    samples = unknown_samples('/lib/libc-2.18.so', format(addr + 4, 'x'))
+
+    named = mapper.resolve_unknown_frames(samples)
+
+    assert named == 0
+    assert samples[0]['frames'][0]['func'] == '[unknown]'
+    mapper.close()
+
+
+def test_already_named_frames_are_untouched(fixture_binary, perflens_home):
+    mapper = make_mapper(fixture_binary, perflens_home)
+    samples = samples_for(fixture_binary, func='main')
+    assert mapper.resolve_unknown_frames(samples) == 0
+    assert samples[0]['frames'][0]['func'] == 'main'
+    mapper.close()
+
+
+def test_module_map_points_a_device_path_at_a_local_binary(fixture_binary,
+                                                           perflens_home):
+    """--module-map is the escape hatch for a device path that exists
+    nowhere locally, which is normal for a firmware image."""
+    device_path = '/opt/fw/libthing.so'
+    addr = _addr_of(fixture_binary, 'cpu_intensive')
+    samples = unknown_samples(device_path, format(addr + 4, 'x'))
+
+    mapper = make_mapper(fixture_binary, perflens_home,
+                         module_map={device_path: fixture_binary})
+    assert mapper.resolve_unknown_frames(samples) == 3
+    assert samples[0]['frames'][0]['func'] == 'cpu_intensive'
+    mapper.close()

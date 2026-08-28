@@ -9,6 +9,7 @@ Supports:
 - Caching across chunks
 """
 
+import bisect
 import os
 import re
 import subprocess
@@ -17,6 +18,7 @@ import threading
 from collections import Counter, defaultdict
 
 from perflens import symcache
+from perflens.parser import UNKNOWN_FUNC
 
 # Load-base recovery (see SourceMapper._prime_module_bases). Bases are
 # page-aligned by the loader, which is what makes a single frame enough to
@@ -138,8 +140,16 @@ class Addr2LinePipe:
                     # Strip discriminator
                     file_line = re.sub(r'\s*\(discriminator \d+\)', '', file_line)
 
-                    if func_line == '??' or file_line.startswith('??'):
+                    if func_line == '??':
                         results[addr] = ('??', '??', 0)
+                        continue
+                    if file_line.startswith('??'):
+                        # A real symbol with no line info — ordinary for
+                        # hand-written assembly, which is exactly where a
+                        # soft-float target spends its time. The name is
+                        # still good, and resolve_unknown_frames wants it.
+                        # Line consumers already gate on `lineno > 0`.
+                        results[addr] = (func_line, '??', 0)
                         continue
 
                     # Parse file:line  (use rfind to handle Windows paths with colons)
@@ -150,9 +160,9 @@ class Addr2LinePipe:
                             lineno = int(file_line[idx + 1:])
                             results[addr] = (func_line, fpath, lineno)
                         except ValueError:
-                            results[addr] = ('??', '??', 0)
+                            results[addr] = (func_line, '??', 0)
                     else:
-                        results[addr] = ('??', '??', 0)
+                        results[addr] = (func_line, '??', 0)
         except (BrokenPipeError, OSError):
             if self._proc:
                 try:
@@ -241,7 +251,7 @@ class SourceMapper:
     def __init__(self, source_dir, binary_path=None, map_file_path=None,
                  addr2line_bin=None, readelf_bin=None, path_map=None,
                  inline=False, sysroot=None, dwarfdump_bin=None,
-                 sym_cache=None):
+                 sym_cache=None, module_map=None):
         self.source_dir = os.path.abspath(source_dir)
         self.binary_path = binary_path
         self.addr2line_bin = addr2line_bin
@@ -250,6 +260,10 @@ class SourceMapper:
         self.path_map = path_map or {}
         self.inline = inline
         self.sysroot = sysroot
+        # Device module path -> local file. --sysroot covers a whole tree;
+        # this covers the single path that does not live under one, which is
+        # the normal case for a firmware image.
+        self.module_map = module_map or {}
 
         # Persistent cross-restart cache (~/.perflens/cache)
         self._sym_cache = sym_cache if sym_cache is not None \
@@ -275,6 +289,20 @@ class SourceMapper:
         self._base_unresolvable = set()
         # binary -> {symbol start: end}, memoized (see _symbol_spans)
         self._sym_spans = {}
+        # binary -> sorted symbol starts, memoized alongside _sym_spans so a
+        # reverse (address -> symbol) lookup can bisect them
+        self._sym_starts = {}
+        # Frame-naming tally, for /api/index/status. Lives here rather than
+        # on an accumulator because replay and import each build their own
+        # AggregatorSet, while the mapper is shared by every path.
+        self._sym_seen = 0          # userspace frames examined
+        self._sym_unknown_in = 0    # ... that arrived as [unknown]
+        self._sym_named = 0         # ... that we managed to name
+        # (binary, vaddr) -> function name, or None when we could not name it
+        # (negative entries matter: the same unnameable address recurs in
+        # every chunk). Deliberately not _vaddr_cache's key, which already
+        # holds negative entries under (binary, '[unknown]', '').
+        self._symname_cache = {}
         # Persistent addr2line pipes per binary
         self._pipes = {}
         # Inline addr2line pipes per binary (use -i flag)
@@ -450,6 +478,7 @@ class SourceMapper:
             nxt = addrs[i + 1] if i + 1 < len(addrs) else addr + LAST_SYMBOL_SPAN
             spans[addr] = nxt
         self._sym_spans[binary] = spans
+        self._sym_starts[binary] = addrs
         return spans
 
     def _base_candidate(self, frame, binary):
@@ -742,11 +771,15 @@ class SourceMapper:
     def _resolve_module_path(self, module):
         """Resolve a module path from perf output to a local binary.
 
-        If sysroot is set, prepends it to absolute paths (e.g.
-        /usr/lib/libc.so -> /opt/sysroot/usr/lib/libc.so).
+        An explicit --module-map entry wins. Otherwise, if sysroot is set,
+        prepend it to absolute paths (e.g. /usr/lib/libc.so ->
+        /opt/sysroot/usr/lib/libc.so).
         """
         if not module:
             return module
+        mapped = self.module_map.get(module)
+        if mapped:
+            return mapped
         if self.sysroot and module.startswith('/'):
             candidate = os.path.join(self.sysroot, module.lstrip('/'))
             if os.path.isfile(candidate):
@@ -969,6 +1002,139 @@ class SourceMapper:
             })
         file_list.sort(key=lambda x: x['total_samples'], reverse=True)
         return file_list
+
+    def symbolization_stats(self):
+        """Userspace frame naming so far. See resolve_unknown_frames."""
+        return {
+            'userspace_frames': self._sym_seen,
+            'unknown_frames': self._sym_unknown_in - self._sym_named,
+            'resolved_frames': self._sym_named,
+        }
+
+    def _symbol_starts(self, binary):
+        """Sorted symbol start addresses, for address -> symbol lookups."""
+        if binary not in self._sym_starts:
+            self._symbol_spans(binary)      # fills both maps
+        return self._sym_starts.get(binary, [])
+
+    def _unknown_vaddr(self, frame, binary):
+        """File vaddr for a frame perf could not name, or None.
+
+        perf prints the ip in whichever form it managed: a file-relative
+        offset when it worked out the module's load base, the raw runtime
+        address when it did not. Both shapes were observed for the same
+        capture, so try each and keep only a candidate that lands inside a
+        real symbol.
+
+        That containment check is the guard against inventing names. It is
+        not sufficient on its own — spans are approximated as the next
+        symbol's start, so inter-function padding reads as part of the
+        preceding symbol — which is why addr2line has to agree as well.
+        """
+        try:
+            ip = int(frame.get('addr') or '', 16)
+        except ValueError:
+            return None
+
+        candidates = []
+        base = self._load_base.get(binary)
+        if base is not None and ip >= base:
+            candidates.append(ip - base)
+        candidates.append(ip)
+
+        spans = self._symbol_spans(binary)
+        if not spans:
+            return None
+        starts = self._symbol_starts(binary)
+        for vaddr in candidates:
+            i = bisect.bisect_right(starts, vaddr) - 1
+            if i < 0:
+                continue
+            start = starts[i]
+            if start <= vaddr < spans.get(start, start):
+                return vaddr
+        return None
+
+    def _resolve_symnames_batch(self, binary, addrs):
+        """Fill _symname_cache for these addresses, negative entries included."""
+        pipe = self._get_pipe(binary)
+        if pipe is None:
+            for addr in addrs:
+                self._symname_cache[(binary, addr)] = None
+            return
+        try:
+            results = pipe.resolve_batch(addrs)
+        except (OSError, ValueError):
+            results = {}
+        for addr in addrs:
+            func = (results.get(addr) or ('??',))[0]
+            self._symname_cache[(binary, addr)] = (
+                None if not func or func == '??' else func)
+
+    def resolve_unknown_frames(self, samples):
+        """Name frames the target's own perf could not, in place.
+
+        A perf built without libelf still reads /proc/kallsyms, so kernel
+        frames arrive named while every userspace frame arrives as
+        '[unknown]' — measured at 99.6% of samples on one device. The
+        address is in the data regardless, and the server already holds the
+        unstripped binary and a matching cross toolchain, so the name is
+        recoverable here even though the device could never produce it.
+
+        Additive by construction. A frame is renamed only when the address
+        lands inside a known symbol *and* addr2line independently agrees;
+        anything less certain keeps '[unknown]', because a confidently
+        wrong name is worse than an honest blank.
+
+        Frames are rewritten in place. The sample dicts are the same objects
+        held by the live ring, so /api/threads, /api/window, /api/source and
+        the collapsed/SVG exports see the resolved names too.
+
+        Returns the number of frames named.
+        """
+        if not samples:
+            return 0
+
+        # Unknown frames cannot vote for a load base (_base_candidate needs
+        # a symbol name), so the bases must come from the named frames
+        # first. expand_inline_frames primes them too, but it runs after
+        # this and is skipped outright under --no-inline.
+        self._prime_module_bases(samples)
+
+        # A hot loop resamples the same few addresses: 5,577 unknown frames
+        # in one measured chunk collapsed to 195 distinct (binary, vaddr)
+        # pairs, so ask addr2line once per pair, not once per frame.
+        wanted = defaultdict(set)
+        targets = []
+        for sample in samples:
+            for frame in sample['frames']:
+                if (frame.get('module') or '').startswith('['):
+                    continue        # [kernel.kallsyms], [vdso], ...
+                self._sym_seen += 1
+                if frame.get('func') != UNKNOWN_FUNC:
+                    continue
+                self._sym_unknown_in += 1
+                binary = self._binary_for_frame(frame)
+                if not binary or not os.path.isfile(binary):
+                    continue                    # nothing local to ask
+                vaddr = self._unknown_vaddr(frame, binary)
+                if vaddr is None:
+                    continue
+                targets.append((frame, binary, vaddr))
+                if (binary, vaddr) not in self._symname_cache:
+                    wanted[binary].add(vaddr)
+
+        for binary, addrs in wanted.items():
+            self._resolve_symnames_batch(binary, sorted(addrs))
+
+        named = 0
+        for frame, binary, vaddr in targets:
+            func = self._symname_cache.get((binary, vaddr))
+            if func:
+                frame['func'] = sys.intern(func)
+                named += 1
+        self._sym_named += named
+        return named
 
     def expand_inline_frames(self, samples):
         """Expand inline frames in sample data using addr2line -i.

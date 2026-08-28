@@ -360,6 +360,10 @@ def build_function_summary(samples):
 # workloads really do produce such stacks, and the failure mode was a 500
 # from /api/snapshot, i.e. the entire UI going blank rather than one deep
 # stack rendering short. Cap with headroom and mark where we cut.
+# What perf prints when it could not name a frame. A perf built without
+# libelf emits this for every userspace frame, however good the binary is.
+UNKNOWN_FUNC = '[unknown]'
+
 MAX_FLAMEGRAPH_DEPTH = 100
 
 

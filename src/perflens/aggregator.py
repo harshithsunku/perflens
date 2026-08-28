@@ -93,8 +93,10 @@ class EventAccumulator:
             if not sample['frames']:
                 continue
             frame = sample['frames'][0]
-            binary = (mapper.binary_path
-                      or mapper._resolve_module_path(frame.get('module', '')))
+            # Must match what map_samples_to_lines used, or the
+            # _addr2line_cache lookup below misses: it keys on (binary,
+            # vaddr), and _binary_for_frame is what filled it.
+            binary = mapper._binary_for_frame(frame)
             if not binary:
                 continue
             vaddr = mapper._compute_vaddr(frame, binary)
@@ -212,6 +214,14 @@ class AggregatorSet:
         once, for the new samples only."""
         if not samples:
             return
+
+        # Name what the target's perf could not, before anything keys off
+        # frame['func'] -- the accumulators copy the name into dict keys and
+        # tree nodes by value, so a later rewrite would leave a stale
+        # '[unknown]' bucket and split one function across two names.
+        if mapper:
+            mapper.resolve_unknown_frames(samples)
+
         expanded = (mapper.expand_inline_frames(samples)
                     if mapper else samples)
 
