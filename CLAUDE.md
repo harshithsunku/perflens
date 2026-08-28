@@ -331,7 +331,17 @@ Options:
     arrangement, and `uname()` reports the kernel's `aarch64` there, so
     self-update quietly pulled the 64-bit asset over a 32-bit install.
 
-  Neither of those changed the wire protocol. **The third unfreeze, in
+  Neither of those changed the wire protocol. **The fourth unfreeze, on
+  2026-08-28**, did not either — it was the big-endian bed, and it changed
+  the capability probe in three ways: `cpu-clock`/`task-clock` added to
+  `CANDIDATE_EVENTS` (without them a device with no hardware PMU has zero
+  record events and can never start), record capability confirmed with a real
+  `perf record` probe instead of inferred from the `perf stat` one, and pipe
+  mode required to actually carry call chains rather than merely produce
+  output. Same pass, outside the agent: the `armeb` target must be built
+  soft-float and with `-march=armv7-a`, or it is `SIGILL` on real hardware.
+
+  **The third unfreeze, in
   0.10.0, did** — pairing-code authentication. Before it, `--listen` bound
   every interface, accepted any peer, and executed all 13 commands with no
   authentication, while `--token` made things *worse*: the agent embedded it
@@ -396,6 +406,27 @@ Options:
   events for recording". `perf_event_paranoid` is not namespaced, so
   `/proc/sys/kernel/perf_event_paranoid` is read-only from inside the
   container and lowering it needs the host.
+- **Not every target has a hardware PMU.** Embedded silicon
+  often ships without one wired up: `perf list hw sw` then offers software
+  events only and `/proc/interrupts` has no `arm-pmu` line. `cpu-clock` and
+  `task-clock` are the sampling events that still work there, and they are
+  what the agent falls back to. Measured on a big-endian ARMv7 target.
+- **`perf stat` accepting an event does not mean `perf record` will take it.**
+  That asymmetry is why `STAT_ONLY_EVENTS` exists; the agent now confirms
+  record capability with a record probe rather than trusting the stat one.
+- **Old `perf` can produce samples through a pipe while dropping their call
+  chains.** Measured on perf 4.4: ~10 frames per sample through a file, one
+  leaf frame through `record -o - | script -i -`. The agent probes for this
+  and falls back to discrete rounds.
+- **A target's `perf` may not symbolize userspace at all.** Where it is built
+  without ELF symbol support, kernel frames still resolve from kallsyms but
+  every userspace frame is `[unknown]` — including libc. The server does not
+  yet recover those names from the raw address, so the profile is unusable
+  even when the unstripped binary and a matching cross toolchain are present.
+- **Big-endian ARM needs `-march=armv7-a` and soft-float.** The `armeb`
+  toolchain defaults to ARMv5/BE-32 while ARMv6+ implements BE-8 only, and
+  embedded hardware often runs soft-float. Either mistake is `SIGILL`.
+  Check with `readelf -h`: expect `soft-float ABI, BE8`.
 - **Hybrid P/E-core CPUs split every event per PMU.** Six requested events
   arrive as twelve streams named `cpu_core/cycles/`, `cpu_atom/cycles/` and
   so on; a bare `cycles` is never reported. The agent's `start` response

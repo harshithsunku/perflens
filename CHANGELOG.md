@@ -7,7 +7,54 @@ releases may break APIs between minor versions when needed.
 
 ## [Unreleased]
 
-Nothing yet.
+First hands-on validation on **big-endian** hardware — a big-endian ARMv7
+embedded target (`armv7b`, single-core, kernel 4.4, no hardware PMU,
+no SSH, no internet from the device).
+Byte order turned out to be correct all along; the build flags and the
+capability probe were not.
+
+### Fixed
+
+- **The `armeb` release asset could not run on real big-endian ARM.** It was
+  built hard-float, and without `-march=armv7-a` the toolchain defaults to
+  ARMv5 and emits BE-32 where ARMv6+ implements BE-8 only. Both faults are
+  independently fatal (`SIGILL` on the first instruction), measured on
+  hardware. `armeb` now builds with `armeb-linux-musleabi-` (soft-float) and
+  `-march=armv7-a`. Soft-float still runs on VFP hardware, so one asset covers
+  both. **CI note:** `build.yml` now needs `armeb-linux-musleabi-cross.tgz` on
+  the `toolchains` release.
+- **A target with no hardware PMU could not be profiled at all.** Every
+  hardware candidate failed and the three software events probed were all
+  stat-only, leaving zero record events and a `start` that always failed with
+  *"no perf record events available"*. The agent now falls back to `cpu-clock`
+  and `task-clock` when the PMU offers no record event. This affects most
+  embedded hardware, not just big-endian targets. Targets that do
+  have working hardware counters are unaffected: the fallback is not probed at
+  all, so their event set is unchanged.
+- **Record capability is now measured instead of inferred.** `event_works()`
+  probes with `perf stat`, and stat accepting an event does not mean `perf
+  record` will take it. Events that pass the stat probe are now confirmed with
+  a short record probe before being advertised as record-capable.
+- **Continuous pipe mode silently dropped call graphs.** On perf 4.4 the same
+  capture yields ~10 frames per sample through a file and one leaf frame
+  through `record -o - | script -i -`. The probe accepted any non-empty
+  output, so pipe mode was chosen and every flame graph collapsed to a single
+  level with no error reported. The probe now verifies call chains survive.
+- **`--toolchain-prefix` silently used the host `addr2line`.** The check was
+  `os.path.isfile()`, which is False for the bare relative name the flag
+  documents, so the cross tool was replaced by the host's and logged only as
+  `(system)` — symbolizing a foreign binary with the wrong architecture's
+  tool. It now falls back to `shutil.which`, as readelf already did.
+
+### Known issues
+
+- Where the target's `perf` cannot symbolize userspace ELF (kernel frames
+  resolve from kallsyms, everything else is `[unknown]`), PerfLens shows an
+  unusable profile even though the server holds the unstripped binary and a
+  cross toolchain that resolves every address correctly. Reverse
+  address→symbol lookup is not yet wired up.
+- `/api/live/export` and `/api/sessions/<id>/export` still ignore `event` for
+  `collapsed` and `json`, and still answer 200 for a bogus event name.
 
 ## [0.10.0] — unreleased
 

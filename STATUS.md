@@ -83,18 +83,298 @@ reached `frontend/openapi.json` and the generated TypeScript.
 - [x] **Three merged remote branches deleted** (`stabilize-0.8.0`,
       `copilot/review-security-issues`, `validate-0.9.0`) — each verified an
       ancestor of master first. `origin/master` is now the only branch.
-- [ ] **The x86_64 LXC bed was not re-run** this pass — it was offline
-      (`192.168.0.49` unreachable, hostname does not resolve). The ARM bed
-      covered the auth work end to end. What remains unconfirmed on hardware
-      is that the auth change is orthogonal to the constrained-permission
-      (`paranoid=1`, `-a` fails) and PMU-split event-name paths. Neither is
-      touched by this pass and both are covered by the automated suite, but
-      "not touched, therefore fine" is the reasoning that shipped the symoff
-      bug. Re-run it when the bed is back.
-- [ ] Server RSS still drifts ~3 MB/min after the sample ring fills
-      (carried from 0.9.0, untouched here).
-- [ ] Big-endian remains compile-only. The pairing code compares hex strings,
-      so this pass did not widen that exposure.
+- [x] **The x86_64 LXC bed was re-run on 2026-08-15** — see the pass below.
+      The auth change is confirmed orthogonal to the constrained-permission
+      and PMU-split paths. The pass also found an unrelated export bug that
+      neither bed had caught, for the same reason the symoff bug survived.
+- [ ] Server RSS drift after the sample ring fills (carried from 0.9.0).
+      **Re-measured 2026-08-15 under 0.10.0: the cap holds and the drift is
+      no worse — +1.99 MB/min against 0.9.0's ~3 MB/min.** Cap reached at
+      t+180s; over the following 17 minutes RSS oscillated between 1048 and
+      1138 MB around a mean of 1084 while samples stayed pinned at 500,000
+      and 124 further chunks arrived. So this is a regression check that
+      passes, **not** an answer: the function count was still climbing
+      steeply when the run ended (3,476 → 5,732, ~89/min at the end), so the
+      code-discovery hypothesis was never given the chance to asymptote.
+      Both measurements to date (0.9.0: 22 min, this one: 20 min) are
+      structurally too short. A harness for an unattended multi-hour run now
+      exists — `~/.perflens-testbeds/scripts/soak-run.sh`, documented in
+      `SOAK.md` — and its verdict line distinguishes "flattening" from
+      "still climbing with a static profile", which is the case that would
+      disprove the hypothesis. The question stays open until it runs
+      overnight.
+- [x] **Big-endian is executed, not merely compiled** — closed 2026-08-28 on a
+      third bed, a big-endian ARMv7 embedded target. See the pass below. The
+      byte-order surface came through clean; what the bed actually broke was
+      everything *around* it.
+
+## Test pass 2026-08-28 — the big-endian bed, and the five defects it found
+
+**The longest-standing open item is closed.** Big-endian had been compile-only
+since 0.9.0, with the note "inspection is not execution, and byte-order bugs
+are invisible on little-endian hardware by construction". A third bed is now
+available and the item is settled by running it.
+
+### The bed
+
+A **big-endian ARMv7 embedded target** — no SSH server, and no internet from
+the device, which is the real deployment constraint rather than a lab
+convenience.
+
+| | |
+|---|---|
+| Arch | `armv7b` — 32-bit **big-endian** ARMv7 |
+| ELF | `EI_DATA=MSB`, `e_flags=0x05800202` = EABI5 \| **BE-8** \| **soft-float** |
+| Cores / RAM | **1** core, 996 MB |
+| Kernel / perf | 4.4.0 (Buildroot) / perf 4.4.0, installed under a vendor prefix **not on `PATH`** |
+| Events | **software only** — no PMU, no `arm-pmu` in `/proc/interrupts` |
+| perf knobs | `paranoid=1`, `kptr_restrict=0`, kallsyms readable |
+
+What makes it valuable is not only endianness. It is the **first PMU-less,
+single-core, old-perf, no-SSH** bed, and four of the five defects below have
+nothing to do with byte order — they were simply invisible on hardware that
+has a PMU and a modern perf.
+
+### The byte-order verdict: the wire path was already correct
+
+0.9.0's static analysis holds exactly. Framing (`wire.c` `htonl`/`ntohl`
+against the server's `struct '!IB'`), the pairing-code hex comparison, the
+JSON payloads and the zstd container all came through clean on the first run.
+Evidence: 33 chunks and 15,671 samples exchanged with no desync, auth accepted,
+zstd compressing 14× on BE and decompressing on the LE server, `/proc`-derived
+metrics matching the device's own `free` exactly (`mem.total_kb 995964`), and
+per-thread attribution splitting 25.2 / 25.1 / 24.9 / 24.8 % across four
+workers. **Byte order was never the problem. The build flags were.**
+
+### The five defects
+
+1. **The published `armeb` asset cannot run on real big-endian ARM.** Two
+   independent reasons, both measured rather than reasoned about, by shipping
+   three hello-world variants to the device:
+
+   | build | `e_flags` | result |
+   |---|---|---|
+   | BE-8 + soft-float (`-march=armv7-a`) | `0x5800200` | runs |
+   | BE-32 + soft-float (no `-march`) | `0x5000200` | **Illegal instruction** |
+   | hard-float — *what the repo published* | `0x5000400` | **Illegal instruction** |
+
+   The `armeb` toolchain defaults to ARMv5 and emits **BE-32**, while ARMv6+
+   implements **BE-8** only; and the CPU reports no `vfp` and runs a
+   soft-float userland. Fixed by building `armeb` with
+   `armeb-linux-musleabi-` and `-march=armv7-a`. Soft-float also runs on VFP
+   hardware, so one published asset still covers both.
+
+2. **A PMU-less target could not be profiled at all.** `CANDIDATE_EVENTS`
+   held six hardware events plus three that are all in `STAT_ONLY_EVENTS`, so
+   on this device `record_event_count` was **0** and `start` failed with *"no
+   perf record events available"*. Fixed by probing `cpu-clock` and
+   `task-clock`. This is not an exotic case — it is most embedded and network
+   hardware, which is the market a remote Linux profiler exists for.
+
+   They are a **fallback**, probed only when the PMU yields no record event,
+   not two more entries in `CANDIDATE_EVENTS`. The first version made them
+   ordinary candidates and that silently took every PMU-capable target from
+   six record events to eight — two extra sample streams measuring what
+   `cycles` already covers, on every existing user's hardware. Caught by
+   running the probe on this dev box before pushing, not by a test.
+
+3. **Record capability was inferred from a `perf stat` probe.** `event_works()`
+   asks `perf stat`, and stat accepting an event does not mean record will
+   take it — which is precisely what the hardcoded `STAT_ONLY_EVENTS` list was
+   papering over. The agent now measures it with a short `perf record`. The
+   test shim had been modelling this exact asymmetry all along (its `stat`
+   branch special-cases `task-clock`, its `record` branch does not), and it is
+   what caught the naive version of fix 2.
+
+4. **Pipe mode silently dropped call graphs.** On perf 4.4 the same capture
+   gave ~10 frames per sample through a file and exactly **one leaf frame**
+   per sample through `record -o - | script -i -`. `pipe_mode_works()` accepted
+   it because the check was `rc == 0 && out.len > 0` — output being non-empty,
+   not output being *right*. Continuous mode would have been chosen and every
+   flame graph would have collapsed to a single level with nothing reporting an
+   error. Now verified by comparing line count against sample count.
+
+5. **`--toolchain-prefix` silently substituted the host `addr2line`.**
+   `config.py` gated on `os.path.isfile()`, which is False for the bare
+   relative name the flag documents, so the cross tool was replaced by the
+   host's x86_64 one and logged only as `(system)` — symbolizing a big-endian
+   binary with the wrong architecture's tool. readelf four lines below already
+   fell back to `shutil.which`; addr2line was the asymmetric half, and it is
+   the half that resolves source lines.
+
+Defects 3 and 4 are the same lesson this file keeps recording, one level
+further in: **assert the answer is right, not merely non-empty.**
+
+### Found and deliberately not fixed
+
+**A target whose `perf` cannot symbolize leaves the profile unusable, even
+though the server holds everything needed to resolve it.** This perf build
+resolves kernel frames from kallsyms but returns `[unknown]` for *every*
+userspace frame — including `libc` and `libpthread`, so it is not a PIE or
+stripping problem. 99.6% of samples land in one `[unknown]`.
+
+The addresses are file-relative vaddrs and resolve perfectly against the
+unstripped binary with the cross toolchain — `0x12018` →
+`workload_compress` at `workloads.c:502`, and on the PIE build `0x125c8` →
+`__aeabi_dadd` in libgcc's `ieee754-df.S`, which is the *correct* answer: on a
+soft-float CPU the matrix multiply spends its time in emulated double
+arithmetic. So the server could name every frame and does not, because
+function names key off perf's `sym` field and `_base_candidate()` needs a
+known symbol name to derive the load base.
+
+Not fixed here on purpose: it is a feature (address→symbol reverse lookup with
+span validation), it is orthogonal to endianness, and it collides with the
+open item below that `--binary` attributes every frame to that binary — which
+would mis-resolve libc frames against the target binary. It wants its own
+design pass and its own validation on the little-endian beds.
+
+### Also reproduced: the export event filter, more sharply than before
+
+The 2026-08-15 finding is **still open and confirmed on this bed**, and this
+capture demonstrates it more cleanly because the two events have near-equal
+counts:
+
+| query | expected | actual |
+|---|---|---|
+| `collapsed&event=cpu-clock` | 7,261 | **14,519** (the sum of both) |
+| `collapsed&event=task-clock` | 7,258 | **14,519** |
+| `collapsed&event=__bogus__` | 404 | **200, 14,519** |
+
+### Notes worth keeping
+
+- **The agent has no way to point at a non-PATH `perf`.** `#define PERF "perf"`
+  (`agent.h:59`) and this device keeps perf outside `PATH`. Launching
+  with a `PATH=` prefix is the entire workaround; it works, and no agent change
+  was made for it.
+- **Offline transfer over the LAN is the whole story.** busybox has `wget`
+  (also `tftp`, `ftpget`) but no `nc`, no `head`, no `which`, and `setsid`
+  exists only as a busybox applet. `python3 -m http.server` on the controller
+  plus `wget` on the device, verified by `sha256sum` on both ends, is
+  sufficient and needs nothing installed on the device.
+- `install-agent.sh` is the one arch resolver of the three that gets this
+  device right: `uname -m` is `armv7b`, which its `arm*` case plus the
+  endianness probe maps to `armeb`. `perflens push-agent` would not
+  (`_ARCH_MAP` has no `armv7b` and does no endian probe) and needs ssh, which
+  this device does not offer.
+- **The BE build is reproducible** — rebuilding matrixlab gave a byte-identical
+  sha256 to the copy already on the device.
+- **Single core.** matrixlab was run at `MATRIXLAB_THREADS=4` and 49 Hz, not
+  the usual 25 threads at 99 Hz; even so load average reached ~19. The
+  device's own services stayed up throughout. Anything heavier on a
+  single-core target is unwise.
+- musl cross toolchains default to **static-pie**; the device runs those fine.
+  Non-PIE was tested too and changes nothing about symbolization.
+
+### Required follow-up before CI is green
+
+`build.yml` now asks for `armeb-linux-musleabi-cross.tgz`, but the
+`toolchains` release currently carries only `armeb-linux-musleabihf-cross.tgz`
+and `aarch64_be-linux-musl-cross.tgz`. **The soft-float tarball must be
+uploaded to that release or the `armeb` matrix leg will fail.** The tarball is
+at `~/.perflens-testbeds/toolchains/armeb-linux-musleabi.tgz`.
+
+## Test pass 2026-08-15 — the x86 bed, and one bug it found
+
+A testing-only pass on both beds, run after the 0.10.0 release to close the
+one hardware item it shipped with. No code was changed. Both beds were moved
+to 0.10.0 agents first; **backward compatibility was dropped from scope by
+decision** — the project has never been shared publicly, so there is no
+pre-0.10.0 agent population to protect. The legacy hello-token path in
+`agentlink.py` is therefore untested, not removed, and not verified.
+
+### The x86 bed is confirmed — the auth work is orthogonal
+
+Everything the open item asked for, on `paranoid=1` hybrid hardware:
+
+- **All eight authentication cases.** 128-bit pairing code generated and read
+  from the log the way an operator does; correct code accepted, wrong rejected;
+  three failures drop the session; a silent peer dropped at **31.0 s** against
+  `AUTH_TIMEOUT_SECS 30`. Every one of the 13 non-`auth` `CMD_TABLE` commands
+  answers `unauthenticated` — the gate really does cover the table by
+  construction.
+- **The hello carries no secret, read off the wire** rather than off the
+  source: no `token` field, and the code appears nowhere in the payload across
+  8 reconnects. It is also absent from `GET /api/agent` and `/api/status`.
+- **Reconnect backoff re-measured independently: 2.0 / 3.0 / 5.0 / 9.0 / 17.0 /
+  31.0 / 31.0 s** — sleeps of 1/2/4/8/16/30/30 plus ~1 s of exchange. The bug
+  0.10.0 found on ARM does not recur here.
+- **`--bind` works**, exercised on hardware for the first time: bound to
+  `127.0.0.1` the socket shows as `127.0.0.1:9999`, a local peer connects and a
+  remote one is refused.
+- **The constrained path is intact**: `perf record -a` still fails outright,
+  `-p PID` works. The capability probe took **19 s**, not the ~43 s recorded in
+  0.9.0 — that figure was pessimistic, not a regression baseline.
+- **Hybrid PMU handling is correct.** Twelve PMU-split events; a bare `cycles`
+  now returns a **400 `ambiguous_event` naming both candidates** rather than
+  0.9.0's silent 404. Snapshot, `/api/threads`, `/api/threads/<tid>`,
+  `/api/window` (with and without `tid`) and `/api/source` all return real data
+  on both PMUs — asserted non-empty, not merely 200.
+- **Line-level annotation holds on x86**, which had never been confirmed:
+  `matrix_multiply.c` L14 57.7% / L43 30.5% on `cpu_core`, L14 46.7% / L15
+  20.1% on `cpu_atom`. Both are real inner loops (naive and blocked multiply),
+  and 9–11 distinct lines are annotated — the symoff regression would have
+  collapsed them onto one.
+- **Replay of a 150 k-sample x86 session**: all 12 events, 324–992 functions
+  each, **every source file resolved**, 26 threads. Session metadata reports
+  `0.10.0`, so the hardcoded-version bug stays fixed.
+- **No empty sessions.** Roughly a dozen reconnects across the pass created
+  exactly one session directory. The 332 empty directories in the sessions tree
+  are all dated 2026-08-14, i.e. pre-existing debris from the bug 0.9.0 fixed.
+- Opt-in disk and thread metrics stream on this bed for the first time;
+  metrics history is correctly spaced (143 points, median gap 2.05 s); MCP's 19
+  tools work against hybrid hardware and `perflens_status` reports all twelve
+  PMU-qualified names.
+- LXC metric leakage is **unchanged, not worse**: 24 host cores are reported
+  against a 4-CPU cpuset, but the four saturated indices are exactly the
+  cpuset's (4, 20, 22, 23), and memory is container-correct via lxcfs.
+
+### The finding: both export endpoints ignore `event` for two of three formats
+
+**`/api/live/export` and `/api/sessions/<id>/export` silently ignore the
+`event` parameter when `format` is `collapsed` or `json`.** `svg` is correct.
+
+The `collapsed` case is the damaging one: it merges every event into a single
+profile. On the x86 capture the exported stack counts total **364,536**, which
+is the exact sum of all twelve events; the largest single event is 48,200. A
+flamegraph built from that file adds cycles, instructions, cache-misses and
+branch-misses together. `json` is misleading rather than wrong — it returns
+`per_event` for *all* events, correctly keyed, so no data is corrupted, but the
+caller who asked for one event gets a 34 MB blob of twelve. A **bogus event
+name returns 200** on both.
+
+The mechanism is visible in `_export_response` (`web.py`): the `collapsed`
+branch calls `export_collapsed(all_samples)` with no event at all, the `json`
+branch calls `build_per_event_data` over `get_event_types(all_samples)`, and
+only the `svg` branch calls `filter_samples_by_event` — which is also why it
+alone 404s on an event with no samples.
+
+This is **not a 0.10.0 regression**; it predates the release. It survived
+because the 0.9.0 device pass recorded `live_export: collapsed / json / svg all
+200` — status codes, not content. That is the same lesson as the symoff bug one
+level further in: assert the answer is *right*, not merely non-empty.
+
+Related, smaller, and worth fixing alongside it: a bare `cycles` is resolved
+inconsistently. `/api/snapshot` rejects it with 400 `ambiguous_event`, while
+the SVG export path silently merges both PMUs (19,255 + 6,883 = 26,138 samples)
+under a title that reads `cycles`. An empty `event=` returns a 65-byte SVG
+with a 200.
+
+### Also observed
+
+- **The session listing can advertise event names the replay does not use.**
+  Metadata is frozen at capture time, while replay re-parses the stored chunks
+  with the current parser. The 0.9.0 import session still lists
+  `cpu_atom/cycles/P` (the raw `perf script` text genuinely contains the `/P`
+  precise-level modifier), but replaying it yields `cpu_atom/cycles/`. The
+  parser now normalizes the modifier; the frozen metadata does not.
+- **`perf.data` import from either device remains blocked** by the version gap
+  (controller `perf` 6.14.11, both devices 7.0.12). PerfLens surfaces perf's
+  own error cleanly as `import_failed`. Known limitation, unchanged.
+- Session metadata is written when the session *ends*, not on `stop`, so a
+  session is absent from `/api/sessions` until the agent disconnects. By
+  design, but easy to mistake for a lost capture.
+- The 32-bit ARM agent on the ARM bed (`~/bin/perflens-a32`) was **not**
+  upgraded and is still 0.8.0; armv7 under 0.10.0 is untested.
 
 ## Previous phase — 0.9.0 released: the hands-on validation pass
 
@@ -291,7 +571,9 @@ deliberate exception to the agent freeze.
       "should" is doing real work in that sentence. Needs a multi-hour
       unattended run to confirm; at 3 MB/min it would be ~180 MB/hour if it
       does not.
-- [ ] **Big-endian is built but never executed.** All five release targets
+- [x] **Big-endian is built but never executed.** *(Closed 2026-08-28 — see
+      the 2026-08-28 pass. The static analysis below held up exactly: the
+      wire path was correct. The build flags were not.)* All five release targets
       compile clean, including `armeb` and `aarch64_be` (musl toolchains,
       see the note below). Static analysis is reassuring — the framing uses
       `htonl`/`ntohl` against the server's `struct '!IB'`, payloads are
@@ -353,7 +635,7 @@ invocations, are in `~/.perflens-testbeds/config.yaml`.
       and 13 perf-stat counters correctly merged across rounds by
       `split_perf_data`.
 - [x] **32-bit ARM end to end.** The aarch64 kernel has `CONFIG_COMPAT=y`,
-      and the static-pie armv7 agent needs no armhf runtime — which is the
+      and the statically linked armv7 agent needs no armhf runtime — which is the
       case the zero-dependency design exists for. Results were
       indistinguishable from the 64-bit agent: 366k samples, 464 functions,
       26 threads, 31/31 source files, `matrix_multiply.c` L14/L15 at
