@@ -2,6 +2,7 @@
 
 import dataclasses
 import os
+import shutil
 import sys
 from typing import Optional
 
@@ -82,7 +83,21 @@ def probe_tools(cfg):
     if cfg.addr2line_bin and os.path.isfile(cfg.addr2line_bin):
         print(f"[server]   addr2line: {cfg.addr2line_bin} (user-provided)",
               file=sys.stderr)
+    elif cfg.addr2line_bin and shutil.which(cfg.addr2line_bin):
+        # A bare name, which is what --toolchain-prefix produces. Resolve it
+        # on PATH instead of discarding it: os.path.isfile() is False for a
+        # relative name, so this used to fall through and overwrite the cross
+        # tool with the host's addr2line — silently symbolizing a big-endian
+        # binary with an x86_64 tool, logged only as "(system)". readelf
+        # below already did this; addr2line was the asymmetric half, and it
+        # is the one that resolves the source lines.
+        cfg.addr2line_bin = shutil.which(cfg.addr2line_bin)
+        print(f"[server]   addr2line: {cfg.addr2line_bin} (toolchain)",
+              file=sys.stderr)
     else:
+        if cfg.addr2line_bin:
+            print(f"[server]   addr2line: {cfg.addr2line_bin} (NOT FOUND, "
+                  f"falling back to system)", file=sys.stderr)
         # Prefer llvm-addr2line: GNU-compatible flags, but dramatically
         # faster on GB-scale DWARF (lazy index vs full scan). If neither
         # variant is on PATH or in ~/.perflens/bin, try downloading the
@@ -112,7 +127,6 @@ def probe_tools(cfg):
               file=sys.stderr)
     elif cfg.readelf_bin:
         # Toolchain-derived name — resolve it on PATH
-        import shutil
         found = shutil.which(cfg.readelf_bin)
         if found:
             cfg.readelf_bin = found
