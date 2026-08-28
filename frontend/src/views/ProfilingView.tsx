@@ -132,6 +132,17 @@ export default function ProfilingView({ active }: { active: boolean }) {
   const sourceFiles = entry?.source_files ?? [];
   const hasSource = sourceFiles.some((f) => f.found);
 
+  // A target whose perf was built without libelf names nothing in userspace.
+  // Without this the operator just sees a profile full of [unknown] and has
+  // no way to tell that apart from a PerfLens bug.
+  const symChunkCount = useLive((st) => st.chunkCount);
+  const indexQuery = useQuery({
+    queryKey: ['index-status', symChunkCount, replaySessionId],
+    queryFn: () => api.indexStatus(),
+  });
+  const sym = indexQuery.data?.symbolization;
+  const symDegraded = sym?.mode === 'degraded' && !!sym?.detail;
+
   const showSourceForFunction = (funcName: string) => {
     const embedded = entry?.source as
       Record<string, { samples: number }[]> | undefined;
@@ -239,6 +250,11 @@ export default function ProfilingView({ active }: { active: boolean }) {
 
       <div id="source-banner" className={entry && !hasSource ? 'visible' : ''}>
         Source view unavailable &mdash; start server with <code>--binary</code> to enable
+      </div>
+
+      <div id="symbol-banner" className={symDegraded ? 'visible' : ''}
+           data-testid="symbol-banner">
+        {sym?.detail}
       </div>
 
       <div id="tabs" role="tablist" aria-label="Profile views">

@@ -216,6 +216,25 @@ class SourceResponse(BaseModel):
 # Index / metrics / browse
 # ---------------------------------------------------------------------------
 
+class SymbolizationStatus(BaseModel):
+    """How many userspace frames are named, and by whom.
+
+    A target whose `perf` was built without libelf resolves kernel frames
+    from kallsyms but returns `[unknown]` for every userspace frame, however
+    good the binary is. The server can recover the name from the address
+    when it holds a matching unstripped build, so this reports the outcome —
+    an unnamed profile should read as a diagnosable condition, not as a
+    PerfLens bug.
+    """
+    model_config = ConfigDict(extra='allow')
+    userspace_frames: int = 0
+    unknown_frames: int = 0
+    resolved_frames: int = 0        # recovered server-side from the address
+    named_pct: float = 100.0
+    mode: Literal['idle', 'device', 'server', 'degraded'] = 'idle'
+    detail: str = ''
+
+
 class IndexStatus(BaseModel):
     model_config = ConfigDict(extra='allow')
     indexing: bool = False
@@ -229,6 +248,9 @@ class IndexStatus(BaseModel):
     dwarf_total: int = 0
     dwarf_source_files: list[str] = []
     dwarf_truncated: bool = False
+    # Userspace frame naming for the current session (see SymbolizationStatus)
+    symbolization: SymbolizationStatus = Field(
+        default_factory=SymbolizationStatus)
 
 
 class IndexFilesResponse(BaseModel):
@@ -401,6 +423,7 @@ class ConfigState(BaseModel):
     binary: Optional[str] = None
     source_dir: str
     path_map: Optional[dict[str, str]] = None
+    module_map: Optional[dict[str, str]] = None
     addr2line: Optional[str] = None
     readelf: Optional[str] = None
     sysroot: Optional[str] = None
@@ -415,6 +438,7 @@ class ConfigUpdate(BaseModel):
     binary: Optional[str] = None
     source_dir: Optional[str] = None
     path_map: Optional[dict[str, str]] = None
+    module_map: Optional[dict[str, str]] = None
     toolchain_prefix: Optional[str] = None
     sysroot: Optional[str] = None
 

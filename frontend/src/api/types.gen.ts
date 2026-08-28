@@ -110,8 +110,8 @@ export interface paths {
         head?: never;
         /**
          * Api Config Patch
-         * @description Update binary / source dir / path map / toolchain / sysroot in one
-         *     request; the source mapper rebuilds once.
+         * @description Update binary / source dir / path map / module map / toolchain /
+         *     sysroot in one request; the source mapper rebuilds once.
          */
         patch: operations["api_config_patch_api_config_patch"];
         trace?: never;
@@ -588,6 +588,10 @@ export interface components {
              * @default true
              */
             inline: boolean;
+            /** Module Map */
+            module_map?: {
+                [key: string]: string;
+            } | null;
             /** Path Map */
             path_map?: {
                 [key: string]: string;
@@ -608,6 +612,10 @@ export interface components {
         ConfigUpdate: {
             /** Binary */
             binary?: string | null;
+            /** Module Map */
+            module_map?: {
+                [key: string]: string;
+            } | null;
             /** Path Map */
             path_map?: {
                 [key: string]: string;
@@ -817,6 +825,7 @@ export interface components {
              * @default false
              */
             source_index_ready: boolean;
+            symbolization?: components["schemas"]["SymbolizationStatus"];
             /**
              * Symbols Loaded
              * @default 0
@@ -1068,6 +1077,52 @@ export interface components {
             reason?: string | null;
             /** Stopped */
             stopped: boolean;
+        };
+        /**
+         * SymbolizationStatus
+         * @description How many userspace frames are named, and by whom.
+         *
+         *     A target whose `perf` was built without libelf resolves kernel frames
+         *     from kallsyms but returns `[unknown]` for every userspace frame, however
+         *     good the binary is. The server can recover the name from the address
+         *     when it holds a matching unstripped build, so this reports the outcome —
+         *     an unnamed profile should read as a diagnosable condition, not as a
+         *     PerfLens bug.
+         */
+        SymbolizationStatus: {
+            /**
+             * Detail
+             * @default
+             */
+            detail: string;
+            /**
+             * Mode
+             * @default idle
+             * @enum {string}
+             */
+            mode: "idle" | "device" | "server" | "degraded";
+            /**
+             * Named Pct
+             * @default 100
+             */
+            named_pct: number;
+            /**
+             * Resolved Frames
+             * @default 0
+             */
+            resolved_frames: number;
+            /**
+             * Unknown Frames
+             * @default 0
+             */
+            unknown_frames: number;
+            /**
+             * Userspace Frames
+             * @default 0
+             */
+            userspace_frames: number;
+        } & {
+            [key: string]: unknown;
         };
         /** ThreadRef */
         ThreadRef: {

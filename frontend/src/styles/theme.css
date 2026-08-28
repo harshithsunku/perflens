@@ -571,7 +571,22 @@ main {
 .live-cpu { font-family: var(--font-mono); }
 .live-cpu.live-hot { color: var(--error); }
 
-/* --- Source banner --- */
+/* --- Source / symbol banners --- */
+/* Shares the source banner's look: same class of message (a capability is
+   missing and here is what to do about it), so it should not read as a
+   different kind of alert. */
+#symbol-banner {
+    background: var(--warning-muted);
+    color: var(--text-secondary);
+    padding: 8px 16px;
+    font-size: 12px;
+    border-left: 3px solid var(--warning);
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+    margin-bottom: 14px;
+    display: none;
+}
+#symbol-banner.visible { display: block; }
+
 #source-banner {
     background: var(--warning-muted);
     color: var(--text-secondary);

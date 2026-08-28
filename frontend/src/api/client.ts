@@ -28,6 +28,7 @@ export type ConnectResponse = Schemas['ConnectResponse'];
 export type AgentInfo = Schemas['AgentInfo'];
 export type MetricsFrame = Schemas['MetricsFrame'];
 export type IndexStatus = Schemas['IndexStatus'];
+export type SymbolizationStatus = Schemas['SymbolizationStatus'];
 export type ImportResponse = Schemas['ImportResponse'];
 export type ConfigState = Schemas['ConfigState'];
 export type ConfigUpdate = Schemas['ConfigUpdate'];

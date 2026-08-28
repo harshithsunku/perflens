@@ -271,7 +271,10 @@ def api_session_replay(session_id: str, request: Request, ctx=Ctx):
     # written by older servers regenerate instead of serving stale shapes.
     cache_path = os.path.join(session_dir, 'replay_cache.json.gz')
     cache_key = {
-        'schema': 2,
+        # 3: frames the target's perf left as [unknown] are now named
+        # server-side, which changes the body without changing any input
+        # below -- so the bump is what stops stale blobs being served.
+        'schema': 3,
         'chunks': len(sessions.session_chunk_files(session_dir)),
         'binary': ctx.config.binary_path,
         'source_dir': ctx.config.source_dir,
@@ -606,17 +609,60 @@ def api_source(request: Request, file: str, event: Optional[str] = None,
 # Index / metrics / browse / wizard
 # ---------------------------------------------------------------------------
 
+def _symbolization_status(ctx):
+    """Frame-naming outcome for /api/index/status.
+
+    Counted after server-side resolution, so `unknown_frames` is what is
+    still unnamed once the server has done what it can.
+    """
+    mapper = ctx.state.source_mapper
+    st = (mapper.symbolization_stats() if mapper else
+          {'userspace_frames': 0, 'unknown_frames': 0, 'resolved_frames': 0})
+    total = st['userspace_frames']
+    unknown = st['unknown_frames']
+    resolved = st['resolved_frames']
+    named = total - unknown
+
+    if not total:
+        mode, detail = 'idle', ''
+    elif unknown == 0:
+        mode = 'server' if resolved else 'device'
+        detail = (f'{resolved:,} frames named here from their address'
+                  if resolved else '')
+    elif named == 0:
+        mode = 'degraded'
+        detail = ("This target's perf cannot resolve userspace symbols. "
+                  "Point --binary at the matching unstripped build "
+                  "(--module-map for shared objects) to name them here.")
+    else:
+        mode = 'server' if resolved else 'degraded'
+        detail = (f'{unknown:,} of {total:,} userspace frames unnamed '
+                  f'— supply the matching unstripped binary to resolve them.')
+
+    return {
+        'userspace_frames': total,
+        'unknown_frames': unknown,
+        'resolved_frames': resolved,
+        'named_pct': round(named * 100.0 / total, 1) if total else 100.0,
+        'mode': mode,
+        'detail': detail,
+    }
+
+
 @router.get('/api/index/status', response_model=models.IndexStatus)
 def api_index_status(ctx=Ctx):
     mapper = ctx.state.source_mapper
     if mapper:
-        return _json(mapper.get_index_status())
+        status = mapper.get_index_status()
+        status['symbolization'] = _symbolization_status(ctx)
+        return _json(status)
     # Same keys as get_index_status(), so a client never has to tell a
     # missing mapper apart from an unindexed one by which fields exist.
     return _json({'indexing': False, 'symbols_loaded': 0,
                   'source_files_found': 0, 'source_index_ready': False,
                   'source_index_files': 0, 'dwarf_total': 0,
-                  'dwarf_source_files': [], 'dwarf_truncated': False})
+                  'dwarf_source_files': [], 'dwarf_truncated': False,
+                  'symbolization': _symbolization_status(ctx)})
 
 
 @router.get('/api/index/files', response_model=models.IndexFilesResponse)
@@ -790,6 +836,7 @@ def _config_state(ctx):
         'binary': cfg.binary_path,
         'source_dir': cfg.source_dir,
         'path_map': cfg.path_map,
+        'module_map': cfg.module_map,
         'addr2line': cfg.addr2line_bin,
         'readelf': cfg.readelf_bin,
         'sysroot': cfg.sysroot,
@@ -826,6 +873,9 @@ def _config_patch_impl(ctx, body: models.ConfigUpdate):
 
     if body.path_map is not None:
         cfg.path_map = body.path_map or None
+
+    if body.module_map is not None:
+        cfg.module_map = body.module_map or None
 
     if body.toolchain_prefix is not None:
         prefix = body.toolchain_prefix.strip()
@@ -868,8 +918,8 @@ def api_config_get(ctx=Ctx):
 @router.patch('/api/config', response_model=models.ConfigState,
               responses={400: _ERR})
 async def api_config_patch(body: models.ConfigUpdate, ctx=Ctx):
-    """Update binary / source dir / path map / toolchain / sysroot in one
-    request; the source mapper rebuilds once."""
+    """Update binary / source dir / path map / module map / toolchain /
+    sysroot in one request; the source mapper rebuilds once."""
     # Mapper recreation touches disk (persisted index) — threadpool
     return await run_in_threadpool(_config_patch_impl, ctx, body)
 

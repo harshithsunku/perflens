@@ -277,6 +277,20 @@
             "title": "Inline",
             "type": "boolean"
           },
+          "module_map": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Module Map"
+          },
           "path_map": {
             "anyOf": [
               {
@@ -338,6 +352,20 @@
               }
             ],
             "title": "Binary"
+          },
+          "module_map": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Module Map"
           },
           "path_map": {
             "anyOf": [
@@ -842,6 +870,9 @@
             "default": false,
             "title": "Source Index Ready",
             "type": "boolean"
+          },
+          "symbolization": {
+            "$ref": "#/components/schemas/SymbolizationStatus"
           },
           "symbols_loaded": {
             "default": 0,
@@ -1358,6 +1389,50 @@
           "stopped"
         ],
         "title": "StopResponse",
+        "type": "object"
+      },
+      "SymbolizationStatus": {
+        "additionalProperties": true,
+        "description": "How many userspace frames are named, and by whom.\n\nA target whose `perf` was built without libelf resolves kernel frames\nfrom kallsyms but returns `[unknown]` for every userspace frame, however\ngood the binary is. The server can recover the name from the address\nwhen it holds a matching unstripped build, so this reports the outcome \u2014\nan unnamed profile should read as a diagnosable condition, not as a\nPerfLens bug.",
+        "properties": {
+          "detail": {
+            "default": "",
+            "title": "Detail",
+            "type": "string"
+          },
+          "mode": {
+            "default": "idle",
+            "enum": [
+              "idle",
+              "device",
+              "server",
+              "degraded"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "named_pct": {
+            "default": 100.0,
+            "title": "Named Pct",
+            "type": "number"
+          },
+          "resolved_frames": {
+            "default": 0,
+            "title": "Resolved Frames",
+            "type": "integer"
+          },
+          "unknown_frames": {
+            "default": 0,
+            "title": "Unknown Frames",
+            "type": "integer"
+          },
+          "userspace_frames": {
+            "default": 0,
+            "title": "Userspace Frames",
+            "type": "integer"
+          }
+        },
+        "title": "SymbolizationStatus",
         "type": "object"
       },
       "ThreadRef": {
@@ -1883,7 +1958,7 @@
         "summary": "Api Config Get"
       },
       "patch": {
-        "description": "Update binary / source dir / path map / toolchain / sysroot in one\nrequest; the source mapper rebuilds once.",
+        "description": "Update binary / source dir / path map / module map / toolchain /\nsysroot in one request; the source mapper rebuilds once.",
         "operationId": "api_config_patch_api_config_patch",
         "requestBody": {
           "content": {

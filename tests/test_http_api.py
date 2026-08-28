@@ -15,7 +15,12 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from conftest import REPO, materialize_fixture_session, fixture_session_names
+from conftest import (REPO, materialize_fixture_session,
+                      fixture_session_names)
+
+# Must track web.py's replay cache_key. Bumped whenever the replay body
+# changes shape or content without any other cache_key input changing.
+REPLAY_CACHE_SCHEMA = 3
 
 FIXTURE = fixture_session_names()[0]
 
@@ -203,8 +208,24 @@ def test_index_status_shape_is_the_same_without_a_mapper(client):
     body = client.get('/api/index/status').json()
     for key in ('indexing', 'symbols_loaded', 'source_files_found',
                 'source_index_ready', 'source_index_files', 'dwarf_total',
-                'dwarf_source_files', 'dwarf_truncated'):
+                'dwarf_source_files', 'dwarf_truncated', 'symbolization'):
         assert key in body, f'{key} missing from the no-mapper fallback'
+
+
+def test_symbolization_status_is_reported(client):
+    """An unnamed profile must be diagnosable, not silently blank.
+
+    Without this an operator sees a flame graph made entirely of [unknown]
+    and has no way to tell a PerfLens bug from a target whose perf was
+    built without libelf.
+    """
+    sym = client.get('/api/index/status').json()['symbolization']
+    for key in ('userspace_frames', 'unknown_frames', 'resolved_frames',
+                'named_pct', 'mode', 'detail'):
+        assert key in sym, f'{key} missing from symbolization status'
+    # No samples ingested by this fixture, so nothing to claim either way.
+    assert sym['mode'] == 'idle'
+    assert sym['userspace_frames'] == 0
 
 
 @pytest.mark.skipif(not (shutil.which('gcc') and shutil.which('readelf')),
@@ -289,6 +310,22 @@ def test_config_patch_pathmap(client, core):
     assert core.config.path_map == {'/build': '/src'}
     assert client.patch('/api/config',
                         json={'path_map': {}}).json()['path_map'] is None
+
+
+def test_config_patch_module_map(client, core, tmp_path):
+    """--module-map must be settable at runtime, like path_map.
+
+    It is the escape hatch for a device path that exists nowhere locally,
+    which is the normal case for a firmware image.
+    """
+    body = client.patch('/api/config',
+                        json={'module_map': {'/opt/fw/app': '/build/app.sym'}})
+    assert body.status_code == 200
+    assert body.json()['module_map'] == {'/opt/fw/app': '/build/app.sym'}
+    assert core.config.module_map == {'/opt/fw/app': '/build/app.sym'}
+    # Explicit empty clears it, matching path_map
+    assert client.patch('/api/config',
+                        json={'module_map': {}}).json()['module_map'] is None
 
 
 def test_config_patch_toolchain(client, core, tmp_path):
@@ -382,13 +419,13 @@ def test_session_replay_and_cache(client, core, session_id):
     assert entry['flamegraph']['value'] > 0
     assert 'threads' in entry
 
-    # Replay cache written with the schema-2 key; second call returns the
+    # Replay cache written with the current schema key; second call returns the
     # same payload
     cache = os.path.join(core.config.sessions_dir, session_id,
                          'replay_cache.json.gz')
     assert os.path.isfile(cache)
     with gzip_mod.open(cache, 'rt') as f:
-        assert json.load(f)['key']['schema'] == 2
+        assert json.load(f)['key']['schema'] == REPLAY_CACHE_SCHEMA
     assert client.get(f'/api/sessions/{session_id}').json() == body
 
 
@@ -401,7 +438,7 @@ def test_session_replay_stale_cache_regenerates(client, core, session_id):
     body = client.get(f'/api/sessions/{session_id}').json()
     assert 'bogus' not in body['per_event']
     with gzip_mod.open(cache, 'rt') as f:
-        assert json.load(f)['key']['schema'] == 2
+        assert json.load(f)['key']['schema'] == REPLAY_CACHE_SCHEMA
 
 
 def test_session_replay_not_found(client):

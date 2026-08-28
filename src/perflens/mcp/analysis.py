@@ -85,6 +85,11 @@ def register(mcp, client):
                 'source_index_ready': bool(index.get('source_index_ready')),
                 'indexing': bool(index.get('indexing')),
             },
+            # Measured frame naming, unlike the counters above. A target
+            # whose perf was built without libelf names nothing in
+            # userspace, and this is how an agent can tell that apart from
+            # a server misconfiguration.
+            'symbolization': index.get('symbolization', {}),
         }
 
         agent = (f"connected ({data['agent_addr']})"
@@ -104,14 +109,27 @@ def register(mcp, client):
             f"{data['source_mapping']['source_index_files']:,} files in the "
             f"source index",
         ]
+        # Frame naming, measured rather than inferred. The counters above
+        # only reflect the eager pre-index pass, so they cannot decide this.
+        sym = data['symbolization']
+        if sym.get('userspace_frames'):
+            lines.append(
+                f"- Frame naming: {sym.get('named_pct', 0)}% of "
+                f"{sym['userspace_frames']:,} userspace frames named"
+                + (f" ({sym.get('resolved_frames', 0):,} resolved by the "
+                   f"server from their address)"
+                   if sym.get('resolved_frames') else ''))
         if not data['live_samples'] and data['saved_sessions']:
             lines.append('')
             lines.append('_No live data — analyse a saved session by passing '
                          'its id as `source`._')
+        if sym.get('detail') and sym.get('mode') == 'degraded':
+            lines.append('')
+            lines.append(f"_{sym['detail']}_")
         # Only claim source annotation is unavailable when nothing at all is
         # resolvable. Warning on symbols_loaded alone told an agent to skip
         # `perflens_source_hotlines` on servers where it works fine.
-        if (not data['source_mapping']['symbols_loaded']
+        elif (not data['source_mapping']['symbols_loaded']
                 and not data['source_mapping']['source_index_files']):
             lines.append('')
             lines.append('_No symbols loaded: line-level source annotation '
