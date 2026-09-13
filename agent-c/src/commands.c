@@ -40,19 +40,21 @@ static void cmd_status(struct agent_state *a, const char *cmd_id,
     default:              state_str = "idle";       break;
     }
 
-    char esc_pv[256];
+    char esc_pv[256], esc_path[PERF_PATH_MAX * 2];
     json_escape(esc_pv, sizeof(esc_pv), a->platform.perf_version);
+    json_escape(esc_path, sizeof(esc_path), g_perf);
 
-    char resp[4096];
+    char resp[4096 + sizeof(esc_path)];
     int n = snprintf(resp, sizeof(resp),
         "{\"id\":\"%s\",\"ok\":true,\"state\":\"%s\",\"pid\":%d,"
         "\"frequency\":%d,\"duration\":%d,"
         "\"agent_version\":\"" AGENT_VERSION "\","
         "\"platform\":{\"arch\":\"%s\",\"kernel\":\"%s\","
-        "\"perf_version\":\"%s\",\"perf_event_paranoid\":%d}",
+        "\"perf_version\":\"%s\",\"perf_path\":\"%s\","
+        "\"perf_event_paranoid\":%d}",
         cmd_id, state_str, pid, freq, dur,
         a->platform.arch, a->platform.kernel,
-        esc_pv, a->platform.perf_event_paranoid);
+        esc_pv, esc_path, a->platform.perf_event_paranoid);
 
     if (a->caps) {
         n += snprintf(resp + n, sizeof(resp) - (size_t)n,
@@ -182,9 +184,54 @@ static void cmd_verify_pid(struct agent_state *a, const char *cmd_id,
 static void cmd_verify_perf(struct agent_state *a, const char *cmd_id,
                             const char *json)
 {
-    (void)json;
+    /* args.perf points the agent at a perf outside PATH. Adopting it changes
+     * the binary every later probe and collection runs, and the probed
+     * capabilities belong to the old one, so it is refused mid-collection
+     * exactly as reprobe is. A candidate that fails validation leaves the
+     * current perf in place and says why. */
+    const char *args = json_find_object(json, "args");
+    char want[PERF_PATH_MAX + 1] = "";
+    char adopt_err[PERF_PATH_MAX + 128] = "";
+    if (args && json_get_str(args, "perf", want, sizeof(want)) == 0 &&
+        want[0] && strcmp(want, g_perf) != 0) {
+        pthread_mutex_lock(&a->state_lock);
+        int busy = a->state == AGENT_PROFILING || a->state == AGENT_PAUSED;
+        pthread_mutex_unlock(&a->state_lock);
+        if (busy) {
+            char resp[256];
+            snprintf(resp, sizeof(resp),
+                "{\"id\":\"%s\",\"ok\":false,"
+                "\"error\":\"cannot change perf while profiling — stop first\"}",
+                cmd_id);
+            agent_send_response(a, resp);
+            return;
+        }
+        if (perf_use(want, adopt_err, sizeof(adopt_err)) == 0) {
+            agent_log("Using perf: %s", g_perf);
+            detect_platform(&a->platform);
+            if (a->caps) {
+                free_capabilities(a->caps);
+                free(a->caps);
+                a->caps = NULL;
+            }
+        }
+    }
 
-    char *argv[] = { PERF, "--version", NULL };
+    char esc_path[PERF_PATH_MAX * 2];
+    json_escape(esc_path, sizeof(esc_path), g_perf);
+
+    if (adopt_err[0]) {
+        char esc_adopt[sizeof(adopt_err) * 2];
+        json_escape(esc_adopt, sizeof(esc_adopt), adopt_err);
+        char resp[sizeof(esc_adopt) + sizeof(esc_path) + 128];
+        snprintf(resp, sizeof(resp),
+            "{\"id\":\"%s\",\"ok\":true,\"available\":false,"
+            "\"path\":\"%s\",\"error\":\"%s\"}", cmd_id, esc_path, esc_adopt);
+        agent_send_response(a, resp);
+        return;
+    }
+
+    char *argv[] = { g_perf, "--version", NULL };
     struct buf out;
     buf_init(&out);
     int rc = run_cmd(argv, &out, NULL, 5);
@@ -201,10 +248,10 @@ static void cmd_verify_perf(struct agent_state *a, const char *cmd_id,
     buf_free(&out);
 
     if (!version[0]) {
-        char resp[512];
+        char resp[sizeof(esc_path) + 256];
         snprintf(resp, sizeof(resp),
-            "{\"id\":\"%s\",\"ok\":true,\"available\":false,"
-            "\"error\":\"perf not found or not working\"}", cmd_id);
+            "{\"id\":\"%s\",\"ok\":true,\"available\":false,\"path\":\"%s\","
+            "\"error\":\"perf not found or not working\"}", cmd_id, esc_path);
         agent_send_response(a, resp);
         return;
     }
@@ -213,7 +260,7 @@ static void cmd_verify_perf(struct agent_state *a, const char *cmd_id,
     int self_pid = (int)getpid();
     char pid_str[16];
     snprintf(pid_str, sizeof(pid_str), "%d", self_pid);
-    char *argv_check[] = { PERF, "stat", "-e", "cycles", "-p", pid_str,
+    char *argv_check[] = { g_perf, "stat", "-e", "cycles", "-p", pid_str,
                            "--", "sleep", "0", NULL };
     struct buf errbuf;
     buf_init(&errbuf);
@@ -232,21 +279,21 @@ static void cmd_verify_perf(struct agent_state *a, const char *cmd_id,
     json_escape(esc_version, sizeof(esc_version), version);
     json_escape(esc_err, sizeof(esc_err), err_msg);
 
-    char resp[1024];
+    char resp[1024 + sizeof(esc_path)];
     if (err_msg[0]) {
         snprintf(resp, sizeof(resp),
-            "{\"id\":\"%s\",\"ok\":true,\"available\":true,"
+            "{\"id\":\"%s\",\"ok\":true,\"available\":true,\"path\":\"%s\","
             "\"version\":\"%s\",\"functional\":%s,"
             "\"error\":\"%s\",\"perf_event_paranoid\":%d}",
-            cmd_id, esc_version,
+            cmd_id, esc_path, esc_version,
             functional ? "true" : "false",
             esc_err, a->platform.perf_event_paranoid);
     } else {
         snprintf(resp, sizeof(resp),
-            "{\"id\":\"%s\",\"ok\":true,\"available\":true,"
+            "{\"id\":\"%s\",\"ok\":true,\"available\":true,\"path\":\"%s\","
             "\"version\":\"%s\",\"functional\":%s,"
             "\"error\":null,\"perf_event_paranoid\":%d}",
-            cmd_id, esc_version,
+            cmd_id, esc_path, esc_version,
             functional ? "true" : "false",
             a->platform.perf_event_paranoid);
     }

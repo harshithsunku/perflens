@@ -98,6 +98,11 @@ what is open.
   requests — no per-request forking.
 - The agent probes supported perf events and call-graph modes (`fp`, `dwarf`,
   `lbr`) on the target before collecting, and uses whichever works.
+- The agent runs `perf` from `PATH` unless told otherwise: `--perf` /
+  `PERFLENS_PERF` at launch, or `verify_perf {"perf": ...}` at runtime (the
+  wizard's Perf Capabilities field, the control bar's settings, and
+  `perflens_agent_connect(perf_path=)`). Adopting a new perf drops the probed
+  capabilities, so the next `start` re-probes with it.
 - Collection prefers continuous pipe mode (`perf record -o - | perf script
   -i -`, probed at startup): one long-lived pipeline with no sampling dead
   time, symbol tables parsed once, output cut into chunks every `duration`
@@ -312,6 +317,8 @@ Options:
 --token SECRET        Pairing code the server must present (or PERFLENS_TOKEN).
                       Generated and logged in --listen mode if not given.
                       Never sent over the wire.
+--perf PATH           perf binary to run (or PERFLENS_PERF; default: perf from
+                      PATH). Also settable at runtime via verify_perf {perf}.
 --update              Self-update from latest GitHub release, then exit
 --version             Print version and exit
 ```
@@ -341,6 +348,13 @@ Options:
   mode required to actually carry call chains rather than merely produce
   output. Same pass, outside the agent: the `armeb` target must be built
   soft-float and with `-march=armv7-a`, or it is `SIGILL` on real hardware.
+
+  **The fifth, on 2026-09-13**, did not change the wire protocol either:
+  `--perf PATH` / `PERFLENS_PERF`, plus an optional `perf` argument to
+  `verify_perf` so the server can point a running agent at a perf outside
+  `PATH` (a candidate must print `perf version`, and is refused
+  mid-collection). `status` gained `platform.perf_path`; the hello
+  deliberately did not, because it goes out before authentication.
 
   **The third unfreeze, in
   0.10.0, did** — pairing-code authentication. Before it, `--listen` bound

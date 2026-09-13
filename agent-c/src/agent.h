@@ -56,7 +56,7 @@
  * -------------------------------------------------------------------------- */
 
 #define LOG_PREFIX       "[perflens-agent]"
-#define PERF             "perf"
+#define PERF_PATH_MAX    1024
 
 /* Version is injected by the Makefile (-DAGENT_VERSION=\"x.y.z\") */
 #ifndef AGENT_VERSION
@@ -325,6 +325,10 @@ int  agent_consttime_eq(const char *a, const char *b);
  * probe.c
  * -------------------------------------------------------------------------- */
 
+/* The perf binary every probe and collection runs: "perf" from PATH unless
+ * --perf, PERFLENS_PERF or verify_perf {perf} chose another. */
+extern char g_perf[PERF_PATH_MAX];
+int  perf_use(const char *path, char *err, size_t errlen);
 void detect_platform(struct platform_info *info);
 void probe_capabilities(int pid, struct capabilities *caps);
 void free_capabilities(struct capabilities *caps);

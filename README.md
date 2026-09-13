@@ -288,6 +288,7 @@ Options:
 | `--rounds N` | `1` | Number of collection rounds (`--output` mode only) |
 | `--bind ADDR` | `0.0.0.0` | Address to listen on in `--listen` mode |
 | `--token SECRET` | — | Pairing code the server must present (or `PERFLENS_TOKEN`). In `--listen` mode one is generated and logged if you don't supply it. **Never sent over the wire.** |
+| `--perf PATH` | `perf` from `PATH` | The perf binary to run (or `PERFLENS_PERF`), for targets that install it outside `PATH`. Must print `perf version`. The server can also set it on a running agent — the wizard's Perf Capabilities step and the control bar's settings both have a field |
 | `--update` | — | Self-update from the latest GitHub release, then exit |
 | `--version` | — | Print version and exit |
 

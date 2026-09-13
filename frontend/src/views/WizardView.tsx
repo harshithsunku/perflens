@@ -46,6 +46,7 @@ export default function WizardView() {
   const [caps, setCaps] = useState<Capabilities | null>(null);
   const [capsError, setCapsError] = useState<string | null>(null);
   const [capsLoading, setCapsLoading] = useState(false);
+  const [perfPath, setPerfPath] = useState(''); // '' = perf from the agent's PATH
   const [events, setEvents] = useState<string[] | null>(null); // null = all
 
   // Binary/source/toolchain
@@ -74,6 +75,7 @@ export default function WizardView() {
       if (ws.agent_port) setPort(String(ws.agent_port));
       if (ws.binary_path) setBinary(ws.binary_path);
       if (ws.source_dir) setSourceDir(ws.source_dir);
+      if (ws.perf_path) setPerfPath(ws.perf_path);
       if (ws.pid) setPid(String(ws.pid));
       if (ws.frequency) setFrequency(String(ws.frequency));
       if (ws.duration) setDuration(String(ws.duration));
@@ -129,17 +131,20 @@ export default function WizardView() {
     setPerfResult(null);
     setCaps(null);
     setCapsError(null);
-    api.agentCommand('verify_perf').then((data) => {
+    const path = perfPath.trim();
+    api.agentCommand('verify_perf', path ? { perf: path } : {}).then((data) => {
       if (!data.ok && data.error) {
         setPerfResult({ html: <span className="wiz-err">Error: {String(data.error)}</span> });
         return;
       }
       const paranoid = data.perf_event_paranoid as number | undefined;
       if (data.available) {
+        if (path) api.saveWizardState({ perf_path: path }).catch(() => {});
         setPerfResult({
           html: (
             <>
-              <div className="wiz-ok">&#10003; perf found: {String(data.version || '?')}</div>
+              <div className="wiz-ok">&#10003; perf found: {String(data.version || '?')}
+                {data.path ? <> (<code>{String(data.path)}</code>)</> : null}</div>
               {data.functional
                 ? <div className="wiz-ok">&#10003; perf is functional</div>
                 : <div className="wiz-err">&#10007; perf stat check failed:{' '}
@@ -154,8 +159,14 @@ export default function WizardView() {
         if (data.functional) probeCapabilities();
       } else {
         setPerfResult({
-          html: <div className="wiz-err">&#10007; perf not found:{' '}
-            {String(data.error || 'not available')}</div>,
+          html: (
+            <>
+              <div className="wiz-err">&#10007; perf not found:{' '}
+                {String(data.error || 'not available')}</div>
+              <p className="wiz-hint">If perf is installed outside the agent&apos;s PATH, enter
+                its full path on the device above and verify again.</p>
+            </>
+          ),
         });
       }
     }).catch((err) => {
@@ -405,6 +416,23 @@ export default function WizardView() {
           <h3>Perf Capabilities</h3>
           <p>Checking that <code>perf</code> is available on the target and probing supported
             events.</p>
+          <div className="wiz-form">
+            <div className="wiz-row">
+              <label>perf on the device</label>
+              <div className="wiz-input-row">
+                <input type="text" id="wiz-perf-path"
+                       placeholder="perf (from the agent's PATH)"
+                       value={perfPath} onChange={(e) => setPerfPath(e.target.value)} />
+                <button id="wiz-perf-verify" className="wiz-browse-btn" onClick={verifyPerf}>
+                  Verify
+                </button>
+              </div>
+            </div>
+            <p className="wiz-hint">
+              Leave blank to use <code>perf</code> from the agent&apos;s PATH. Some targets
+              install it elsewhere &mdash; give its full path as it is on the device.
+            </p>
+          </div>
           <div id="wiz-perf-result" className="wiz-result">
             {perfResult ? perfResult.html : <div className="wiz-spinner">Checking...</div>}
           </div>

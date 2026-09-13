@@ -97,6 +97,19 @@ in argv at all, which is the safest of the three.
 another machine is the point. Narrow it with `--bind 127.0.0.1` (plus an ssh
 tunnel) when you want the port unreachable from the network.
 
+### Choosing the perf binary
+
+A paired server can point the agent at a different perf with
+`verify_perf {"perf": "/path"}` — the wizard's and control bar's perf fields
+do exactly that — and the agent then runs that binary, with profiling
+arguments, until it exits. That widens what pairing grants: before it, a
+server chose *what* to profile but never *which binary* ran. The agent narrows
+it rather than trusting the path: it must be absolute (or a bare name looked up
+on `PATH`), `<path> --version` must print `perf version`, and a change is
+refused while collection is running. Those checks stop mistakes, not a hostile
+paired server — pairing is the control that matters. When the location is
+known in advance, prefer `--perf` / `PERFLENS_PERF` at launch.
+
 ---
 
 ## The web UI has no authentication

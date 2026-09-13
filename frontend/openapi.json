@@ -1682,6 +1682,11 @@
             "title": "Frequency",
             "type": "integer"
           },
+          "perf_path": {
+            "default": "",
+            "title": "Perf Path",
+            "type": "string"
+          },
           "perf_verified": {
             "default": false,
             "title": "Perf Verified",

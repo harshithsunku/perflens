@@ -769,6 +769,34 @@ def test_source_annotates_one_event(client, core):
     assert body['lines'][0]['samples'] == counts['cpu_atom/cycles/']
 
 
+def test_verify_perf_refreshes_the_agents_hello(client, core, monkeypatch):
+    """The hello is captured at connect time. A perf chosen afterwards has to
+    reach /api/agent and the device strip, or both keep saying `unknown`."""
+    class Session:
+        connected = True
+        addr = 'dev:9999'
+        hello = {'type': 'hello',
+                 'platform': {'arch': 'armv7b', 'perf_version': 'unknown'}}
+
+        def send_command(self, cmd, args, timeout=60):
+            return {'ok': True, 'available': True, 'path': args['perf'],
+                    'version': 'perf version 4.4.0', 'functional': True}
+
+    session = Session()
+    monkeypatch.setattr(core.agent, 'current', lambda: session)
+    events = []
+    monkeypatch.setattr(core, 'broadcast',
+                        lambda kind, data: events.append((kind, data)))
+
+    r = client.post('/api/agent/command', json={
+        'cmd': 'verify_perf', 'args': {'perf': '/opt/perf-4.4/bin/perf'}})
+    assert r.json()['path'] == '/opt/perf-4.4/bin/perf'
+    info = client.get('/api/agent').json()
+    assert info['hello']['platform']['perf_version'] == 'perf version 4.4.0'
+    assert ('agent', {'agent': 'dev:9999',
+                      'platform': session.hello['platform']}) in events
+
+
 def test_snapshot_gzip_negotiation(client, core):
     """Payloads >8KB gzip when the client accepts it."""
     big = {'function_summary': {'total_samples': 1,

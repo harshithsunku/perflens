@@ -64,7 +64,7 @@ char *collect_one_round(const struct capabilities *caps, const char *events,
     /* Build perf record argv */
     char *argv_rec[MAX_CMD_ARGS];
     int ri = 0;
-    argv_rec[ri++] = PERF; argv_rec[ri++] = "record";
+    argv_rec[ri++] = g_perf; argv_rec[ri++] = "record";
     argv_rec[ri++] = "-e"; argv_rec[ri++] = rec_events;
     argv_rec[ri++] = "-p"; argv_rec[ri++] = pid_str;
     argv_rec[ri++] = "-F"; argv_rec[ri++] = freq_str;
@@ -79,7 +79,7 @@ char *collect_one_round(const struct capabilities *caps, const char *events,
     /* Build perf stat argv */
     char *argv_stat[MAX_CMD_ARGS];
     int si = 0;
-    argv_stat[si++] = PERF; argv_stat[si++] = "stat";
+    argv_stat[si++] = g_perf; argv_stat[si++] = "stat";
     argv_stat[si++] = "-e"; argv_stat[si++] = all_events;
     argv_stat[si++] = "-p"; argv_stat[si++] = pid_str;
     argv_stat[si++] = "--"; argv_stat[si++] = "sleep"; argv_stat[si++] = dur_str;
@@ -200,7 +200,7 @@ char *collect_one_round(const struct capabilities *caps, const char *events,
      * text is never held in memory whole */
     char *argv_script[MAX_CMD_ARGS];
     int sci = 0;
-    argv_script[sci++] = PERF; argv_script[sci++] = "script";
+    argv_script[sci++] = g_perf; argv_script[sci++] = "script";
     if (caps->script_fields[0]) {
         argv_script[sci++] = "-F";
         argv_script[sci++] = (char *)caps->script_fields;
@@ -361,7 +361,7 @@ static void collect_pipeline_loop(struct agent_state *a)
 
         char *argv_rec[MAX_CMD_ARGS];
         int ri = 0;
-        argv_rec[ri++] = PERF; argv_rec[ri++] = "record";
+        argv_rec[ri++] = g_perf; argv_rec[ri++] = "record";
         argv_rec[ri++] = "-e"; argv_rec[ri++] = rec_events;
         argv_rec[ri++] = "-p"; argv_rec[ri++] = pid_str;
         argv_rec[ri++] = "-F"; argv_rec[ri++] = freq_str;
@@ -374,7 +374,7 @@ static void collect_pipeline_loop(struct agent_state *a)
 
         char *argv_script[8];
         int sci = 0;
-        argv_script[sci++] = PERF; argv_script[sci++] = "script";
+        argv_script[sci++] = g_perf; argv_script[sci++] = "script";
         if (caps->script_fields[0]) {
             argv_script[sci++] = "-F";
             argv_script[sci++] = (char *)caps->script_fields;
@@ -438,7 +438,7 @@ static void collect_pipeline_loop(struct agent_state *a)
                 snprintf(dur_str, sizeof(dur_str), "%d", dur);
                 char *argv_stat[MAX_CMD_ARGS];
                 int si = 0;
-                argv_stat[si++] = PERF; argv_stat[si++] = "stat";
+                argv_stat[si++] = g_perf; argv_stat[si++] = "stat";
                 argv_stat[si++] = "-e"; argv_stat[si++] = all_events;
                 argv_stat[si++] = "-p"; argv_stat[si++] = pid_str;
                 argv_stat[si++] = "--"; argv_stat[si++] = "sleep";

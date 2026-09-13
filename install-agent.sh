@@ -109,6 +109,7 @@ say ""
 say "Run it:"
 say "  ${dest} --listen                 # wait for the server to connect"
 say "  ${dest} --server <SERVER_IP>     # connect out to the server"
+say "  # add --perf /path/to/perf if perf is not on this device's PATH"
 say ""
 say "Update later with:  ${dest} --update"
 

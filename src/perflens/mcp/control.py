@@ -19,6 +19,7 @@ report "no data" when the right answer is "wait a few seconds".
 from mcp.types import ToolAnnotations
 
 from perflens.mcp import format as fmt
+from perflens.mcp.client import PerfLensError
 
 # Not read-only: these reach a real device and change what it is doing.
 # Not destructive either — nothing is deleted, and starting or stopping a
@@ -80,10 +81,13 @@ def register(mcp, client):
             'agent probes which '
             'perf events and call-graph modes work there before reporting '
             'ready. Not needed when the agent was started with --server, since '
-            'it connects in on its own.'),
+            'it connects in on its own. Pass perf_path when perf is installed '
+            'outside the PATH on the device; the agent checks that it really '
+            'is perf before using it.'),
         annotations=CONTROL,
     )
     async def perflens_agent_connect(host: str, port: int = 9999,
+                                     perf_path: str = '',
                                      response_format: str = 'markdown') -> str:
         result = await client.agent_connect(host, port)
         hello = result.get('hello') or {}
@@ -92,10 +96,20 @@ def register(mcp, client):
                 '',
                 f'- agent version: {hello.get("version") or "?"}',
                 f'- arch: {platform.get("arch") or "?"}',
-                f'- kernel: {platform.get("kernel") or "?"}',
-                '',
-                '_Next: `perflens_list_processes` to find the pid, then '
-                '`perflens_start_profiling(pid)`._']
+                f'- kernel: {platform.get("kernel") or "?"}']
+        if perf_path:
+            verified = await client.agent_command(
+                'verify_perf', {'perf': perf_path}, timeout=30)
+            if not verified.get('available'):
+                raise PerfLensError(
+                    f'Connected, but the agent did not accept perf_path '
+                    f'{perf_path!r}: {verified.get("error") or "not available"}')
+            result['perf'] = {'path': verified.get('path'),
+                              'version': verified.get('version')}
+            body.append(f'- perf: {verified.get("path")} '
+                        f'({verified.get("version") or "?"})')
+        body += ['', '_Next: `perflens_list_processes` to find the pid, then '
+                     '`perflens_start_profiling(pid)`._']
         return fmt.respond(result, '\n'.join(body), response_format)
 
     @mcp.tool(

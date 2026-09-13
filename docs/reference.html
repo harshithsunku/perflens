@@ -100,6 +100,7 @@
                 <tr><td><code>--rounds N</code></td><td><code>1</code></td><td>Number of rounds (<code>--output</code> mode).</td></tr>
                 <tr><td><code>--bind ADDR</code></td><td><code>0.0.0.0</code></td><td>Address to listen on in <code>--listen</code> mode.</td></tr>
                 <tr><td><code>--token SECRET</code></td><td>&mdash;</td><td>Pairing code the server must present before any command runs (or <code>PERFLENS_TOKEN</code>). Generated and written to the agent log in <code>--listen</code> mode when not supplied. Never sent over the wire.</td></tr>
+                <tr><td><code>--perf PATH</code></td><td><code>perf</code> from <code>PATH</code></td><td>The perf binary to run (or <code>PERFLENS_PERF</code>), for targets that install it outside <code>PATH</code>. Must print <code>perf version</code>. The server can also set it on a running agent from the wizard or the control bar.</td></tr>
                 <tr><td><code>--update</code></td><td>&mdash;</td><td>Self-update from the latest GitHub release, then exit.</td></tr>
                 <tr><td><code>--version</code></td><td>&mdash;</td><td>Print version and exit.</td></tr>
             </tbody>

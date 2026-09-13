@@ -294,6 +294,8 @@ class WizardState(BaseModel):
     agent_port: int = 9999
     connected: bool = False
     perf_verified: bool = False
+    # perf on the device, when it is not on the agent's PATH ('' = PATH)
+    perf_path: str = ''
     binary_path: str = ''
     source_dir: str = ''
     pid: Optional[int] = None

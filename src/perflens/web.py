@@ -877,6 +877,15 @@ async def api_agent_command(body: models.AgentCommandRequest, ctx=Ctx):
     error = resp.get('error') or ''
     if not resp.get('ok', True) and error.startswith(_TRANSPORT_ERRORS):
         return _err('agent_transport', error, 502)
+    if (body.cmd == 'verify_perf' and resp.get('available')
+            and resp.get('version')):
+        # A perf chosen at runtime changes what the hello reported at connect
+        # time, and /api/agent and the device strip both read the hello.
+        platform = (session.hello or {}).get('platform')
+        if isinstance(platform, dict):
+            platform['perf_version'] = resp['version']
+            ctx.broadcast('agent', {'agent': session.addr,
+                                    'platform': platform})
     return _json(resp)
 
 

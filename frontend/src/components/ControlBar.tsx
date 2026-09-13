@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api/client';
 import type { AgentCommandResult } from '../api/client';
 import { useLive } from '../store/live';
+import { useUi } from '../store/ui';
 
 interface AgentStatus extends AgentCommandResult {
   state?: string;
@@ -10,6 +11,7 @@ interface AgentStatus extends AgentCommandResult {
   duration?: number;
   events?: string[];
   agent_version?: string;
+  platform?: { perf_version?: string; perf_path?: string };
   capabilities?: {
     pipe_mode?: boolean;
     callgraph_method?: string | null;
@@ -29,6 +31,9 @@ function SettingsPop({ agent, onClose, onApplied }:
     (caps.record_events ?? []).filter(
       (e) => active.length === 0 || active.includes(e))));
   const [status, setStatus] = useState<{ text: string; cls: string }>({ text: '', cls: '' });
+  const [perf, setPerf] = useState(agent?.platform?.perf_path || 'perf');
+  const [perfStatus, setPerfStatus] =
+    useState<{ text: string; cls: string }>({ text: '', cls: '' });
 
   useEffect(() => {
     const close = () => onClose();
@@ -73,6 +78,41 @@ function SettingsPop({ agent, onClose, onApplied }:
         .then((data) => done(data.ok, data.error))
         .catch((err) => done(false, String(err)));
     }
+  };
+
+  // A different perf means different probed capabilities, and the agent will
+  // not swap it mid-collection -- so stop, adopt it, and start again on the
+  // same pid, which re-probes with the new binary. A rejected path restarts
+  // too, so a typo does not leave profiling stopped.
+  const usePerf = () => {
+    const path = perf.trim();
+    if (!path) {
+      setPerfStatus({ text: 'Enter a path', cls: 'err' });
+      return;
+    }
+    const restart = agent?.pid != null &&
+      (agent.state === 'profiling' || agent.state === 'paused');
+    setPerfStatus({ text: restart ? 'Restarting with this perf...' : 'Verifying...', cls: '' });
+    const verify = () => api.agentCommand('verify_perf', { perf: path });
+    let run: Promise<{ v: AgentCommandResult; s: AgentCommandResult | null }>;
+    if (restart) {
+      run = api.agentCommand('stop').then(verify).then((v) =>
+        api.agentCommand('start', {
+          pid: agent!.pid, frequency: agent!.frequency, duration: agent!.duration,
+        }, 180).then((s) => ({ v, s })));
+    } else {
+      run = verify().then((v) => ({ v, s: null }));
+    }
+    run.then(({ v, s }) => {
+      if (!v.ok || !v.available) {
+        setPerfStatus({ text: String(v.error || 'perf not available'), cls: 'err' });
+      } else if (s && !s.ok) {
+        setPerfStatus({ text: String(s.error || 'Restart failed'), cls: 'err' });
+      } else {
+        setPerfStatus({ text: 'Using ' + String(v.path || path), cls: 'ok' });
+      }
+      onApplied();
+    }).catch((err) => setPerfStatus({ text: String(err), cls: 'err' }));
   };
 
   return (
@@ -125,6 +165,22 @@ function SettingsPop({ agent, onClose, onApplied }:
       </div>
       <div className="msp-hint">
         Frequency and event changes restart collection; the interval applies from the next chunk.
+      </div>
+      <div className="msp-title">perf on the device</div>
+      <label className="msp-row">Path
+        <input type="text" id="csp-perf" className="csp-path"
+               title={agent?.platform?.perf_version || undefined}
+               value={perf} onChange={(e) => setPerf(e.target.value)} />
+      </label>
+      <div className="msp-actions">
+        <button id="csp-perf-use" className="wiz-btn" onClick={usePerf}>Use</button>
+        <span id="csp-perf-status" className={'msp-status ' + perfStatus.cls}>
+          {perfStatus.text}
+        </span>
+      </div>
+      <div className="msp-hint">
+        For perf installed outside the agent&apos;s PATH. Changing it restarts collection
+        and re-probes.
       </div>
     </div>
   );
@@ -214,10 +270,15 @@ export default function ControlBar() {
     }).catch(() => {});
   }, []);
 
+  // The profiling view -- and this bar with it -- stays mounted behind the
+  // wizard, and by the time the wizard starts collection both flags are
+  // already true from the connect. Re-sync whenever the view opens, or a
+  // wizard start never shows the bar until a reload.
+  const view = useUi((s) => s.view);
   useEffect(() => {
     if (connected || managedAgent) refresh();
     else setVisible(false);
-  }, [connected, managedAgent, refresh]);
+  }, [connected, managedAgent, view, refresh]);
 
   if (!visible) return null;
 

@@ -499,6 +499,45 @@ def test_export_rejects_unknown_format_and_missing_dir(core, session_id, tmp_pat
     run(go())
 
 
+def test_agent_connect_points_the_agent_at_perf_path(core, monkeypatch):
+    from perflens import agentlink
+
+    class Session:
+        connected = True
+        addr = 'dev:9999'
+        hello = {'type': 'hello', 'version': 1,
+                 'platform': {'arch': 'armv7b', 'kernel': '4.4.0',
+                              'perf_version': 'unknown'}}
+
+        def __init__(self):
+            self.sent = []
+
+        def send_command(self, cmd, args, timeout=60):
+            self.sent.append((cmd, args))
+            if args.get('perf') == '/opt/perf-4.4/bin/perf':
+                return {'ok': True, 'available': True, 'path': args['perf'],
+                        'version': 'perf version 4.4.0'}
+            return {'ok': True, 'available': False, 'path': 'perf',
+                    'error': f'{args.get("perf")}: does not identify as perf'}
+
+    session = Session()
+    monkeypatch.setattr(agentlink, 'connect_to_agent', lambda *a, **k: session)
+    monkeypatch.setattr(core.agent, 'current', lambda: session)
+
+    async def go():
+        async with Harness(core) as h:
+            data = await h.call_json('perflens_agent_connect', host='dev',
+                                     perf_path='/opt/perf-4.4/bin/perf')
+            assert data['perf'] == {'path': '/opt/perf-4.4/bin/perf',
+                                    'version': 'perf version 4.4.0'}
+            assert session.sent == [
+                ('verify_perf', {'perf': '/opt/perf-4.4/bin/perf'})]
+            message = await h.call_expect_error(
+                'perflens_agent_connect', host='dev', perf_path='/bin/true')
+            assert 'does not identify as perf' in message
+    run(go())
+
+
 # ---------------------------------------------------------------------------
 # Error mapping
 # ---------------------------------------------------------------------------

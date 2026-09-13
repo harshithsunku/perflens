@@ -13,9 +13,11 @@ import json
 import os
 import queue
 import re
+import shutil
 import socket
 import struct
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -544,6 +546,149 @@ def test_start_requires_valid_pid(harness):
     resp = harness.command('start', args={'pid': 999999999})
     assert resp['ok'] is False
     assert 'not found' in resp['error']
+
+
+# ---------------------------------------------------------------------------
+# perf outside PATH
+#
+# Some targets install perf under a vendor prefix that is not on PATH. The
+# agent takes its path from --perf / PERFLENS_PERF at startup, or from the
+# server at runtime via verify_perf {perf}.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def offpath(tmp_path, shim_dir):
+    """(perf, PATH): a perf shim under a prefix, and a PATH with no perf on it
+    at all -- only the python3 the shim itself runs on."""
+    prefix = tmp_path / 'vendor' / 'perf-4.4' / 'bin'
+    prefix.mkdir(parents=True)
+    perf = prefix / 'perf'
+    shutil.copy(shim_dir / 'perf', perf)
+    perf.chmod(0o755)
+    bindir = tmp_path / 'bin-without-perf'
+    bindir.mkdir()
+    (bindir / 'python3').symlink_to(sys.executable)
+    return str(perf), str(bindir)
+
+
+def test_perf_flag_runs_a_perf_outside_path(shim_dir, tmp_path, offpath,
+                                            target_pid):
+    perf, path = offpath
+    h = AgentHarness(shim_dir, tmp_path, agent_args=['--perf', perf],
+                     env={'PATH': path})
+    try:
+        hello = h.read_hello()
+        assert hello['platform']['perf_version'].startswith('perf version 6.99')
+        # The hello goes out before authentication; install paths stay out.
+        assert perf not in json.dumps(hello)
+        assert h.command('status')['platform']['perf_path'] == perf
+
+        resp = h.command('start', args={'pid': target_pid, 'frequency': 99,
+                                        'duration': 1}, timeout=60)
+        assert resp['ok'] is True, resp
+        assert resp['events'] == ['cycles', 'instructions']
+        h.wait_frame({FLAG_DATA_RAW, FLAG_DATA_ZSTD}, timeout=30)
+        assert h.command('stop')['ok'] is True
+    finally:
+        h.close()
+
+
+def test_perf_env_var_is_the_same_as_the_flag(shim_dir, tmp_path, offpath):
+    perf, path = offpath
+    h = AgentHarness(shim_dir, tmp_path,
+                     env={'PATH': path, 'PERFLENS_PERF': perf})
+    try:
+        hello = h.read_hello()
+        assert hello['platform']['perf_version'].startswith('perf version 6.99')
+        assert h.command('status')['platform']['perf_path'] == perf
+    finally:
+        h.close()
+
+
+def test_missing_perf_is_reported_with_how_to_fix_it(shim_dir, tmp_path,
+                                                    offpath):
+    _perf, path = offpath
+    h = AgentHarness(shim_dir, tmp_path, env={'PATH': path})
+    try:
+        assert h.read_hello()['platform']['perf_version'] == 'unknown'
+        resp = h.command('verify_perf')
+        assert resp['available'] is False
+        assert resp['path'] == 'perf'
+        with open(h.log_path) as f:
+            assert '--perf' in f.read()
+    finally:
+        h.close()
+
+
+def test_verify_perf_adopts_a_path_at_runtime(shim_dir, tmp_path, offpath,
+                                              target_pid):
+    """The wizard's route: an agent that cannot find perf is pointed at one
+    and probes with it, with no restart."""
+    perf, path = offpath
+    h = AgentHarness(shim_dir, tmp_path, env={'PATH': path})
+    try:
+        h.read_hello()
+        resp = h.command('verify_perf', args={'perf': perf})
+        assert resp['available'] is True, resp
+        assert resp['path'] == perf
+        assert resp['version'].startswith('perf version 6.99')
+
+        platform = h.command('status')['platform']
+        assert platform['perf_path'] == perf
+        assert platform['perf_version'].startswith('perf version 6.99')
+
+        probe = h.command('reprobe', args={'pid': target_pid}, timeout=60)
+        assert probe['ok'] is True, probe
+        assert probe['record_events'] == ['cycles', 'instructions']
+    finally:
+        h.close()
+
+
+@pytest.mark.parametrize('candidate,reason', [
+    ('vendor/perf', 'not an absolute path'),
+    ('/nonexistent/perf-4.4/bin/perf', 'No such file'),
+    (shutil.which('true'), 'does not identify as perf'),
+])
+def test_verify_perf_rejects_what_is_not_perf(shim_dir, tmp_path, offpath,
+                                              candidate, reason):
+    """A peer chooses this binary over the wire and it then runs for the life
+    of the agent, so anything that is not perf is refused -- and the perf
+    already in use stays."""
+    perf, path = offpath
+    h = AgentHarness(shim_dir, tmp_path, agent_args=['--perf', perf],
+                     env={'PATH': path})
+    try:
+        h.read_hello()
+        resp = h.command('verify_perf', args={'perf': candidate})
+        assert resp['available'] is False
+        assert reason in resp['error']
+        assert resp['path'] == perf
+        assert h.command('status')['platform']['perf_path'] == perf
+    finally:
+        h.close()
+
+
+def test_verify_perf_will_not_swap_perf_mid_collection(harness, offpath,
+                                                       target_pid):
+    perf, _path = offpath
+    harness.read_hello()
+    resp = harness.command('start', args={'pid': target_pid, 'frequency': 99,
+                                          'duration': 1}, timeout=60)
+    assert resp['ok'] is True, resp
+    resp = harness.command('verify_perf', args={'perf': perf})
+    assert resp['ok'] is False
+    assert 'stop first' in resp['error']
+    assert harness.command('status')['platform']['perf_path'] == 'perf'
+    assert harness.command('stop')['ok'] is True
+
+
+def test_a_bad_perf_flag_fails_at_startup():
+    """Rather than as "no perf record events" after a twenty-second probe."""
+    r = subprocess.run([AGENT_BIN, '--listen', '--bind', '127.0.0.1',
+                        '--port', '0', '--perf', '/nonexistent/perf'],
+                       capture_output=True, text=True, timeout=10)
+    assert r.returncode == 1
+    assert '/nonexistent/perf' in r.stderr
 
 
 # ---------------------------------------------------------------------------

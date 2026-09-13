@@ -1880,7 +1880,7 @@ main {
     margin-bottom: 3px;
 }
 .csp-info-row strong { color: var(--text-primary); font-family: var(--font-mono); }
-.csp-num {
+.csp-num, .csp-path {
     width: 70px;
     margin-left: auto;
     background: var(--bg-surface);
@@ -1889,6 +1889,8 @@ main {
     border-radius: var(--radius-sm);
     padding: 2px 6px;
 }
+.csp-path { width: 170px; font-family: var(--font-mono); }
+.metrics-settings-pop .msp-hint + .msp-title { margin-top: 12px; }
 .csp-events { margin-bottom: 8px; }
 .csp-evt {
     display: flex;

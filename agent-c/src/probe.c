@@ -37,6 +37,54 @@ static const char *SKIP_PATTERNS[] = {
     "not supported", "invalid event", "unknown", NULL
 };
 
+char g_perf[PERF_PATH_MAX] = "perf";
+
+/* Point every later probe and collection at another perf binary.
+ *
+ * Some targets install perf under a vendor prefix that is not on PATH, and
+ * launching the agent with PATH= was the only workaround. A bare name still
+ * goes through PATH; anything with a slash must be absolute, because a path
+ * relative to the agent's working directory is never what a remote operator
+ * means. The candidate runs with profiling arguments for as long as the agent
+ * lives and a peer can choose it over the wire, so it has to identify itself
+ * as perf rather than merely exist. On failure the current perf stays. */
+int perf_use(const char *path, char *err, size_t errlen)
+{
+    if (!path || !path[0]) {
+        snprintf(err, errlen, "empty perf path");
+        return -1;
+    }
+    if (strlen(path) >= sizeof(g_perf)) {
+        snprintf(err, errlen, "perf path is longer than %d bytes",
+                 PERF_PATH_MAX - 1);
+        return -1;
+    }
+    if (strchr(path, '/') && path[0] != '/') {
+        snprintf(err, errlen, "%s: not an absolute path", path);
+        return -1;
+    }
+    if (path[0] == '/' && access(path, X_OK) != 0) {
+        snprintf(err, errlen, "%s: %s", path, strerror(errno));
+        return -1;
+    }
+
+    char *argv[] = { (char *)path, "--version", NULL };
+    struct buf out;
+    buf_init(&out);
+    int rc = run_cmd(argv, &out, NULL, 5);
+    int is_perf = rc == 0 && out.len >= 13 &&
+                  memcmp(out.data, "perf version ", 13) == 0;
+    buf_free(&out);
+    if (!is_perf) {
+        snprintf(err, errlen, "%s: does not identify as perf "
+                 "(\"%s --version\" must print \"perf version\")", path, path);
+        return -1;
+    }
+
+    snprintf(g_perf, sizeof(g_perf), "%s", path);
+    return 0;
+}
+
 void detect_platform(struct platform_info *info)
 {
     struct utsname uts;
@@ -45,7 +93,7 @@ void detect_platform(struct platform_info *info)
     snprintf(info->kernel, sizeof(info->kernel), "%s", uts.release);
 
     /* perf version */
-    char *argv[] = { PERF, "--version", NULL };
+    char *argv[] = { g_perf, "--version", NULL };
     struct buf out;
     buf_init(&out);
     int rc = run_cmd(argv, &out, NULL, 5);
@@ -59,6 +107,10 @@ void detect_platform(struct platform_info *info)
         if (nl) *nl = '\0';
     } else {
         snprintf(info->perf_version, sizeof(info->perf_version), "unknown");
+        agent_warn("perf not found or not working as \"%s\". If it is "
+                   "installed outside PATH, pass --perf /path/to/perf (or set "
+                   "PERFLENS_PERF), or set the path from the PerfLens UI.",
+                   g_perf);
     }
     buf_free(&out);
 
@@ -71,8 +123,9 @@ void detect_platform(struct platform_info *info)
         fclose(f);
     }
 
-    agent_log("Platform: arch=%s, kernel=%s, perf=%s, perf_event_paranoid=%d",
-              info->arch, info->kernel, info->perf_version,
+    agent_log("Platform: arch=%s, kernel=%s, perf=%s (%s), "
+              "perf_event_paranoid=%d",
+              info->arch, info->kernel, info->perf_version, g_perf,
               info->perf_event_paranoid);
 
     if (info->perf_event_paranoid > 1) {
@@ -93,7 +146,7 @@ static int event_works(const char *event, int pid)
     snprintf(pid_str, sizeof(pid_str), "%d", pid);
 
     int i = 0;
-    argv[i++] = PERF; argv[i++] = "stat"; argv[i++] = "-e"; argv[i++] = (char *)event;
+    argv[i++] = g_perf; argv[i++] = "stat"; argv[i++] = "-e"; argv[i++] = (char *)event;
     argv[i++] = "-p"; argv[i++] = pid_str; argv[i++] = "--"; argv[i++] = "sleep";
     argv[i++] = "1";  argv[i++] = NULL;
 
@@ -131,7 +184,7 @@ static int callgraph_works(const char *method, int pid)
 
     /* perf record */
     char *argv_rec[] = {
-        PERF, "record", "-e", "cycles", "-p", pid_str,
+        g_perf, "record", "-e", "cycles", "-p", pid_str,
         "--call-graph", (char *)method, "-F", freq_str, "-o", tmpfile,
         "--", "sleep", "2", NULL
     };
@@ -139,7 +192,7 @@ static int callgraph_works(const char *method, int pid)
     if (rc != 0) { unlink(tmpfile); return 0; }
 
     /* perf script */
-    char *argv_script[] = { PERF, "script", "-i", tmpfile, NULL };
+    char *argv_script[] = { g_perf, "script", "-i", tmpfile, NULL };
     struct buf out;
     buf_init(&out);
     rc = run_cmd(argv_script, &out, NULL, 15);
@@ -167,7 +220,7 @@ static int event_records(const char *event, int pid)
     char pid_str[16];
     snprintf(pid_str, sizeof(pid_str), "%d", pid);
     char *argv[] = {
-        PERF, "record", "-e", (char *)event, "-p", pid_str,
+        g_perf, "record", "-e", (char *)event, "-p", pid_str,
         "-F", "99", "-o", tmpl, "--", "sleep", "1", NULL
     };
     int rc = run_cmd(argv, NULL, NULL, 15);
@@ -186,14 +239,14 @@ static int script_fields_work(int pid, const char *event)
     snprintf(pid_str, sizeof(pid_str), "%d", pid);
 
     char *argv_rec[] = {
-        PERF, "record", "-e", (char *)event, "-p", pid_str,
+        g_perf, "record", "-e", (char *)event, "-p", pid_str,
         "-F", "99", "-o", tmpl, "--", "sleep", "1", NULL
     };
     int rc = run_cmd(argv_rec, NULL, NULL, 15);
     if (rc != 0) { unlink(tmpl); return 0; }
 
     char *argv_script[] = {
-        PERF, "script", "-F", SCRIPT_FIELDS, "-i", tmpl, NULL
+        g_perf, "script", "-F", SCRIPT_FIELDS, "-i", tmpl, NULL
     };
     struct buf out;
     buf_init(&out);
@@ -252,7 +305,7 @@ static int pipe_mode_works(const struct capabilities *caps, int pid)
 
     char *argv_rec[16];
     int ri = 0;
-    argv_rec[ri++] = PERF; argv_rec[ri++] = "record";
+    argv_rec[ri++] = g_perf; argv_rec[ri++] = "record";
     argv_rec[ri++] = "-e"; argv_rec[ri++] = caps->record_events[0];
     argv_rec[ri++] = "-p"; argv_rec[ri++] = pid_str;
     argv_rec[ri++] = "-F"; argv_rec[ri++] = "99";
@@ -266,7 +319,7 @@ static int pipe_mode_works(const struct capabilities *caps, int pid)
 
     char *argv_script[8];
     int sci = 0;
-    argv_script[sci++] = PERF; argv_script[sci++] = "script";
+    argv_script[sci++] = g_perf; argv_script[sci++] = "script";
     if (caps->script_fields[0]) {
         argv_script[sci++] = "-F";
         argv_script[sci++] = (char *)caps->script_fields;

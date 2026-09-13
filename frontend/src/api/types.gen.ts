@@ -1233,6 +1233,11 @@ export interface components {
              */
             frequency: number;
             /**
+             * Perf Path
+             * @default
+             */
+            perf_path: string;
+            /**
              * Perf Verified
              * @default false
              */

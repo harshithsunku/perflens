@@ -614,6 +614,9 @@ static void print_usage(const char *prog)
         "  --frequency HZ    Sampling frequency in Hz (default: %d)\n"
         "  --duration SECS   Duration of each collection in seconds (default: %d)\n"
         "  --rounds N        Collection rounds in --output mode (default: 1)\n"
+        "  --perf PATH       perf binary to run (or set PERFLENS_PERF). Default:\n"
+        "                    'perf' from PATH. The server can also set it at\n"
+        "                    runtime, from the UI or with verify_perf.\n"
         "  --token SECRET    Pairing code the server must present before it can\n"
         "                    drive this agent (or set PERFLENS_TOKEN). In\n"
         "                    --listen mode one is generated and logged if you\n"
@@ -642,9 +645,11 @@ int main(int argc, char *argv[])
     int do_update = 0;
     char *output = NULL;
     const char *token = getenv("PERFLENS_TOKEN");
+    const char *perf = getenv("PERFLENS_PERF");
     const char *bind_addr = "0.0.0.0";
 
-    enum { OPT_ROUNDS = 1000, OPT_TOKEN, OPT_UPDATE, OPT_VERSION, OPT_BIND };
+    enum { OPT_ROUNDS = 1000, OPT_TOKEN, OPT_UPDATE, OPT_VERSION, OPT_BIND,
+           OPT_PERF };
     static struct option long_opts[] = {
         {"pid",       required_argument, NULL, 'p'},
         {"server",    required_argument, NULL, 's'},
@@ -656,6 +661,7 @@ int main(int argc, char *argv[])
         {"output",    required_argument, NULL, 'o'},
         {"rounds",    required_argument, NULL, OPT_ROUNDS},
         {"token",     required_argument, NULL, OPT_TOKEN},
+        {"perf",      required_argument, NULL, OPT_PERF},
         {"update",    no_argument,       NULL, OPT_UPDATE},
         {"version",   no_argument,       NULL, OPT_VERSION},
         {"help",      no_argument,       NULL, 'h'},
@@ -675,6 +681,7 @@ int main(int argc, char *argv[])
         case 'o': output    = optarg;       break;
         case OPT_ROUNDS:  rounds = atoi(optarg); break;
         case OPT_TOKEN:   token  = optarg;       break;
+        case OPT_PERF:    perf   = optarg;       break;
         case OPT_BIND:    bind_addr = optarg;    break;
         case OPT_UPDATE:  do_update = 1;         break;
         case OPT_VERSION:
@@ -694,6 +701,17 @@ int main(int argc, char *argv[])
         int rc = self_update(msg, sizeof(msg));
         agent_log("Self-update: %s", msg);
         return rc == 0 ? 0 : 1;
+    }
+
+    /* An explicit perf that does not work is a configuration error, and
+     * failing here beats discovering it as "no perf record events" after a
+     * twenty-second probe. */
+    if (perf && perf[0]) {
+        char err[PERF_PATH_MAX + 128];
+        if (perf_use(perf, err, sizeof(err)) != 0) {
+            fprintf(stderr, "Error: --perf / PERFLENS_PERF: %s\n", err);
+            return 1;
+        }
     }
 
     /* --- Headless mode: --output --- */

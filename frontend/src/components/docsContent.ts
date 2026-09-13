@@ -99,6 +99,7 @@ perflens serve --source-dir /path/to/src --binary /path/to/binary</code></pre>
       <tr><td><code>--rounds N</code></td><td>1</td><td>Number of rounds (<code>--output</code> mode only)</td></tr>
       <tr><td><code>--bind ADDR</code></td><td><code>0.0.0.0</code></td><td>Listen address for <code>--listen</code> mode</td></tr>
       <tr><td><code>--token SECRET</code></td><td>&mdash;</td><td>Pairing code the server must present. Generated and logged in <code>--listen</code> mode if not given; never sent over the wire</td></tr>
+      <tr><td><code>--perf PATH</code></td><td><code>perf</code></td><td>perf binary to run (or <code>PERFLENS_PERF</code>) when it is not on PATH; also settable from the wizard and the control bar</td></tr>
       <tr><td><code>--update</code></td><td>&mdash;</td><td>Self-update from the latest GitHub release and exit</td></tr>
     </tbody>
   </table>
