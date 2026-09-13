@@ -40,15 +40,32 @@ AGENT_RELEASE_BASE = (os.environ.get('PERFLENS_UPDATE_URL')
                       or 'https://github.com/harshithsunku/perflens'
                          '/releases/latest/download')
 
-# uname -m on the device -> release asset arch suffix
+# uname -m on the device -> release asset arch suffix. Byte order is checked
+# separately (see _asset_arch): a big-endian ARM userland does not always
+# announce itself in uname.
 _ARCH_MAP = {
     'x86_64': 'x86_64',
     'aarch64': 'aarch64',
     'aarch64_be': 'aarch64_be',
     'armv7l': 'armv7',
     'armv6l': 'armv7',
+    'armv7b': 'armeb',
     'armeb': 'armeb',
 }
+
+# The byte-order probe install-agent.sh uses: od reads the bytes 01 00 as one
+# 16-bit word, 0001 on a little-endian machine and 0100 on a big-endian one.
+_ARCH_PROBE = "uname -m; printf '\\1\\0' | od -An -tx2"
+
+
+def _asset_arch(machine, word):
+    """Release asset arch for `uname -m` plus the byte-order probe's word."""
+    if word.strip() == '0100':
+        if machine.startswith('arm'):
+            return 'armeb'
+        if machine.startswith('aarch64'):
+            return 'aarch64_be'
+    return _ARCH_MAP.get(machine)
 
 
 def _run_serve(argv):
@@ -141,7 +158,7 @@ def _run_push_agent(argv):
     try:
         r = subprocess.run(
             ['ssh', '-p', ssh_port, '-o', 'ConnectTimeout=15', host,
-             'uname -m'],
+             _ARCH_PROBE],
             capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired) as e:
         print(f'error: ssh failed: {e}', file=sys.stderr)
@@ -150,14 +167,18 @@ def _run_push_agent(argv):
         print(f'error: ssh failed: {r.stderr.strip()}', file=sys.stderr)
         return 1
 
-    machine = r.stdout.strip()
-    arch = _ARCH_MAP.get(machine)
+    lines = r.stdout.strip().splitlines() or ['']
+    machine = lines[0].strip()
+    word = lines[1] if len(lines) > 1 else ''
+    arch = _asset_arch(machine, word)
     if not arch:
         print(f'error: unsupported device architecture: {machine}',
               file=sys.stderr)
         return 1
     asset = f'perflens-agent-linux-{arch}'
-    print(f'[push-agent] Device is {machine} -> asset {asset}')
+    endian = {'0100': 'big', '0001': 'little'}.get(word.strip(), 'unknown')
+    print(f'[push-agent] Device is {machine} ({endian}-endian) '
+          f'-> asset {asset}')
 
     cached = os.path.join(_agent_cache_dir(), asset)
     if not os.path.isfile(cached):
@@ -197,6 +218,7 @@ def _run_push_agent(argv):
     print('Run it on the device:')
     print(f'  ssh {host} "~/.perflens/bin/perflens-agent --listen"')
     print('  # or: --server <your-ip> to connect out to this machine')
+    print("  # add --perf /path/to/perf if perf is not on the device's PATH")
     return 0
 
 

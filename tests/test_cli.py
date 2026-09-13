@@ -105,10 +105,50 @@ def test_push_agent_without_a_host_is_a_usage_error(capsys):
     # uname says armv6l, but the release asset is armv7 — publishing or
     # requesting 'armv6l' 404s.
     ('armv6l', 'armv7'),
+    ('armv7b', 'armeb'),
     ('armeb', 'armeb'),
 ])
 def test_arch_map_covers_every_published_asset(machine, asset_arch):
     assert cli._ARCH_MAP[machine] == asset_arch
+
+
+@pytest.mark.parametrize('machine,word,asset_arch', [
+    # A big-endian userland under a kernel that still says armv7l.
+    ('armv7l', ' 0100', 'armeb'),
+    ('armv7b', ' 0100', 'armeb'),
+    ('aarch64', ' 0100', 'aarch64_be'),
+    ('aarch64', ' 0001', 'aarch64'),
+    ('armv7l', ' 0001', 'armv7'),
+    # No od on the device: fall back to uname alone.
+    ('armv7b', '', 'armeb'),
+])
+def test_asset_follows_the_devices_byte_order(machine, word, asset_arch):
+    assert cli._asset_arch(machine, word) == asset_arch
+
+
+def test_push_agent_asks_the_device_its_byte_order(capsys, monkeypatch,
+                                                   tmp_path):
+    """install-agent.sh already probed byte order; push-agent trusted uname,
+    which cannot tell a big-endian ARM userland from a little-endian one."""
+    class R:
+        returncode = 0
+        stdout = 'armv7l\n 0100\n'
+        stderr = ''
+
+    calls, urls = [], []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return R()
+
+    monkeypatch.setattr(cli.subprocess, 'run', fake_run)
+    monkeypatch.setattr(cli, '_agent_cache_dir', lambda: str(tmp_path))
+    monkeypatch.setattr(cli, '_download',
+                        lambda url, dest: urls.append(url) or False)
+    assert cli.main(['push-agent', 'user@host']) == 1
+    assert 'od -An -tx2' in calls[0][-1]
+    assert urls and urls[0].endswith('/perflens-agent-linux-armeb')
+    assert 'big-endian' in capsys.readouterr().out
 
 
 def test_push_agent_rejects_an_unsupported_arch(capsys, monkeypatch):
