@@ -115,7 +115,7 @@
                 <tr><td><code>/api/sessions?offset=&amp;limit=</code></td><td>GET</td><td>List saved sessions, paginated (metadata only).</td></tr>
                 <tr><td><code>/api/sessions/&lt;id&gt;</code></td><td>GET</td><td>Lazy-replay a session (parses raw chunks on demand, cached).</td></tr>
                 <tr><td><code>/api/sessions/&lt;id&gt;</code></td><td>DELETE</td><td>Delete a saved session.</td></tr>
-                <tr><td><code>/api/sessions/&lt;id&gt;/export?format=&amp;event=</code></td><td>GET</td><td>Export a session: <code>collapsed</code> stacks, full <code>json</code>, or an <code>svg</code> flame graph.</td></tr>
+                <tr><td><code>/api/sessions/&lt;id&gt;/export?format=&amp;event=</code></td><td>GET</td><td>Export a session: <code>collapsed</code> stacks or an <code>svg</code> flame graph for one event, or <code>json</code> for every event unless <code>event</code> names one.</td></tr>
                 <tr><td><code>/api/sessions/import</code></td><td>POST</td><td>Import an uploaded <code>perf.data</code> file as a session (needs <code>perf</code> on the server).</td></tr>
                 <tr><td><code>/api/live/export?format=&amp;event=</code></td><td>GET</td><td>Export the live in-memory profile in the same three formats.</td></tr>
                 <tr><td><code>/api/source?file=&amp;event=&amp;tid=</code></td><td>GET</td><td>Annotated source for a single file (optionally per-thread).</td></tr>

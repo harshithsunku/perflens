@@ -159,7 +159,8 @@ export interface paths {
         };
         /**
          * Api Live Export
-         * @description Export the live in-memory profile (bounded by --max-samples).
+         * @description Export the live in-memory profile (bounded by --max-samples), in the
+         *     same formats and with the same `event` rules as a session export.
          */
         get: operations["api_live_export_api_live_export_get"];
         put?: never;
@@ -272,8 +273,8 @@ export interface paths {
         };
         /**
          * Api Session Export
-         * @description Export a saved session: collapsed stacks, full JSON, or SVG
-         *     flamegraph (per event).
+         * @description Export a saved session: collapsed stacks or an SVG flamegraph for one
+         *     event, or JSON for every event unless `event` names one.
          */
         get: operations["api_session_export_api_sessions__session_id__export_get"];
         put?: never;
@@ -1575,7 +1576,7 @@ export interface operations {
         parameters: {
             query?: {
                 format?: string;
-                event?: string;
+                event?: string | null;
             };
             header?: never;
             path?: never;
@@ -1839,7 +1840,7 @@ export interface operations {
         parameters: {
             query?: {
                 format?: string;
-                event?: string;
+                event?: string | null;
             };
             header?: never;
             path: {

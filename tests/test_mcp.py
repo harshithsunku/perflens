@@ -474,6 +474,9 @@ def test_export_writes_a_file(core, session_id, tmp_path):
         async with Harness(core) as h:
             data = await h.call_json('perflens_export', out_path=str(out),
                                      source=session_id, format='collapsed')
+            # Collapsed stacks are one event, and the server refuses to guess
+            # which when the profile has several — so the tool picks one.
+            assert data['event']
             written = data['path']
             assert written.endswith('.collapsed')
             assert os.path.getsize(written) == data['bytes'] > 0

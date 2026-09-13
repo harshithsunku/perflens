@@ -284,7 +284,7 @@ perflens serve --addr2line /opt/toolchain/bin/arm-linux-gnueabihf-addr2line \\
       <tr><td><code>/api/snapshot</code></td><td>GET</td><td>Cached per-event snapshot (<code>?event=</code>)</td></tr>
       <tr><td><code>/api/sessions</code></td><td>GET</td><td>List saved sessions (<code>?offset=&amp;limit=</code>)</td></tr>
       <tr><td><code>/api/sessions/&lt;id&gt;</code></td><td>GET / DELETE</td><td>Replay / delete a session</td></tr>
-      <tr><td><code>/api/sessions/&lt;id&gt;/export</code></td><td>GET</td><td>Export (<code>?format=collapsed|json|svg</code>)</td></tr>
+      <tr><td><code>/api/sessions/&lt;id&gt;/export</code></td><td>GET</td><td>Export (<code>?format=collapsed|json|svg&amp;event=</code>)</td></tr>
       <tr><td><code>/api/live/export</code></td><td>GET</td><td>Export the live profile</td></tr>
       <tr><td><code>/api/source</code></td><td>GET</td><td>Annotated source (<code>?file=&amp;event=&amp;tid=</code>)</td></tr>
       <tr><td><code>/api/threads</code></td><td>GET</td><td>All threads overview (<code>?event=</code>)</td></tr>

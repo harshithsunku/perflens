@@ -2085,7 +2085,7 @@
     },
     "/api/live/export": {
       "get": {
-        "description": "Export the live in-memory profile (bounded by --max-samples).",
+        "description": "Export the live in-memory profile (bounded by --max-samples), in the\nsame formats and with the same `event` rules as a session export.",
         "operationId": "api_live_export_api_live_export_get",
         "parameters": [
           {
@@ -2103,9 +2103,15 @@
             "name": "event",
             "required": false,
             "schema": {
-              "default": "cycles",
-              "title": "Event",
-              "type": "string"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Event"
             }
           }
         ],
@@ -2448,7 +2454,7 @@
     },
     "/api/sessions/{session_id}/export": {
       "get": {
-        "description": "Export a saved session: collapsed stacks, full JSON, or SVG\nflamegraph (per event).",
+        "description": "Export a saved session: collapsed stacks or an SVG flamegraph for one\nevent, or JSON for every event unless `event` names one.",
         "operationId": "api_session_export_api_sessions__session_id__export_get",
         "parameters": [
           {
@@ -2475,9 +2481,15 @@
             "name": "event",
             "required": false,
             "schema": {
-              "default": "cycles",
-              "title": "Event",
-              "type": "string"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Event"
             }
           }
         ],

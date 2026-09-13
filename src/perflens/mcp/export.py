@@ -32,8 +32,11 @@ def register(mcp, client):
             'Write a profile to disk: `collapsed` folded stacks (the input '
             'format for external flamegraph tools), `json` for the full '
             'per-event data, or `svg` for a standalone flamegraph image. '
-            'Returns the path and size — the content is never returned inline '
-            'because these files are far too large to read into context.'),
+            '`collapsed` and `svg` cover one event — `event`, or a default '
+            'when omitted; `json` covers every event unless `event` names '
+            'one. Returns the path and size — the content is never returned '
+            'inline because these files are far too large to read into '
+            'context.'),
         annotations=WRITES_FILE,
     )
     async def perflens_export(out_path: str, source: str = LIVE,
@@ -44,10 +47,11 @@ def register(mcp, client):
                 f'Unknown export format {format!r}. Use one of: '
                 f'{", ".join(sorted(_EXTENSIONS))}.')
 
-        # SVG renders one event, so resolve a sensible default rather than
-        # letting the server fall back to a `cycles` that may not exist.
+        # Collapsed stacks and SVG render one event, and the server refuses
+        # to pick one when the profile holds several — so pick the same
+        # default the analysis tools use. JSON without an event has them all.
         event_name = event
-        if format == 'svg' and not event_name:
+        if format != 'json' and not event_name:
             event_name, _entry, _meta = await client.event_entry(source, None)
 
         content = await client.export(source, format, event_name or None)

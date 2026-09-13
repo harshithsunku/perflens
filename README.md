@@ -303,7 +303,7 @@ Options:
 | `/api/sessions?offset=&limit=` | GET | List saved sessions (metadata only, paginated) |
 | `/api/sessions/<id>` | GET | Lazy-replay a session (parses raw chunks on demand, cached) |
 | `/api/sessions/<id>` | DELETE | Delete a saved session from disk |
-| `/api/sessions/<id>/export?format=` | GET | Export a session: `collapsed` (FlameGraph stacks), `json`, or `svg` flame graph (`&event=`) |
+| `/api/sessions/<id>/export?format=&event=` | GET | Export a session: `collapsed` (FlameGraph stacks) or an `svg` flame graph for one event, or `json` for every event unless `event` names one |
 | `/api/sessions/import` | POST | Import an uploaded `perf.data` file as a session (needs `perf` on the server) |
 | `/api/live/export?format=` | GET | Export the live in-memory profile (same formats) |
 | `/api/source?file=<path>&event=<evt>&tid=<tid>` | GET | Annotated source for a single file (optionally filtered by thread) |

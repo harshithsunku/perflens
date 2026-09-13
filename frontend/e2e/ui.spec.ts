@@ -144,7 +144,7 @@ test('export menu lists the three formats and the endpoints serve them',
   expect((await svg.text()).startsWith('<svg')).toBeTruthy();
 
   const collapsed = await request.get(
-    `/api/sessions/${FIXTURE}/export?format=collapsed`);
+    `/api/sessions/${FIXTURE}/export?format=collapsed&event=cycles`);
   expect(collapsed.ok()).toBeTruthy();
   const firstLine = (await collapsed.text()).trim().split('\n')[0];
   const count = parseInt(firstLine.slice(firstLine.lastIndexOf(' ') + 1), 10);

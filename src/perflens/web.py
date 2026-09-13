@@ -151,26 +151,11 @@ def api_snapshot(request: Request, event: Optional[str] = None, ctx=Ctx):
             'total_samples': len(st.all_samples),
         }
     if event is not None:
-        entry = per_event.get(event)
-        if entry is None:
-            # A hybrid CPU reports 'cpu_core/cycles/' and 'cpu_atom/cycles/'
-            # but never a bare 'cycles'. Resolve one of those when the base
-            # name is unambiguous; when it is not, name the candidates
-            # rather than leaving the caller to guess.
-            matches = resolve_event(event, per_event.keys())
-            if len(matches) == 1:
-                event = matches[0]
-                entry = per_event[event]
-            elif matches:
-                return _err('ambiguous_event',
-                            f'{event!r} matches several events on this '
-                            f'device; ask for one of: '
-                            f'{", ".join(sorted(matches))}', 400)
-            else:
-                have = ', '.join(sorted(per_event)) or 'none yet'
-                return _err('not_found',
-                            f'no data for event: {event} (have: {have})', 404)
-        return _json({'event': event, 'data': entry, 'version': version},
+        event, error = _resolve_event_name(event, per_event.keys())
+        if error:
+            return error
+        return _json({'event': event, 'data': per_event[event],
+                      'version': version},
                      request=request, allow_gzip=True)
     return _json({'per_event': per_event, 'version': version},
                  request=request, allow_gzip=True)
@@ -328,51 +313,96 @@ def api_session_delete(session_id: str, ctx=Ctx):
     return _json({'ok': True, 'session_id': session_id})
 
 
+def _resolve_event_name(event, available):
+    """Resolve a requested event onto one name actually present.
+
+    Returns (name, None) or (None, error response). A hybrid CPU reports
+    'cpu_core/cycles/' and 'cpu_atom/cycles/' but never a bare 'cycles', so a
+    base name resolves when it is unambiguous; when it is not, the error names
+    the candidates rather than leaving the caller to guess.
+    """
+    matches = resolve_event(event, available)
+    if len(matches) == 1:
+        return matches[0], None
+    if matches:
+        return None, _err('ambiguous_event',
+                          f'{event!r} matches several events on this '
+                          f'device; ask for one of: '
+                          f'{", ".join(sorted(matches))}', 400)
+    have = ', '.join(sorted(available)) or 'none yet'
+    return None, _err('not_found',
+                      f'no data for event: {event} (have: {have})', 404)
+
+
+def _attachment(body, media_type, filename):
+    return Response(content=body, media_type=media_type,
+                    headers={'Content-Disposition':
+                             f'attachment; filename="{filename}"'})
+
+
 def _export_response(ctx, all_samples, metadata, fmt, event, name):
-    """Render an export (collapsed / json / svg) for live or session data."""
+    """Render an export (collapsed / json / svg) for live or session data.
+
+    Every format honours `event`, resolved as /api/snapshot resolves it.
+    Collapsed stacks and SVG are one event each — summing cycles with
+    cache-misses yields a flame graph of nothing — so when the data holds
+    several events the caller must name one. JSON is keyed per event, so
+    without `event` it carries them all.
+    """
+    if fmt not in ('collapsed', 'json', 'svg'):
+        return _err('bad_format', f'unknown format: {fmt}', 400)
+
+    available = get_event_types(all_samples)
+    if event:
+        event, error = _resolve_event_name(event, available)
+        if error:
+            return error
+    elif fmt != 'json':
+        if not available:
+            return _err('no_data', 'nothing to export', 404)
+        if len(available) > 1:
+            return _err('ambiguous_event',
+                        f'format={fmt} renders one event and this profile '
+                        f'has {len(available)}; ask for one of: '
+                        f'{", ".join(available)}', 400)
+        event = available[0]
+
+    stem = f'perflens-{name}'
+    if event:
+        stem += '-' + event.strip('/').replace('/', '-')
+    mapper = ctx.state.source_mapper
+
     if fmt == 'collapsed':
-        text = export.export_collapsed(all_samples)
-        fname = f'perflens-{name}.collapsed'
-        return Response(content=text.encode('utf-8'), media_type='text/plain',
-                        headers={'Content-Disposition':
-                                 f'attachment; filename="{fname}"'})
+        text = export.export_collapsed(
+            filter_samples_by_event(all_samples, event))
+        return _attachment(text.encode('utf-8'), 'text/plain',
+                           f'{stem}.collapsed')
 
     if fmt == 'json':
-        event_types = get_event_types(all_samples)
-        mapper = ctx.state.source_mapper
-        per_event = sessions.build_per_event_data(all_samples, event_types,
-                                                  mapper)
+        # build_per_event_data derives the events from the samples it is
+        # given and ignores its event list, so narrow the samples instead.
+        chosen = (filter_samples_by_event(all_samples, event) if event
+                  else all_samples)
+        per_event = sessions.build_per_event_data(
+            chosen, [event] if event else available, mapper)
         body = json.dumps({'metadata': metadata, 'per_event': per_event},
                           indent=2).encode('utf-8')
-        fname = f'perflens-{name}.json'
-        return Response(content=body, media_type='application/json',
-                        headers={'Content-Disposition':
-                                 f'attachment; filename="{fname}"'})
+        return _attachment(body, 'application/json', f'{stem}.json')
 
-    if fmt == 'svg':
-        mapper = ctx.state.source_mapper
-        expanded = (mapper.expand_inline_frames(all_samples)
-                    if mapper else all_samples)
-        evt_samples = filter_samples_by_event(expanded, event)
-        if not evt_samples:
-            return _err('not_found', f'no samples for event: {event}', 404)
-        fg = build_flamegraph_data(evt_samples)
-        svg = export.render_flamegraph_svg(fg, len(evt_samples), event)
-        fname = f'perflens-{name}-{event}.svg'
-        return Response(content=svg.encode('utf-8'),
-                        media_type='image/svg+xml',
-                        headers={'Content-Disposition':
-                                 f'attachment; filename="{fname}"'})
-
-    return _err('bad_format', f'unknown format: {fmt}', 400)
+    expanded = (mapper.expand_inline_frames(all_samples)
+                if mapper else all_samples)
+    evt_samples = filter_samples_by_event(expanded, event)
+    fg = build_flamegraph_data(evt_samples)
+    svg = export.render_flamegraph_svg(fg, len(evt_samples), event)
+    return _attachment(svg.encode('utf-8'), 'image/svg+xml', f'{stem}.svg')
 
 
 @router.get('/api/sessions/{session_id}/export',
             responses={400: _ERR, 404: _ERR})
 def api_session_export(session_id: str, format: str = 'collapsed',
-                       event: str = 'cycles', ctx=Ctx):
-    """Export a saved session: collapsed stacks, full JSON, or SVG
-    flamegraph (per event)."""
+                       event: Optional[str] = None, ctx=Ctx):
+    """Export a saved session: collapsed stacks or an SVG flamegraph for one
+    event, or JSON for every event unless `event` names one."""
     all_samples, metadata = sessions.load_session_samples(ctx.config,
                                                           session_id)
     if all_samples is None:
@@ -382,9 +412,10 @@ def api_session_export(session_id: str, format: str = 'collapsed',
 
 
 @router.get('/api/live/export', responses={400: _ERR, 404: _ERR})
-def api_live_export(format: str = 'collapsed', event: str = 'cycles',
+def api_live_export(format: str = 'collapsed', event: Optional[str] = None,
                     ctx=Ctx):
-    """Export the live in-memory profile (bounded by --max-samples)."""
+    """Export the live in-memory profile (bounded by --max-samples), in the
+    same formats and with the same `event` rules as a session export."""
     with ctx.state.lock:
         all_samples = list(ctx.state.all_samples)
         perf_stat = dict(ctx.state.perf_stat)

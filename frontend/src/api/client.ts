@@ -150,10 +150,11 @@ export const exportUrls = {
     sessionId === 'live'
       ? `/api/live/export?format=svg&event=${q(event)}`
       : `/api/sessions/${q(sessionId)}/export?format=svg&event=${q(event)}`,
-  collapsed: (sessionId: string) =>
+  // One event, like the SVG: the server refuses to merge several.
+  collapsed: (event: string, sessionId: string) =>
     sessionId === 'live'
-      ? '/api/live/export?format=collapsed'
-      : `/api/sessions/${q(sessionId)}/export?format=collapsed`,
+      ? `/api/live/export?format=collapsed&event=${q(event)}`
+      : `/api/sessions/${q(sessionId)}/export?format=collapsed&event=${q(event)}`,
   json: (sessionId: string) =>
     sessionId === 'live'
       ? '/api/live/export?format=json'

@@ -29,7 +29,7 @@ function Header() {
     setExportOpen(false);
     const sessionId = replaySessionId || 'live';
     if (action === 'svg') window.open(exportUrls.flamegraphSvg(selectedEvent, sessionId), '_blank');
-    else if (action === 'collapsed') window.open(exportUrls.collapsed(sessionId), '_blank');
+    else if (action === 'collapsed') window.open(exportUrls.collapsed(selectedEvent, sessionId), '_blank');
     else if (action === 'json') window.open(exportUrls.json(sessionId), '_blank');
   };
 

@@ -455,22 +455,74 @@ def test_session_delete(client, core, session_id):
     assert client.get('/api/sessions').json()['total'] == 0
 
 
-def test_export_collapsed(client, session_id):
-    r = client.get(f'/api/sessions/{session_id}/export',
-                   params={'format': 'collapsed'})
-    assert r.status_code == 200
-    assert 'attachment' in r.headers['content-disposition']
-    line = r.text.strip().split('\n')[0]
-    stack, count = line.rsplit(' ', 1)
-    assert int(count) > 0 and stack
+def _fixture_event_counts():
+    """Samples with frames per event in the fixture, counted independently of
+    the server."""
+    from collections import Counter
+
+    from conftest import load_fixture_chunks
+    return Counter(s['event_type'] for c in load_fixture_chunks(FIXTURE)
+                   for s in c if s['frames'])
+
+
+def _collapsed_total(text):
+    return sum(int(line.rpartition(' ')[2])
+               for line in text.strip().split('\n') if line)
+
+
+def test_export_collapsed_is_one_event(client, session_id):
+    """Counts are samples of the requested event, not of every event.
+
+    This used to sum all of them: on a twelve-event hybrid capture the file
+    totalled the exact sum of all twelve. The fixture's events have
+    near-equal counts, so a merged export cannot pass for any single one.
+    """
+    counts = _fixture_event_counts()
+    assert len(counts) > 1, 'a single-event fixture cannot catch a merge'
+    for evt, n in counts.items():
+        r = client.get(f'/api/sessions/{session_id}/export',
+                       params={'format': 'collapsed', 'event': evt})
+        assert r.status_code == 200
+        assert 'attachment' in r.headers['content-disposition']
+        assert _collapsed_total(r.text) == n, evt
+
+
+def test_export_needs_an_event_when_the_profile_has_several(client,
+                                                            session_id):
+    """Collapsed stacks and SVG are one event each; rather than merge or
+    guess, name the choices. An empty `event=` is the same request — it used
+    to produce a 65-byte SVG and a 200."""
+    evt = min(_fixture_event_counts())
+    url = f'/api/sessions/{session_id}/export'
+    for params in ({'format': 'collapsed'}, {'format': 'svg'},
+                   {'format': 'svg', 'event': ''}):
+        err = assert_error(client.get(url, params=params),
+                           400, 'ambiguous_event')
+        assert evt in err['message']
+
+
+def test_export_unknown_event_is_404_for_every_format(client, session_id):
+    """A bogus event used to answer 200 for collapsed and json."""
+    evt = min(_fixture_event_counts())
+    for fmt in ('collapsed', 'json', 'svg'):
+        err = assert_error(client.get(f'/api/sessions/{session_id}/export',
+                                      params={'format': fmt,
+                                              'event': 'nope'}),
+                           404, 'not_found')
+        assert evt in err['message']
 
 
 def test_export_json(client, session_id):
-    r = client.get(f'/api/sessions/{session_id}/export',
-                   params={'format': 'json'})
-    body = r.json()
+    """Every event without `event`; exactly the one asked for with it."""
+    counts = _fixture_event_counts()
+    url = f'/api/sessions/{session_id}/export'
+    body = client.get(url, params={'format': 'json'}).json()
     assert body['metadata']['session_id'] == session_id
-    assert body['per_event']
+    assert set(body['per_event']) == set(counts)
+
+    evt = min(counts)
+    body = client.get(url, params={'format': 'json', 'event': evt}).json()
+    assert list(body['per_event']) == [evt]
 
 
 def test_export_svg(client, session_id):
@@ -499,17 +551,62 @@ def test_live_export_no_data(client):
 
 def test_live_export(client, core):
     samples = _seed_live_state(core)
-    r = client.get('/api/live/export', params={'format': 'collapsed'})
+    evt = samples[0]['event_type']
+    r = client.get('/api/live/export', params={'format': 'collapsed',
+                                               'event': evt})
     assert r.status_code == 200
     assert 'attachment' in r.headers['content-disposition']
+    assert _collapsed_total(r.text) == sum(
+        1 for s in samples if s['event_type'] == evt and s['frames'])
 
     r = client.get('/api/live/export', params={'format': 'json'})
     assert r.json()['metadata']['session_id'] == 'live'
 
-    evt = samples[0]['event_type']
     r = client.get('/api/live/export', params={'format': 'svg',
                                                'event': evt})
     assert r.text.startswith('<svg')
+
+
+def test_live_export_uses_the_only_event_when_none_is_named(client, core):
+    from conftest import load_fixture_chunks
+    chunks = load_fixture_chunks(FIXTURE)
+    evt = chunks[0][0]['event_type']
+    for chunk in chunks:
+        core.state.add_samples([s for s in chunk if s['event_type'] == evt])
+    for fmt in ('collapsed', 'svg'):
+        r = client.get('/api/live/export', params={'format': fmt})
+        assert r.status_code == 200, (fmt, r.text)
+        assert evt in r.headers['content-disposition']
+
+
+def test_live_export_resolves_hybrid_event_names(client, core):
+    """A bare 'cycles' on a P/E-core CPU: /api/snapshot already refused it,
+    while the SVG export merged both PMUs under a title reading 'cycles'.
+    Exports now answer as the snapshot does."""
+    from conftest import load_fixture_chunks
+    chunks = load_fixture_chunks(FIXTURE)
+    hybrid = ['cpu_atom/cycles/', 'cpu_core/cycles/',
+              'cpu_core/instructions/']
+    rename = dict(zip(sorted({s['event_type'] for c in chunks for s in c}),
+                      hybrid, strict=False))
+    for chunk in chunks:
+        core.state.add_samples([dict(s, event_type=rename[s['event_type']])
+                                for s in chunk
+                                if s['event_type'] in rename])
+
+    for fmt in ('collapsed', 'json', 'svg'):
+        err = assert_error(client.get('/api/live/export',
+                                      params={'format': fmt,
+                                              'event': 'cycles'}),
+                           400, 'ambiguous_event')
+        assert 'cpu_core/cycles/' in err['message']
+        assert 'cpu_atom/cycles/' in err['message']
+
+    r = client.get('/api/live/export', params={'format': 'svg',
+                                               'event': 'instructions'})
+    assert r.status_code == 200
+    assert 'cpu_core/instructions/' in r.text
+    assert 'cpu_core-instructions.svg' in r.headers['content-disposition']
 
 
 # ---------------------------------------------------------------------------

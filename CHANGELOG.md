@@ -80,6 +80,18 @@ capability probe were not.
   documents, so the cross tool was replaced by the host's and logged only as
   `(system)` — symbolizing a foreign binary with the wrong architecture's
   tool. It now falls back to `shutil.which`, as readelf already did.
+- **Exports ignored `event` for two of their three formats.** `collapsed`
+  summed every event into one profile — on a twelve-event hybrid capture the
+  file totalled exactly the sum of all twelve — so a flame graph built from it
+  added cycles to cache-misses. `json` returned every event whatever was asked,
+  a bogus event name answered 200, a bare `cycles` in an SVG export merged both
+  PMUs of a hybrid CPU, and an empty `event=` produced a 65-byte SVG. Every
+  format now resolves `event` exactly as `/api/snapshot` does: 400
+  `ambiguous_event` naming the candidates, 404 listing what exists.
+  **Behaviour change:** `collapsed` and `svg` render one event, so they now
+  require `event` when a profile holds several; `json` without `event` still
+  carries them all. The UI's collapsed-stacks download sends the selected
+  event, and `perflens_export` picks a default.
 
 ### Known issues
 
@@ -92,10 +104,8 @@ capability probe were not.
   which a libelf-less perf supplies none. Such frames stay `[unknown]` rather
   than being guessed. Closing that case needs the agent to ship
   `/proc/PID/maps`, deliberately deferred.
-- `/api/live/export` and `/api/sessions/<id>/export` still ignore `event` for
-  `collapsed` and `json`, and still answer 200 for a bogus event name.
 
-## [0.10.0] — unreleased
+## [0.10.0] — 2026-08-15
 
 The pre-launch stabilization pass. The project has never been shared
 publicly; this closes what an audit turned up before it is.
