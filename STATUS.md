@@ -4,12 +4,39 @@ Cross-session working state. Update at the start and end of every working
 session. Release history lives in [CHANGELOG.md](CHANGELOG.md); this file
 is what is *currently true* and what is *left to do*.
 
-## Current phase — unreleased since 0.10.0
+## Current phase — 0.11.0 released
 
-**0.10.0 is released** (2026-08-15): tag `v0.10.0`, GitHub release, PyPI. The
-work since lives on `validate-bigendian` and reaches master through a PR: the
-big-endian pass, server-side naming of frames the target's `perf` cannot
-symbolize, and the export `event` fix.
+**0.11.0 is released** (2026-09-13): tag `v0.11.0`, a GitHub release with all 21
+assets, and PyPI. It carries the big-endian pass, server-side naming of frames
+the target's `perf` cannot symbolize, `--perf` for a perf outside `PATH`, and
+consistent `event` resolution across views and exports. PR #3 was
+fast-forwarded onto master, so its commit hashes are the ones on master.
+
+Verified after publishing: the master build ran green with `release` and
+`publish to PyPI` skipped, and the tag build ran both. The published `armeb`
+agent matches its checksum and reads `soft-float ABI, BE8`; the
+`latest/download` agent URLs resolve; and `perflens==0.11.0` installed from
+PyPI into a fresh 3.12 venv reports 0.11.0, serves the UI from inside the wheel
+and answers `/api/status`.
+
+**Two defects were caught on the way to the tag. Neither shipped.**
+
+- **mcp 2.2 hid every MCP tool error.** CI resolved mcp 2.2.0 while the local
+  venv had 2.0.0. From 2.2 the SDK passes a message through only for its own
+  `ToolError`, so every next-step hint the tools raise reached agents as
+  "Error executing tool". Fixed by making `PerfLensError` a `ToolError`. Six of
+  the seven failing tests had already been failing in CI on the PR's first run;
+  a green local suite said nothing, because the local venv could not show it.
+- **Pipe mode was off on every hybrid x86 CPU.** The call-chain check added in
+  the big-endian pass matched `<event>:`, which a PMU-qualified name
+  (`cpu_core/cycles/:`) never contains, so continuous collection fell back to
+  rounds. Nothing asserted on it: it surfaced only because the regenerated hero
+  read "rounds" where 0.10.0's read "continuous". Chains are now detected by
+  their indented frame lines, verified on the hybrid machine.
+
+The release also moved "refuse legacy hello tokens" from 0.11.0 to 0.12.0 in
+SECURITY.md, since pre-0.10.0 agents are still downloadable (see the correction
+below).
 
 **Correction, found 2026-09-13: the project has been public all along.** The
 0.10.0 section below opens with "never been shared publicly … nothing is on
@@ -23,8 +50,13 @@ installs.
 
 ### Open
 
-- [ ] **Upload `armeb-linux-musleabi-cross.tgz` to the `toolchains` release**,
-      or the `armeb` build leg fails. See *Required follow-up* below.
+- [x] **`armeb-linux-musleabi-cross.tgz` is on the `toolchains` release**
+      (uploaded 2026-09-13); the `armeb` build leg is green.
+- [ ] **The local dev venv runs mcp 2.0.0; CI and a fresh install resolve
+      2.2.0.** That gap is how the MCP error regression stayed invisible
+      locally. Upgrade the venv within the `mcp>=2,<3` bound.
+- [ ] **Refuse legacy hello tokens when the server has a token set** —
+      scheduled for 0.12.0 in SECURITY.md.
 - [ ] **Server RSS drift after the sample ring fills — the overnight soak never
       ran.** Deferred by the user (2026-09-13). The only run under 0.10.0 lasted
       20 minutes and ended in a deliberate stop, not a crash, with the function
@@ -433,8 +465,8 @@ and `aarch64_be-linux-musl-cross.tgz`. **The soft-float tarball must be
 uploaded to that release or the `armeb` matrix leg will fail.** The tarball is
 at `~/.perflens-testbeds/toolchains/armeb-linux-musleabi.tgz`.
 
-**Still not uploaded as of 2026-09-13** (re-checked against the release). The
-file unpacks to `armeb-linux-musleabi-cross/`, which is exactly the directory
+**Uploaded 2026-09-13**, and the `armeb` leg has been green since. The file
+unpacks to `armeb-linux-musleabi-cross/`, which is exactly the directory
 the workflow derives from the asset name, so it must be uploaded *under* that
 name: `armeb-linux-musleabi-cross.tgz`, not its on-disk
 `armeb-linux-musleabi.tgz`.
