@@ -92,9 +92,38 @@ def test_import_passes_an_existing_file_through_to_serve(no_serve, tmp_path):
 # push-agent
 # ---------------------------------------------------------------------------
 
+@pytest.fixture()
+def no_ssh(monkeypatch):
+    """Record subprocess.run calls instead of running ssh/scp."""
+    calls = []
+    monkeypatch.setattr(cli.subprocess, 'run',
+                        lambda argv, **kwargs: calls.append(argv))
+    return calls
+
+
 def test_push_agent_without_a_host_is_a_usage_error(capsys):
     assert cli.main(['push-agent']) == 2
     assert 'usage' in capsys.readouterr().err.lower()
+
+
+@pytest.mark.parametrize('argv', [['--help'], ['-h'], ['user@host', '--help']])
+def test_push_agent_help_prints_usage_without_running_ssh(capsys, no_ssh, argv):
+    """`--help` used to reach ssh as the host and fail with
+    'ssh failed: unknown option -- -'."""
+    assert cli.main(['push-agent'] + argv) == 0
+    assert 'usage: perflens push-agent' in capsys.readouterr().out
+    assert no_ssh == []
+
+
+@pytest.mark.parametrize('argv', [
+    ['--port'],
+    ['-oProxyCommand=true'],
+    ['user@host', '-p'],
+])
+def test_push_agent_rejects_a_flag_as_host_or_port(capsys, no_ssh, argv):
+    assert cli.main(['push-agent'] + argv) == 2
+    assert 'usage' in capsys.readouterr().err.lower()
+    assert no_ssh == []
 
 
 @pytest.mark.parametrize('machine,asset_arch', [

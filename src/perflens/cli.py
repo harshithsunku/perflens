@@ -147,9 +147,23 @@ def _download(url, dest):
         return False
 
 
+_PUSH_AGENT_USAGE = """\
+usage: perflens push-agent USER@HOST [PORT]
+
+Detect the device arch over ssh, download the matching static agent binary
+from the latest GitHub release, and scp it to ~/.perflens/bin on the device.
+PORT is the ssh port (default 22).
+"""
+
+
 def _run_push_agent(argv):
-    if not argv:
-        print('usage: perflens push-agent USER@HOST [PORT]', file=sys.stderr)
+    if any(a in ('-h', '--help') for a in argv):
+        print(_PUSH_AGENT_USAGE, end='')
+        return 0
+    # ssh and scp would parse a leading '-' as one of their own options, so a
+    # flag in the host or port position is a usage mistake, never passed on.
+    if not argv or any(a.startswith('-') for a in argv):
+        print(_PUSH_AGENT_USAGE, end='', file=sys.stderr)
         return 2
     host = argv[0]
     ssh_port = argv[1] if len(argv) > 1 else '22'

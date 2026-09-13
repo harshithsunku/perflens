@@ -258,7 +258,7 @@ def config_from_args(argv=None):
     parser.add_argument('--max-samples', type=int, default=500000,
                         help='Max accumulated samples before oldest are dropped '
                              '(default: 500000). Costs roughly 1.7 KB of RSS '
-                             'per sample, so the default tops out near 850 MB '
+                             'per sample, so the default plateaus near 1.1 GB '
                              'on a busy multi-threaded target; lower it if '
                              'that matters more than history depth')
     parser.add_argument('--inline', action='store_true', default=True,
@@ -282,9 +282,11 @@ def config_from_args(argv=None):
                              'confined to (default: your home directory)')
     parser.add_argument('--token', type=str,
                         default=os.environ.get('PERFLENS_TOKEN'),
-                        help='Shared secret agents must present in their '
-                             'hello (agents pass --token / PERFLENS_TOKEN); '
-                             'connections without it are rejected')
+                        help='Pairing code to present to the agent (or '
+                             'PERFLENS_TOKEN); the wizard can supply one per '
+                             'connection instead. A pre-0.10.0 agent that '
+                             'sends it in its hello is still accepted, with '
+                             'a warning')
     parser.add_argument('--sessions-dir', type=str, default=None,
                         metavar='DIR',
                         help='Where to save profiling sessions '
