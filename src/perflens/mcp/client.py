@@ -16,6 +16,7 @@ import json
 import time
 
 import httpx
+from mcp.server.mcpserver.exceptions import ToolError
 
 from perflens.parser import event_base, resolve_event
 
@@ -29,8 +30,13 @@ DEFAULT_TIMEOUT = 60.0
 LIVE = 'live'
 
 
-class PerfLensError(Exception):
-    """A tool-level failure with an actionable next step in the message."""
+class PerfLensError(ToolError):
+    """A tool-level failure with an actionable next step in the message.
+
+    A `ToolError`, not a plain `Exception`: from mcp 2.2 the SDK treats any
+    other exception as a crash and hands the model only "Error executing tool
+    <name>", which throws away the next step this message exists to carry.
+    """
 
 
 def _envelope_message(payload, status):

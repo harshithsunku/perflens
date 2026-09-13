@@ -121,6 +121,13 @@ capability probe were not.
   at connect, while the agent was idle. Pause, resume, process switching and
   profiling settings were unreachable until a page reload. Found driving the
   wizard against a real device.
+- **With mcp 2.2, every MCP tool error reached the agent as "Error executing
+  tool".** The SDK now passes a tool's message through only for its own
+  `ToolError` and treats anything else as a crash, so the next-step hints the
+  tools are built around — which session ids exist, which events are real,
+  how to connect an agent — were replaced by a generic line. `PerfLensError`
+  is now a `ToolError`. The `mcp>=2,<3` bound allowed 2.2, which is what a
+  fresh install resolves.
 
 ### Known issues
 
