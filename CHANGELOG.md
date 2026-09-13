@@ -39,6 +39,17 @@ capability probe were not.
   degraded, so an all-`[unknown]` profile reads as a diagnosable condition
   rather than a PerfLens bug. `perflens_status` (MCP) reports the measured
   number instead of inferring from index counters.
+- **perf outside `PATH`.** Some targets install perf under a vendor prefix the
+  agent's `PATH` does not cover, and launching the agent with `PATH=` was the
+  only workaround. The agent now takes `--perf PATH` (or `PERFLENS_PERF`), and
+  the server can set it on a running agent: the Live Debug wizard's Perf
+  Capabilities step and the control bar's settings each have a perf field, and
+  `perflens_agent_connect` takes `perf_path`. On the wire this is an optional
+  `perf` argument to `verify_perf` and a `perf_path` field in `status` — no new
+  command or frame type. A candidate must be absolute (or a bare name found on
+  `PATH`) and print `perf version`, and a change is refused mid-collection. An
+  explicit `--perf` that does not work fails at startup instead of after a
+  probe.
 
 ### Fixed
 
@@ -92,6 +103,24 @@ capability probe were not.
   require `event` when a profile holds several; `json` without `event` still
   carries them all. The UI's collapsed-stacks download sends the selected
   event, and `perflens_export` picks a default.
+- **Thread, time-window and source views merged events.** `/api/threads`,
+  `/api/threads/<tid>`, `/api/window` and `/api/source` defaulted to
+  `event=cycles` and matched on base names, so a bare `cycles` merged both PMUs
+  of a hybrid CPU, an event that did not exist answered an empty and plausible
+  200, and on a PMU-less target the default did not exist at all. They now
+  resolve `event` like the snapshot and the exports: 400 `ambiguous_event`
+  naming the candidates, 404 listing what exists, and an omitted event means
+  the only one present. With no samples yet they still return an empty view.
+- **`perflens push-agent` could not pick the big-endian asset.** It trusted
+  `uname -m`, which had no `armv7b` entry and cannot tell a big-endian ARM
+  userland from a little-endian one. It now runs the same byte-order probe as
+  `install-agent.sh`.
+- **The control bar never appeared after starting from the Live Debug wizard.**
+  The profiling view stays mounted behind the wizard, and the bar re-read the
+  agent's state only when the connection flags changed — which they already had
+  at connect, while the agent was idle. Pause, resume, process switching and
+  profiling settings were unreachable until a page reload. Found driving the
+  wizard against a real device.
 
 ### Known issues
 

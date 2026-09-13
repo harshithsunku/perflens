@@ -26,17 +26,47 @@ installs.
 - [ ] **Upload `armeb-linux-musleabi-cross.tgz` to the `toolchains` release**,
       or the `armeb` build leg fails. See *Required follow-up* below.
 - [ ] **Server RSS drift after the sample ring fills — the overnight soak never
-      ran.** The only run under 0.10.0 lasted 20 minutes and ended in a
-      deliberate stop, not a crash, with the function count still climbing.
-      Detail in the 0.10.0 section.
-- [ ] **`/api/threads`, `/api/threads/<tid>` and `/api/window` still default to
-      `event=cycles` and match on base names**, so on a hybrid CPU a bare
-      `cycles` merges both PMUs there, while `/api/snapshot` and now the exports
-      answer 400 `ambiguous_event`. The inconsistency the export fix closed,
-      one layer over.
-- [ ] Carried, smaller: the agent cannot use a `perf` outside `PATH`;
-      `perflens push-agent` does not map `armv7b`; the armv7 agent is untested
-      under 0.10.0.
+      ran.** Deferred by the user (2026-09-13). The only run under 0.10.0 lasted
+      20 minutes and ended in a deliberate stop, not a crash, with the function
+      count still climbing. Detail in the 0.10.0 section.
+- [x] **`/api/threads`, `/api/threads/<tid>`, `/api/window` and `/api/source`
+      resolve `event` like the snapshot and exports** (2026-09-13). They
+      defaulted to `event=cycles` and matched on base names, so a bare `cycles`
+      merged both PMUs of a hybrid CPU and a missing event answered an empty
+      200.
+- [x] **perf outside `PATH`** (2026-09-13): `--perf` / `PERFLENS_PERF`, and the
+      wizard, the control bar and `perflens_agent_connect` can set it on a
+      running agent through `verify_perf {perf}`.
+- [x] **`perflens push-agent` on big-endian ARM** (2026-09-13): it now probes
+      byte order the way `install-agent.sh` does.
+- [ ] Carried, smaller: the armv7 agent is untested under 0.10.0.
+
+### perf outside `PATH`, verified on hardware (2026-09-13)
+
+On the ARM64 bed, with the agent's `PATH` stripped of perf (only `sleep` left,
+which perf itself runs):
+
+- **CLI.** With no `--perf` the agent warns and names the fix, then fails with
+  "no perf record events", as before. A bogus `--perf` fails at startup.
+  `--perf /usr/bin/perf` and `PERFLENS_PERF` both probe six record events and
+  collect (398 samples in a single 3 s round).
+- **Server API**, against a `--listen` agent: `verify_perf` with no path reports
+  `available:false, path:perf`; a bogus path is rejected with its reason and the
+  current perf kept; `/usr/bin/perf` is adopted, after which `/api/agent` and
+  `status` report `perf version 7.1.5` and the path; `start` runs continuous
+  mode (4,841 samples in 15 s); a swap mid-collection is refused.
+- **UI, in a real browser** (Playwright, scripted, against the device): the
+  wizard shows perf missing with the hint, the path field verifies and probes,
+  and profiling starts. The control bar's perf field rejects a bogus path and
+  resumes on the old perf, then swaps to a second valid path with a re-probe.
+  The path is remembered in wizard state. No page errors.
+
+That run found a pre-existing bug, fixed in the same change: the control bar
+never appeared after a wizard start (see CHANGELOG).
+
+**Not re-run on the big-endian target.** The mechanism is identical and that
+device's single core is shared with its own services; the `armeb` agent was
+cross-compiled and checked with `readelf` (soft-float, BE8) only.
 
 ## Previous phase — 0.10.0 released: the pre-launch stabilization pass
 
