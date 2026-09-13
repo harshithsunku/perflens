@@ -267,32 +267,30 @@ static int script_fields_work(int pid, const char *event)
  * evidence flattens every flame graph to a single level, with nothing
  * reporting an error.
  *
- * A sample line carries "<event>:"; a call-chain frame line does not. So
- * more lines than samples means the chains survived. That holds for both the
- * -F field list and the default output format, since both print the event
- * name followed by a colon. */
-static int callchains_present(const struct buf *out, const char *event)
+ * A call-chain frame is printed on its own indented line. A sample header is
+ * not indented, and without a chain its ip and symbol sit on that same line.
+ * So any indented line means the chains survived. That holds for both the -F
+ * field list and the default output format -- and, unlike matching
+ * "<event>:", for the PMU-qualified names a hybrid CPU prints
+ * ("cpu_core/cycles/:"), which never contain "cycles:" and so turned
+ * continuous mode off on every hybrid x86 machine. */
+static int callchains_present(const struct buf *out)
 {
-    char needle[64];
-    snprintf(needle, sizeof(needle), "%s:", event);
-    size_t nlen = strlen(needle);
-    if (!out->data || nlen == 0) return 0;
+    if (!out->data) return 0;
 
-    long lines = 0, samples = 0;
+    long samples = 0, frames = 0;
     const char *p = out->data, *end = out->data + out->len;
     while (p < end) {
         const char *nl = memchr(p, '\n', (size_t)(end - p));
         size_t len = nl ? (size_t)(nl - p) : (size_t)(end - p);
         if (len > 0) {
-            lines++;
-            for (size_t i = 0; i + nlen <= len; i++) {
-                if (memcmp(p + i, needle, nlen) == 0) { samples++; break; }
-            }
+            if (*p == ' ' || *p == '\t') frames++;
+            else samples++;
         }
         if (!nl) break;
         p = nl + 1;
     }
-    return samples > 0 && lines > samples;
+    return samples > 0 && frames > 0;
 }
 
 /* Probe continuous pipe mode with the exact argv shapes collection will
@@ -331,8 +329,7 @@ static int pipe_mode_works(const struct capabilities *caps, int pid)
     buf_init(&out);
     int rc = run_pipeline_once(argv_rec, argv_script, &out, 20);
     int ok = (rc == 0 && out.len > 0);
-    if (ok && caps->callgraph[0] &&
-        !callchains_present(&out, caps->record_events[0])) {
+    if (ok && caps->callgraph[0] && !callchains_present(&out)) {
         agent_log("  pipe mode produced samples but no call chains, "
                   "falling back to discrete rounds");
         ok = 0;

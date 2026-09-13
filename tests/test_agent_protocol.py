@@ -987,3 +987,41 @@ def test_pmuless_target_still_has_a_record_event(tmp_path, target_pid):
             assert so not in caps['record_events']
     finally:
         h.close()
+
+
+# A hybrid CPU names every event per PMU in `perf script` output.
+HYBRID_SCRIPT_OUTPUT = SCRIPT_OUTPUT.replace(' cycles: ', ' cpu_core/cycles/: ')
+
+# Old perf through a pipe: samples arrive with their ip on the header line and
+# no call-chain frames under them.
+CHAINLESS_SCRIPT_OUTPUT = (
+    'myapp  1234/1234  100.000100: 250000 cycles:   401136 hot_function '
+    '(/usr/bin/myapp)\n'
+    'myapp  1234/1235  100.000200: 250000 cycles:   401300 worker '
+    '(/usr/bin/myapp)\n'
+)
+
+
+@pytest.mark.parametrize('script_output,mode', [
+    # The check used to count samples by matching "cycles:", which a
+    # PMU-qualified name never contains -- so pipe mode was refused on every
+    # hybrid x86 machine.
+    (HYBRID_SCRIPT_OUTPUT, 'continuous'),
+    (CHAINLESS_SCRIPT_OUTPUT, 'rounds'),
+], ids=['pmu-qualified-names', 'chains-dropped'])
+def test_pipe_mode_requires_call_chains(tmp_path, target_pid, script_output,
+                                        mode):
+    d = tmp_path / 'pipe-shim'
+    d.mkdir()
+    shim = d / 'perf'
+    shim.write_text(render_shim(script_output=script_output))
+    shim.chmod(0o755)
+
+    h = AgentHarness(d, tmp_path)
+    try:
+        resp = h.command('start', args={'pid': target_pid, 'frequency': 99,
+                                        'duration': 1}, timeout=60)
+        assert resp['ok'] is True, resp
+        assert resp['mode'] == mode
+    finally:
+        h.close()
