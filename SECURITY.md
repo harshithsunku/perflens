@@ -60,7 +60,7 @@ The code is per agent start. Restarting the agent rotates it.
 
 ```
 agent → server  flag 3   {"type":"hello","version":1,"auth":"token",
-                          "agent_version":"0.10.0","platform":{...}}
+                          "agent_version":"0.11.0","platform":{...}}
 
 server → agent  flag 2   {"id":"<hex12>","cmd":"auth","args":{"token":"<code>"}}
 
@@ -173,8 +173,12 @@ token, so an older server configured with `--token` will reject it.
 | Version | Change |
 |---------|--------|
 | 0.10.0  | Pairing-code authentication. Legacy hello tokens accepted with a warning. |
-| 0.11.0  | Legacy hello tokens refused when the server has a token configured. |
+| 0.11.0  | No authentication change. Legacy hello tokens still accepted with a warning. |
+| 0.12.0  | Legacy hello tokens refused when the server has a token configured. |
 | 1.0.0   | A pairing code is required for both `--listen` and `--server`; only headless `--output` runs without one. |
+
+Refusing legacy tokens moved from 0.11.0 to 0.12.0: pre-0.10.0 agents are still
+downloadable from earlier releases, so they get one more release of warnings.
 
 ## Supported versions
 

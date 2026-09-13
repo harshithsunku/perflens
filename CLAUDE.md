@@ -12,10 +12,10 @@ tracked tree only: device addresses remain in commits before 2026-08-13, and
 [STATUS.md](STATUS.md) records the deliberate decision not to rewrite
 history over them.
 
-**Status: 0.10.0 released 2026-08-15** (tag, GitHub release and PyPI).
-Unreleased since: the big-endian validation pass and server-side naming of
-frames the target's `perf` cannot symbolize — see [STATUS.md](STATUS.md) for
-what is open.
+**Status: 0.11.0 released 2026-09-13** (tag, GitHub release and PyPI): the
+big-endian validation pass, server-side naming of frames the target's `perf`
+cannot symbolize, `--perf` for a perf outside `PATH`, and consistent `event`
+resolution. See [STATUS.md](STATUS.md) for what is open.
 
 ---
 

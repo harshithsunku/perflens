@@ -5,13 +5,22 @@ All notable changes to PerfLens are recorded here. Format follows
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html); pre-1.0
 releases may break APIs between minor versions when needed.
 
-## [Unreleased]
+## [0.11.0] — 2026-09-13
 
 First hands-on validation on **big-endian** hardware — a big-endian ARMv7
 embedded target (`armv7b`, single-core, kernel 4.4, no hardware PMU,
 no SSH, no internet from the device).
 Byte order turned out to be correct all along; the build flags and the
-capability probe were not.
+capability probe were not. Out of that pass came server-side naming of frames
+the target's `perf` cannot symbolize, and a way to point the agent at a `perf`
+that is not on `PATH`.
+
+**Upgrading — read this first.** Views that render a single event — the
+`collapsed` and `svg` exports, `/api/threads`, `/api/threads/<tid>`,
+`/api/window` and `/api/source` — now require `event` when a profile holds
+several, and answer 400 `ambiguous_event` naming the choices instead of merging
+them. The UI and the MCP tools already send one; scripts calling the API
+directly may need to.
 
 ### Added
 
@@ -85,7 +94,10 @@ capability probe were not.
   capture yields ~10 frames per sample through a file and one leaf frame
   through `record -o - | script -i -`. The probe accepted any non-empty
   output, so pipe mode was chosen and every flame graph collapsed to a single
-  level with no error reported. The probe now verifies call chains survive.
+  level with no error reported. The probe now verifies call chains survive —
+  by their indented frame lines rather than by event name, so the
+  PMU-qualified names a hybrid CPU prints (`cpu_core/cycles/`) do not switch
+  continuous mode off.
 - **`--toolchain-prefix` silently used the host `addr2line`.** The check was
   `os.path.isfile()`, which is False for the bare relative name the flag
   documents, so the cross tool was replaced by the host's and logged only as
