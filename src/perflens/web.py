@@ -334,6 +334,26 @@ def _resolve_event_name(event, available):
                       f'no data for event: {event} (have: {have})', 404)
 
 
+def _pick_event(event, available, what):
+    """Resolve `event` for a view that renders a single event.
+
+    Named: as `_resolve_event_name`. Omitted: the only event present, or 400
+    naming the choices -- summing cycles with cache-misses renders nothing
+    meaningful, and quietly picking one is how a view goes plausibly wrong on
+    a hybrid CPU.
+    """
+    if event:
+        return _resolve_event_name(event, available)
+    if not available:
+        return None, _err('no_data', 'no samples yet', 404)
+    if len(available) > 1:
+        return None, _err('ambiguous_event',
+                          f'{what} covers one event and this profile has '
+                          f'{len(available)}; ask for one of: '
+                          f'{", ".join(available)}', 400)
+    return available[0], None
+
+
 def _attachment(body, media_type, filename):
     return Response(content=body, media_type=media_type,
                     headers={'Content-Disposition':
@@ -353,19 +373,10 @@ def _export_response(ctx, all_samples, metadata, fmt, event, name):
         return _err('bad_format', f'unknown format: {fmt}', 400)
 
     available = get_event_types(all_samples)
-    if event:
-        event, error = _resolve_event_name(event, available)
+    if event or fmt != 'json':
+        event, error = _pick_event(event, available, f'format={fmt}')
         if error:
             return error
-    elif fmt != 'json':
-        if not available:
-            return _err('no_data', 'nothing to export', 404)
-        if len(available) > 1:
-            return _err('ambiguous_event',
-                        f'format={fmt} renders one event and this profile '
-                        f'has {len(available)}; ask for one of: '
-                        f'{", ".join(available)}', 400)
-        event = available[0]
 
     stem = f'perflens-{name}'
     if event:
@@ -487,16 +498,21 @@ async def api_sessions_import(request: Request, ctx=Ctx):
 # Threads / time window / source
 # ---------------------------------------------------------------------------
 
-@router.get('/api/threads', response_model=models.ThreadSummaryResponse)
-def api_threads(event: str = 'cycles', ctx=Ctx):
-    """Overview of all threads with CPU breakdown."""
+@router.get('/api/threads', response_model=models.ThreadSummaryResponse,
+            responses={400: _ERR, 404: _ERR})
+def api_threads(event: Optional[str] = None, ctx=Ctx):
+    """Overview of all threads with CPU breakdown, for one event."""
     with ctx.state.lock:
         all_samples = list(ctx.state.all_samples)
+    if not all_samples:
+        return _json({'total_samples': 0, 'threads': []})
 
+    event, error = _pick_event(event, get_event_types(all_samples),
+                               'the thread overview')
+    if error:
+        return error
     filtered = filter_samples_by_event(all_samples, event)
     total = len(filtered)
-    if total == 0:
-        return _json({'total_samples': 0, 'threads': []})
 
     by_tid = {}
     for s in filtered:
@@ -542,16 +558,22 @@ def api_threads(event: str = 'cycles', ctx=Ctx):
     return _json({'total_samples': total, 'threads': threads})
 
 
-@router.get('/api/threads/{tid}', response_model=models.ThreadViewResponse)
-def api_thread_view(tid: int, request: Request, event: str = 'cycles',
+@router.get('/api/threads/{tid}', response_model=models.ThreadViewResponse,
+            responses={400: _ERR, 404: _ERR})
+def api_thread_view(tid: int, request: Request, event: Optional[str] = None,
                     ctx=Ctx):
-    """Per-thread flamegraph + summary + source_files."""
+    """Per-thread flamegraph + summary + source_files, for one event."""
     with ctx.state.lock:
         all_samples = list(ctx.state.all_samples)
 
-    filtered = filter_samples_by_event(all_samples, event)
-    filtered = [s for s in filtered
-                if s.get('tid', s.get('pid', 0)) == tid]
+    filtered = []
+    if all_samples:
+        event, error = _pick_event(event, get_event_types(all_samples),
+                                   'the thread view')
+        if error:
+            return error
+        filtered = [s for s in filter_samples_by_event(all_samples, event)
+                    if s.get('tid', s.get('pid', 0)) == tid]
 
     if not filtered:
         return _json({'flamegraph': {'name': 'root', 'value': 0,
@@ -573,20 +595,27 @@ def api_thread_view(tid: int, request: Request, event: str = 'cycles',
     return _json(result, request=request, allow_gzip=True)
 
 
-@router.get('/api/window', response_model=models.TimeWindowResponse)
+@router.get('/api/window', response_model=models.TimeWindowResponse,
+            responses={400: _ERR, 404: _ERR})
 def api_window(request: Request, start: float, end: float,
-               event: str = 'cycles', tid: Optional[int] = None, ctx=Ctx):
+               event: Optional[str] = None, tid: Optional[int] = None,
+               ctx=Ctx):
     """Flamegraph + function summary restricted to samples received inside
-    [start, end] (unix seconds). Backs the UI's timeline scrubbing: samples
-    are stamped with arrival time, so a window on the Device Health
-    timeline maps to the profile chunks collected in that window. Bounded
-    by the raw-sample ring buffer (--max-samples)."""
+    [start, end] (unix seconds), for one event. Backs the UI's timeline
+    scrubbing: samples are stamped with arrival time, so a window on the
+    Device Health timeline maps to the profile chunks collected in that
+    window. Bounded by the raw-sample ring buffer (--max-samples)."""
     with ctx.state.lock:
         all_samples = list(ctx.state.all_samples)
 
-    filtered = filter_samples_by_event(all_samples, event)
-    filtered = [s for s in filtered
-                if start <= s.get('recv_ts', 0) <= end]
+    filtered = []
+    if all_samples:
+        event, error = _pick_event(event, get_event_types(all_samples),
+                                   'a time window')
+        if error:
+            return error
+        filtered = [s for s in filter_samples_by_event(all_samples, event)
+                    if start <= s.get('recv_ts', 0) <= end]
     if tid is not None:
         filtered = [s for s in filtered
                     if s.get('tid', s.get('pid', 0)) == tid]
@@ -609,7 +638,7 @@ def api_window(request: Request, start: float, end: float,
 
 
 @router.get('/api/source', response_model=models.SourceResponse,
-            responses={404: _ERR, 409: _ERR})
+            responses={400: _ERR, 404: _ERR, 409: _ERR})
 def api_source(request: Request, file: str, event: Optional[str] = None,
                tid: Optional[int] = None, ctx=Ctx):
     """Return annotated source for a specific file. Optional tid filter."""
@@ -620,7 +649,11 @@ def api_source(request: Request, file: str, event: Optional[str] = None,
     with ctx.state.lock:
         all_samples = list(ctx.state.all_samples)
 
-    if event:
+    if all_samples:
+        event, error = _pick_event(event, get_event_types(all_samples),
+                                   'source annotation')
+        if error:
+            return error
         all_samples = filter_samples_by_event(all_samples, event)
 
     if tid is not None:

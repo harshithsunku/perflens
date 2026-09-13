@@ -583,16 +583,7 @@ def test_live_export_resolves_hybrid_event_names(client, core):
     """A bare 'cycles' on a P/E-core CPU: /api/snapshot already refused it,
     while the SVG export merged both PMUs under a title reading 'cycles'.
     Exports now answer as the snapshot does."""
-    from conftest import load_fixture_chunks
-    chunks = load_fixture_chunks(FIXTURE)
-    hybrid = ['cpu_atom/cycles/', 'cpu_core/cycles/',
-              'cpu_core/instructions/']
-    rename = dict(zip(sorted({s['event_type'] for c in chunks for s in c}),
-                      hybrid, strict=False))
-    for chunk in chunks:
-        core.state.add_samples([dict(s, event_type=rename[s['event_type']])
-                                for s in chunk
-                                if s['event_type'] in rename])
+    _seed_hybrid_live(core)
 
     for fmt in ('collapsed', 'json', 'svg'):
         err = assert_error(client.get('/api/live/export',
@@ -694,6 +685,88 @@ def test_source_endpoint_errors(client, core):
                  409, 'no_mapper')
     # Missing required file param → validation
     assert_error(client.get('/api/source'), 400, 'validation')
+
+
+def _seed_hybrid_live(core):
+    """Live samples under the names a P/E-core machine reports: `cycles` on
+    both PMUs, `instructions` on one. Returns samples per event."""
+    from collections import Counter
+
+    from conftest import load_fixture_chunks
+    chunks = load_fixture_chunks(FIXTURE)
+    hybrid = ['cpu_atom/cycles/', 'cpu_core/cycles/',
+              'cpu_core/instructions/']
+    rename = dict(zip(sorted({s['event_type'] for c in chunks for s in c}),
+                      hybrid, strict=False))
+    seeded = []
+    for chunk in chunks:
+        renamed = [dict(s, event_type=rename[s['event_type']])
+                   for s in chunk if s['event_type'] in rename]
+        core.state.add_samples(renamed)
+        seeded += renamed
+    return Counter(s['event_type'] for s in seeded)
+
+
+_ALL_TIME = {'start': 0, 'end': 4102444800}
+
+
+@pytest.mark.parametrize('path,params', [
+    ('/api/threads', {}),
+    ('/api/threads/1', {}),
+    ('/api/window', _ALL_TIME),
+])
+def test_views_refuse_to_merge_events(client, core, path, params):
+    """A bare `cycles` used to merge both PMUs of a hybrid CPU here, and an
+    event that did not exist answered an empty 200 -- while /api/snapshot and
+    the exports already refused both."""
+    _seed_hybrid_live(core)
+    for extra in ({'event': 'cycles'}, {}):
+        err = assert_error(client.get(path, params={**params, **extra}),
+                           400, 'ambiguous_event')
+        assert 'cpu_atom/cycles/' in err['message']
+    err = assert_error(client.get(path, params={**params, 'event': 'nope'}),
+                       404, 'not_found')
+    assert 'cpu_core/instructions/' in err['message']
+
+
+def test_views_resolve_an_unambiguous_base_name(client, core):
+    counts = _seed_hybrid_live(core)
+    want = counts['cpu_core/instructions/']
+    body = client.get('/api/threads', params={'event': 'instructions'}).json()
+    assert body['total_samples'] == want
+    body = client.get('/api/window',
+                      params={**_ALL_TIME, 'event': 'instructions'}).json()
+    assert body['window']['samples'] == want
+
+
+def test_views_are_empty_rather_than_errors_before_data(client):
+    """The Threads tab and timeline load before the first chunk arrives."""
+    assert client.get('/api/threads').json() == {'total_samples': 0,
+                                                 'threads': []}
+    view = client.get('/api/threads/1').json()
+    assert view['function_summary']['total_samples'] == 0
+    body = client.get('/api/window', params=_ALL_TIME).json()
+    assert body['window']['samples'] == 0
+
+
+def test_source_annotates_one_event(client, core):
+    """Without `event`, source annotation used to count every event's samples
+    on the same lines."""
+    counts = _seed_hybrid_live(core)
+
+    class Mapper:
+        def map_samples_to_lines(self, samples):
+            return {'x.c': samples}
+
+        def annotate_source(self, file, samples):
+            return [{'line': 1, 'samples': len(samples)}]
+
+    core.state.source_mapper = Mapper()
+    assert_error(client.get('/api/source', params={'file': 'x.c'}),
+                 400, 'ambiguous_event')
+    body = client.get('/api/source', params={
+        'file': 'x.c', 'event': 'cpu_atom/cycles/'}).json()
+    assert body['lines'][0]['samples'] == counts['cpu_atom/cycles/']
 
 
 def test_snapshot_gzip_negotiation(client, core):

@@ -376,7 +376,7 @@ export interface paths {
         };
         /**
          * Api Threads
-         * @description Overview of all threads with CPU breakdown.
+         * @description Overview of all threads with CPU breakdown, for one event.
          */
         get: operations["api_threads_api_threads_get"];
         put?: never;
@@ -396,7 +396,7 @@ export interface paths {
         };
         /**
          * Api Thread View
-         * @description Per-thread flamegraph + summary + source_files.
+         * @description Per-thread flamegraph + summary + source_files, for one event.
          */
         get: operations["api_thread_view_api_threads__tid__get"];
         put?: never;
@@ -417,10 +417,10 @@ export interface paths {
         /**
          * Api Window
          * @description Flamegraph + function summary restricted to samples received inside
-         *     [start, end] (unix seconds). Backs the UI's timeline scrubbing: samples
-         *     are stamped with arrival time, so a window on the Device Health
-         *     timeline maps to the profile chunks collected in that window. Bounded
-         *     by the raw-sample ring buffer (--max-samples).
+         *     [start, end] (unix seconds), for one event. Backs the UI's timeline
+         *     scrubbing: samples are stamped with arrival time, so a window on the
+         *     Device Health timeline maps to the profile chunks collected in that
+         *     window. Bounded by the raw-sample ring buffer (--max-samples).
          */
         get: operations["api_window_api_window_get"];
         put?: never;
@@ -1959,6 +1959,15 @@ export interface operations {
                     "application/json": components["schemas"]["SourceResponse"];
                 };
             };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             /** @description Not Found */
             404: {
                 headers: {
@@ -2031,7 +2040,7 @@ export interface operations {
     api_threads_api_threads_get: {
         parameters: {
             query?: {
-                event?: string;
+                event?: string | null;
             };
             header?: never;
             path?: never;
@@ -2048,6 +2057,24 @@ export interface operations {
                     "application/json": components["schemas"]["ThreadSummaryResponse"];
                 };
             };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             /** @description Validation Error */
             422: {
                 headers: {
@@ -2062,7 +2089,7 @@ export interface operations {
     api_thread_view_api_threads__tid__get: {
         parameters: {
             query?: {
-                event?: string;
+                event?: string | null;
             };
             header?: never;
             path: {
@@ -2081,6 +2108,24 @@ export interface operations {
                     "application/json": components["schemas"]["ThreadViewResponse"];
                 };
             };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             /** @description Validation Error */
             422: {
                 headers: {
@@ -2097,7 +2142,7 @@ export interface operations {
             query: {
                 start: number;
                 end: number;
-                event?: string;
+                event?: string | null;
                 tid?: number | null;
             };
             header?: never;
@@ -2113,6 +2158,24 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TimeWindowResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
             /** @description Validation Error */
