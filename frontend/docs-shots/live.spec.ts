@@ -65,6 +65,9 @@ test.describe('docs screenshots (live capture)', () => {
     expect(await rows.count()).toBeGreaterThan(1);
     await collapseMetrics(page);
     await focusContent(page);
+    // A chunk landing after the check above refetches the thread table, and on
+    // a large profile the shot can catch it mid-load ("Waiting for data...").
+    await expect(rows.first()).toBeVisible({ timeout: 20_000 });
     await snap(page, '04-threads.png');
   });
 
