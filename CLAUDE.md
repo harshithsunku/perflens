@@ -12,9 +12,10 @@ tracked tree only: device addresses remain in commits before 2026-08-13, and
 [STATUS.md](STATUS.md) records the deliberate decision not to rewrite
 history over them.
 
-**Status: 0.8.0 released 2026-08-13; 0.9.0 in progress.** The freeze that
-governed 0.8.0 is discharged. 0.9.0 is the hands-on validation pass 0.8.0
-shipped without — see [STATUS.md](STATUS.md) for what it has turned up.
+**Status: 0.10.0 released 2026-08-15** (tag, GitHub release and PyPI).
+Unreleased since: the big-endian validation pass and server-side naming of
+frames the target's `perf` cannot symbolize — see [STATUS.md](STATUS.md) for
+what is open.
 
 ---
 

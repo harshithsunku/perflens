@@ -4,12 +4,45 @@ Cross-session working state. Update at the start and end of every working
 session. Release history lives in [CHANGELOG.md](CHANGELOG.md); this file
 is what is *currently true* and what is *left to do*.
 
-## Current phase — 0.10.0 in progress: the pre-launch stabilization pass
+## Current phase — unreleased since 0.10.0
 
-**The project has never been shared publicly.** This pass closes what a
-pre-launch audit turned up, so the first people who look at it find something
-that holds up. Nothing is tagged, nothing is on PyPI, and no release job has
-run.
+**0.10.0 is released** (2026-08-15): tag `v0.10.0`, GitHub release, PyPI. The
+work since lives on `validate-bigendian` and reaches master through a PR: the
+big-endian pass, server-side naming of frames the target's `perf` cannot
+symbolize, and the export `event` fix.
+
+**Correction, found 2026-09-13: the project has been public all along.** The
+0.10.0 section below opens with "never been shared publicly … nothing is on
+PyPI". That was written before release and never revisited: PyPI carries 0.6.0
+through 0.10.0, and GitHub releases with agent binaries go back to 0.5.0. It
+matters beyond wording. The 2026-08-15 decision to drop backward compatibility
+rested on there being "no pre-0.10.0 agent population to protect", and there
+may well be one. The decision is not reversed here, but its premise was wrong,
+and the legacy hello-token path it left untested is reachable from real
+installs.
+
+### Open
+
+- [ ] **Upload `armeb-linux-musleabi-cross.tgz` to the `toolchains` release**,
+      or the `armeb` build leg fails. See *Required follow-up* below.
+- [ ] **Server RSS drift after the sample ring fills — the overnight soak never
+      ran.** The only run under 0.10.0 lasted 20 minutes and ended in a
+      deliberate stop, not a crash, with the function count still climbing.
+      Detail in the 0.10.0 section.
+- [ ] **`/api/threads`, `/api/threads/<tid>` and `/api/window` still default to
+      `event=cycles` and match on base names**, so on a hybrid CPU a bare
+      `cycles` merges both PMUs there, while `/api/snapshot` and now the exports
+      answer 400 `ambiguous_event`. The inconsistency the export fix closed,
+      one layer over.
+- [ ] Carried, smaller: the agent cannot use a `perf` outside `PATH`;
+      `perflens push-agent` does not map `armv7b`; the armv7 agent is untested
+      under 0.10.0.
+
+## Previous phase — 0.10.0 released: the pre-launch stabilization pass
+
+*Written before the release. Its claim that the project was unpublished was
+wrong; see the correction above.* This pass closed what a pre-launch audit
+turned up, so the first people who look at it find something that holds up.
 
 **The headline finding: `--listen` was an unauthenticated remote-control
 daemon.** It bound every interface, accepted any peer, and executed all 13
@@ -327,9 +360,9 @@ confidently wrong name.
 
 ### Also reproduced: the export event filter, more sharply than before
 
-The 2026-08-15 finding is **still open and confirmed on this bed**, and this
-capture demonstrates it more cleanly because the two events have near-equal
-counts:
+The 2026-08-15 finding was **still open and confirmed on this bed** (fixed
+since — see that pass), and this capture demonstrates it more cleanly because
+the two events have near-equal counts:
 
 | query | expected | actual |
 |---|---|---|
@@ -369,6 +402,12 @@ counts:
 and `aarch64_be-linux-musl-cross.tgz`. **The soft-float tarball must be
 uploaded to that release or the `armeb` matrix leg will fail.** The tarball is
 at `~/.perflens-testbeds/toolchains/armeb-linux-musleabi.tgz`.
+
+**Still not uploaded as of 2026-09-13** (re-checked against the release). The
+file unpacks to `armeb-linux-musleabi-cross/`, which is exactly the directory
+the workflow derives from the asset name, so it must be uploaded *under* that
+name: `armeb-linux-musleabi-cross.tgz`, not its on-disk
+`armeb-linux-musleabi.tgz`.
 
 ## Test pass 2026-08-15 — the x86 bed, and one bug it found
 
@@ -426,6 +465,14 @@ Everything the open item asked for, on `paranoid=1` hybrid hardware:
   cpuset's (4, 20, 22, 23), and memory is container-correct via lxcfs.
 
 ### The finding: both export endpoints ignore `event` for two of three formats
+
+**Fixed 2026-09-13 on `validate-bigendian`.** Every format now resolves `event`
+through the helper `/api/snapshot` uses; `collapsed` and `svg` require one when
+a profile holds several, and `json` without one still carries them all. The
+bare-`cycles` and empty-`event=` cases below are fixed with it. The new tests
+assert per-event *counts* against the fixture rather than status codes, and
+all seven fail against the previous server. The same inconsistency remains in
+`/api/threads` and `/api/window`; see *Open* at the top.
 
 **`/api/live/export` and `/api/sessions/<id>/export` silently ignore the
 `event` parameter when `format` is `collapsed` or `json`.** `svg` is correct.
@@ -628,8 +675,9 @@ deliberate exception to the agent freeze.
       landed *before* the screenshots on purpose: the docs drawer renders
       the version and is itself one of the shots — `11-docs-drawer.png` now
       reads v0.9.0.
-- [ ] **The response-model contract is still unenforced** — planned this
-      pass, not done. `_json` returns a raw Starlette `Response`, and
+- [x] **The response-model contract is still unenforced** — *(closed in
+      0.10.0 by `tests/test_response_models.py`, which found a live bug on
+      its first run.)* Planned this pass, not done. `_json` returns a raw Starlette `Response`, and
       FastAPI skips `response_model` entirely when a handler does that, so
       all 26 routes declare a schema nothing checks. `IndexStatus` had
       drifted to declaring 3 of the 8 fields it returns; that instance is
@@ -650,14 +698,18 @@ deliberate exception to the agent freeze.
       function lists under-reported for every non-main module. `--module-map`
       now covers the remaining case, a device path that exists nowhere
       locally.
-- [ ] **Test coverage gaps**, unchanged except for sessions:
+- [x] **Test coverage gaps** — *(closed in 0.10.0: `test_export.py`,
+      `test_cli.py`, auth-path tests for `agentlink.py` in
+      `test_agentlink_auth.py`, mypy in CI, and `npm run typecheck` covering
+      the test files.)* Unchanged except for sessions:
       `agentlink.py` (569 lines) is the largest untested Python module — the
       15 agent-protocol tests drive the *C binary* and import no `perflens`
       module at all. No `test_export.py`, no `test_cli.py`. No mypy or
       pyright anywhere. The frontend has no `typecheck` script (only via
       `tsc -b && vite build`), and every test/e2e/docs-shots `.ts` file sits
       outside all tsconfig projects, so none is ever typechecked.
-- [ ] **`build.yml` has no `pull_request` trigger**, so wheel packaging and
+- [x] **`build.yml` has no `pull_request` trigger** — *(closed in 0.10.0 by
+      `83ce146`.)* So wheel packaging and
       all five agent cross-compiles are still post-merge discoveries. The
       `symoff` change touches the agent, which makes this more relevant than
       it was: a cross-compile break would not surface on the PR.
@@ -685,7 +737,8 @@ deliberate exception to the agent freeze.
       little-endian hardware by construction, which is precisely how they
       survive. Both reference devices are little-endian. Accepted
       deliberately as compile-only; do not record it as passing.
-- [ ] Two stale remote branches (`origin/stabilize-0.8.0`,
+- [x] Two stale remote branches — *(deleted in 0.10.0, each verified an
+      ancestor of master first.)* (`origin/stabilize-0.8.0`,
       `origin/copilot/review-security-issues`) — both fully merged
       ancestors of master. Left alone deliberately: deleting remote
       branches is an outward-facing action and was not needed for this work.
@@ -876,20 +929,24 @@ tools/live-capture.sh            # server on :8089, matrixlab, 25 threads
 Worth exercising specifically, roughly in order of how much of the release
 touched it:
 
-- [ ] **The whole live loop on a real device**, not just loopback: agent
+*Boxes below updated 2026-09-13 against the 0.9.0 "Validated by hand" and
+"Validated on real devices" lists. The two left open were never recorded as
+done.*
+
+- [x] **The whole live loop on a real device**, not just loopback: agent
       connects, capability probe, continuous collection, pause / resume /
       stop, process switching, live settings changes. Nothing in this
       release touched the agent or the wire protocol, but nothing here
       re-verified them on hardware either.
-- [ ] **Deep recursion**, since that is what the `/api/snapshot` fix
+- [x] **Deep recursion**, since that is what the `/api/snapshot` fix
       addresses. Profile something with stacks well past ~126 frames and
       confirm the flame graph renders truncated rather than the view going
       blank. `MAX_FLAMEGRAPH_DEPTH` is the knob.
-- [ ] **Source annotation against your own build** — the fix path depends on
+- [x] **Source annotation against your own build** — the fix path depends on
       `--binary` pointing at an unstripped `-g` binary and on `--source-dir`
       / `--path-map` resolving. Cross-compiled targets exercise
       `--toolchain-prefix` and `--sysroot`, which nothing here covered.
-- [ ] **Session save → replay → diff**, including setting a baseline across
+- [x] **Session save → replay → diff**, including setting a baseline across
       two separate captures. Replay diffing a session against itself is all
       zeros by construction, so the differential view is only meaningfully
       testable with two real runs.
@@ -899,8 +956,9 @@ touched it:
 - [ ] **The docs site as rendered**, not just as diffs: `docs/index.html`
       hero, the 12 tour cards, the GIF. Check the screenshots still describe
       what their captions claim after any UI change you make.
-- [ ] **`uvx perflens` from the built wheel on a machine that is not this
-      one** — ideally in a container, which would close the caveat on the
+- [x] **`uvx perflens` from the built wheel on a machine that is not this
+      one** — *(its purpose, independence from system binutils, was closed
+      in 0.9.0 by stripping `PATH`; never re-run on another machine)* — ideally in a container, which would close the caveat on the
       Phase 5 clean-room check (clean interpreter, but no Docker here, so
       independence from system binutils is unproven).
 
