@@ -52,9 +52,14 @@ installs.
 
 - [x] **`armeb-linux-musleabi-cross.tgz` is on the `toolchains` release**
       (uploaded 2026-09-13); the `armeb` build leg is green.
-- [ ] **The local dev venv runs mcp 2.0.0; CI and a fresh install resolve
-      2.2.0.** That gap is how the MCP error regression stayed invisible
-      locally. Upgrade the venv within the `mcp>=2,<3` bound.
+- [x] **The local dev venv now runs mcp 2.2.0**, matching CI and a fresh
+      install (upgraded 2026-09-13; 355 pytest pass on it). The 2.0.0 venv is
+      how the MCP error regression stayed invisible locally.
+- [x] **Post-release cleanup** (2026-09-13): the merged `validate-bigendian`
+      branch is deleted on GitHub and locally, and the pre-rewrite commits are
+      purged from the local object store. GitHub still serves them by hash
+      (and through PR #3's force-push event) until GitHub Support removes them;
+      that request is the owner's to file.
 - [ ] **Refuse legacy hello tokens when the server has a token set** —
       scheduled for 0.12.0 in SECURITY.md.
 - [ ] **Server RSS drift after the sample ring fills — the overnight soak never
