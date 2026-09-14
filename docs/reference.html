@@ -63,7 +63,8 @@
                 <tr><td><code>--source-dir DIR</code></td><td><code>.</code></td><td>Root of the source tree for line annotation.</td></tr>
                 <tr><td><code>--binary PATH</code></td><td>&mdash;</td><td>Unstripped binary (enables <code>addr2line</code>).</td></tr>
                 <tr><td><code>--map PATH</code></td><td>&mdash;</td><td>GNU ld linker map file (optional symbol fallback).</td></tr>
-                <tr><td><code>--path-map FROM=TO</code></td><td>&mdash;</td><td>Rewrite compile-time paths (e.g. <code>/build/src=/home/user/src</code>).</td></tr>
+                <tr><td><code>--path-map FROM=TO</code></td><td>&mdash;</td><td>Rewrite compile-time paths (e.g. <code>/build/src=/home/user/src</code>). Comma-separated for several; a malformed entry is reported and skipped.</td></tr>
+                <tr><td><code>--module-map FROM=TO</code></td><td>&mdash;</td><td>Map a device module path to a local binary (e.g. <code>/opt/app/foo=/build/foo.sym</code>) &mdash; for the one shared object that does not live under a sysroot. Comma-separated for several.</td></tr>
                 <tr><td><code>--addr2line PATH</code></td><td>&mdash;</td><td>Custom <code>addr2line</code> binary (overrides bundled and PATH).</td></tr>
                 <tr><td><code>--readelf PATH</code></td><td>&mdash;</td><td>Custom <code>readelf</code> binary.</td></tr>
                 <tr><td><code>--toolchain-prefix PREFIX</code></td><td>&mdash;</td><td>Cross-compile prefix (e.g. <code>arm-linux-gnueabihf-</code>). Derives <code>addr2line</code> + <code>readelf</code>.</td></tr>
@@ -157,10 +158,18 @@
             resolve a bare name onto the per-cluster ones when that is unambiguous, and
             name the candidates when it is not.
         </p>
+        <p>
+            The UI records <strong>one sampling event by default</strong>
+            (<code>cycles</code>, or <code>cpu-clock</code> on a target without a
+            PMU); the others are opt-in in the wizard's Perf step and the control
+            bar's settings. Each extra event multiplies the data the device sends.
+        </p>
         <table class="ref">
             <thead><tr><th>Event</th><th>Typical use</th><th>Mode</th></tr></thead>
             <tbody>
-                <tr><td><code>cycles</code></td><td>CPU time / hot paths</td><td>record + stat</td></tr>
+                <tr><td><code>cycles</code></td><td>CPU time / hot paths (the UI's default sampling event)</td><td>record + stat</td></tr>
+                <tr><td><code>cpu-clock</code></td><td>Wall-clock sampling where there is no hardware PMU (embedded silicon; the default there)</td><td>record + stat</td></tr>
+                <tr><td><code>task-clock</code></td><td>Task CPU time; the other software sampling event</td><td>record + stat</td></tr>
                 <tr><td><code>instructions</code></td><td>IPC, retired instruction count</td><td>record + stat</td></tr>
                 <tr><td><code>cache-misses</code></td><td>Last-level cache misses</td><td>record + stat</td></tr>
                 <tr><td><code>cache-references</code></td><td>LLC accesses</td><td>record + stat</td></tr>
@@ -230,19 +239,29 @@ claude mcp add perflens -- perflens mcp</code></pre>
             Python 3.10&ndash;3.13 (parser, aggregator differentials against
             device-captured fixtures, source mapper, HTTP API, MCP tools, provisioning
             against a fake release server, and the C-agent wire protocol driven
-            through a fake framing server with a <code>perf</code> shim), plus a
-            frontend job: OpenAPI schema drift check, vitest unit tests, and a
+            through a fake framing server with a <code>perf</code> shim), and
+            gates every PR on <code>ruff</code>, <code>mypy</code> and
+            <code>tools/check_version.py</code>. Two more jobs run the protocol
+            tests against the agent built with AddressSanitizer+UBSan and with
+            ThreadSanitizer (<code>make SANITIZE=&hellip;</code>) and the C unit
+            tests (<code>make check</code>); a <code>shellcheck</code> job covers
+            the shell scripts. A frontend job adds the OpenAPI schema and
+            TypeScript typegen drift checks, vitest unit tests, a
             self-contained Playwright browser E2E that replays a fixture session
-            through the real UI.
+            through the real UI, and a smoke run of the docs screenshot harness.
         </p>
         <p>
             <code>.github/workflows/build.yml</code> lints (<code>ruff</code>),
             runs the tests, builds and smoke-runs the Python wheel, builds the
             static C agent for five architectures (x86_64, aarch64, aarch64_be,
             armv7, armeb), and builds static addr2line/readelf tools bundles
-            for <code>perflens provision</code>. Big-endian agent targets use
-            musl toolchains from <code>musl.cc</code> since Ubuntu only ships
-            little-endian sysroots. Tagged pushes (<code>v*</code>) create a
+            for <code>perflens provision</code>. Every agent asset is a musl
+            static build (static glibc cannot resolve names on a foreign
+            device), from toolchains published on the repository's
+            <code>toolchains</code> release; both 32-bit ARM assets are
+            soft-float. CI asserts what each asset claims &mdash; statically
+            linked, the float ABI, BE8 for big-endian &mdash; strips the release
+            binary and keeps the unstripped one as a CI artifact. Tagged pushes (<code>v*</code>) create a
             GitHub Release and attach all artifacts &mdash; including raw
             <code>perflens-agent-linux-&lt;arch&gt;</code> binaries with stable
             names that <code>install-agent.sh</code> and the agent's
@@ -284,7 +303,7 @@ claude mcp add perflens -- perflens mcp</code></pre>
 <pre><code>perflens/
 ├── install-agent.sh              # curl-able agent installer (no sudo)
 ├── agent-c/
-│   ├── src/                      # C agent modules (agent.h + 10 .c files)
+│   ├── src/                      # C agent modules (agent.h + 12 .c files)
 │   ├── Makefile                  # native + cross-compile targets
 │   └── vendor/zstd/              # vendored zstd amalgamation
 ├── pyproject.toml                # pip/uv package (console script: perflens)

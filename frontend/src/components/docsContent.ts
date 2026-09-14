@@ -144,7 +144,7 @@ perflens serve --addr2line /opt/toolchain/bin/arm-linux-gnueabihf-addr2line \\
   <ol class="docs-list">
     <li><strong>Connect</strong> &mdash; Enter the agent's IP and port (default 9999)</li>
     <li><strong>Process</strong> &mdash; Pick a PID from the process list or enter manually</li>
-    <li><strong>Perf</strong> &mdash; Auto-probes supported perf events and call-graph modes on the target</li>
+    <li><strong>Perf</strong> &mdash; Auto-probes supported perf events and call-graph modes on the target. One sampling event (<code>cycles</code>, or <code>cpu-clock</code> without a PMU) is selected by default; tick more only if you need them &mdash; each extra event multiplies the data the device sends</li>
     <li><strong>Binary</strong> &mdash; Path to unstripped binary, source directory, and optional toolchain/sysroot settings</li>
     <li><strong>Options</strong> &mdash; Sampling frequency (Hz) and collection duration (seconds)</li>
     <li><strong>Start</strong> &mdash; Review settings and begin profiling</li>
@@ -156,7 +156,7 @@ perflens serve --addr2line /opt/toolchain/bin/arm-linux-gnueabihf-addr2line \\
     <li><strong>Functions tab</strong> &mdash; Ranked table of hottest functions by self% and total%. Click a row to view annotated source.</li>
     <li><strong>Source tab</strong> &mdash; Line-level annotated source with heat-colored sample counts (red = hot, green = cold).</li>
     <li><strong>Flame Graph tab</strong> &mdash; Interactive SVG flame graph. Click to zoom, double-click for source. Search bar highlights matching functions.</li>
-    <li><strong>Threads tab</strong> &mdash; Per-thread CPU breakdown. Click a thread to drill into its flamegraph, function table, and per-line source view.</li>
+    <li><strong>Threads tab</strong> &mdash; Per-thread CPU breakdown. Click a thread to drill into its flamegraph, function table, and per-line source view. Live sessions only: a saved session carries per-event aggregates, not the raw samples the thread views are built from.</li>
     <li><strong>Sessions tab</strong> &mdash; List of saved sessions. Replay any session or import a <code>perf.data</code> file.</li>
   </ul>
 </section>
@@ -193,7 +193,7 @@ perflens serve --addr2line /opt/toolchain/bin/arm-linux-gnueabihf-addr2line \\
 </section>
 <section class="docs-section">
   <h3>Thread Filtering</h3>
-  <p>When profiling multi-threaded programs, use the <strong>Thread</strong> dropdown next to the event selector to filter all views by a specific thread. The dropdown shows thread names (from <code>pthread_setname_np</code> / <code>prctl</code>) and TIDs.</p>
+  <p>When profiling multi-threaded programs, use the <strong>Thread</strong> dropdown next to the event selector to filter all views by a specific thread (live sessions only). The dropdown shows thread names (from <code>pthread_setname_np</code> / <code>prctl</code>) and TIDs.</p>
 </section>
 <section class="docs-section">
   <h3>Device Health Strip</h3>

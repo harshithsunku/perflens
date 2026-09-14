@@ -390,6 +390,32 @@ def test_derived_stats_sum_pmu_qualified_counters():
     assert stats['cache_miss_rate']['value'] == 25.0
 
 
+def test_perf_stat_accepts_ungrouped_numbers():
+    """The agent runs perf under LC_ALL=C since 0.12.0, and the C locale
+    groups nothing: a 12-digit cycles count arrives as plain digits. The
+    grouping-tolerant regex matched neither branch for it and every
+    counter but the two-digit page-faults was dropped -- found on the
+    first hardware run after the change, not by any fixture (all of which
+    were captured under a grouping locale)."""
+    text = ("\n Performance counter stats for process id '1587':\n\n"
+            "      784760762882      cpu_atom/cycles/                          \n"
+            "     <not counted>      cpu_core/cycles/                    (0.00%)\n"
+            "     1895864972475      cpu_atom/instructions/                    \n"
+            "                33      page-faults                               \n"
+            "           2950.76 msec task-clock            #    0.983 CPUs utilized\n"
+            "          2950.760 msec cpu-clock\n"
+            "       180.009563356 seconds time elapsed\n")
+    stats = parse_perf_stat(text)
+    assert stats['cpu_atom/cycles/']['value'] == 784760762882
+    assert stats['cpu_atom/instructions/']['value'] == 1895864972475
+    assert 'cpu_core/cycles/' not in stats
+    assert stats['page-faults']['value'] == 33
+    assert stats['task-clock']['value'] == 2950.76
+    assert stats['cpu-clock']['value'] == 2950.76
+    assert stats['time_elapsed']['value'] == 180.009563356
+    assert stats['ipc']['value'] == 2.42
+
+
 def test_branch_miss_rate_from_branch_instructions():
     """perf spells the counter `branch-instructions` when asked for it by
     that name (the fixtures do); only `branches` used to be recognised."""

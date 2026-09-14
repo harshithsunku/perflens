@@ -319,7 +319,8 @@ CORS header: the UI is same-origin and the dev server proxies `/api`.
 --source-dir DIR      Root of source tree         (default .)
 --binary PATH         Unstripped binary for addr2line
 --map PATH            GNU ld linker map file (optional symbol fallback)
---path-map FROM=TO    Rewrite compile-time paths to local paths
+--path-map FROM=TO    Rewrite compile-time paths to local paths (comma-separated)
+--module-map FROM=TO  Map a device module path to a local binary
 --addr2line PATH      Custom addr2line binary
 --readelf PATH        Custom readelf binary
 --toolchain-prefix P  Cross-compilation prefix (e.g. arm-linux-gnueabihf-)
@@ -467,7 +468,9 @@ protocol tests shorten it).
   warns at startup).
 - Capability probing adds a few seconds on a typical target (about 6 s of
   `perf` sleeps: one batched `stat`, one batched `record`, one call-graph
-  recording, the pipe-mode probe), longer on slow or hybrid-CPU hardware.
+  recording, the pipe-mode probe), longer on slow or hybrid-CPU hardware:
+  measured 12.7 s on an 8-core ARM64 board and 10.8 s in a hybrid-CPU
+  container (2026-09-14).
   It runs on the collection thread, so `ping`/`status`/`stop` answer
   meanwhile and `status` reports `probing`. Switching process re-checks
   only that the new pid can be recorded.

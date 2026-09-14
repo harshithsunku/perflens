@@ -114,10 +114,70 @@ the big-endian target, and a 0.12.0 release at the end.
       hint, live/recovered session tags. **49 vitest (was 24), 16
       Playwright scenarios (was 10).** Deferred: component render tests
       needing jsdom, the visual overhaul.
-- [ ] Phase 7 — docs, hardware pass, 0.12.0.
+- [ ] **Phase 7 — docs, hardware pass, 0.12.0.** Done: docs drift
+      (`--module-map`, `cpu-clock`/`task-clock`, the CI description, musl
+      toolchains, "12 .c files", the build snippets in README, the docs
+      site and CONTRIBUTING, the in-app docs for the single-event default
+      and live-only thread views); hardware pass on both SSH beds (below);
+      the big-endian checklist written for the user; version bumped to
+      0.12.0 in all seven places. Left: docs screenshots, CI on the pushed
+      branch, the release itself, and the user's big-endian run.
 
-**Not yet run on hardware.** Everything in Phase 1 is proven against the
-shim only; the hardware pass is Phase 7.
+### Hardware pass, 2026-09-14
+
+Both SSH beds ran the stabilization branch's musl agent, installed through
+`install-agent.sh` from a local staging release (`sha256: verified` on
+both). Each run: `start` with one event (`cycles`) at 99 Hz and a 60 s
+interval, five minutes of SSE watched from the controller, a stop and
+restart on the same pid, disconnect.
+
+| | x86_64 container (hybrid, paranoid 0) | ARM64 board (8 cores, paranoid -1) |
+|---|---|---|
+| probe (`Probe finished in`) | 10.8 s | 12.7 s |
+| mode, call graph | continuous, `fp` | continuous, `fp` |
+| chunk interval | 60.1–60.3 s | 50.7–60.1 s (16 MB size flush) |
+| chunk text → wire | 9.8 MB → 0.49 MB | 16.8 MB → 0.80 MB |
+| samples per chunk | ~18,600 | ~29,900 |
+| stat sections | every chunk after the first, `time_elapsed` 60.0 s each | same |
+| metrics gap, max | 2.0 s (150 frames) | 2.4 s (150 frames) |
+| restart on the same pid | 0.0 s, capabilities carried over | same |
+| server errors / bad frames | 0 | 0 |
+
+- **The hardware run found a regression the suite could not.** The agent
+  now runs perf with `LC_ALL=C`, which prints counters without grouping,
+  and the grouping-tolerant stat parser added in Phase 1 matched a
+  12-digit plain count under neither of its branches: every counter except
+  `page-faults` vanished from the live stat bar on both beds. Every
+  committed fixture was captured under a grouping locale and the protocol
+  shim printed `1,234,567`, so nothing could show it. Fixed (plain digits
+  accepted first), the shim now prints C-locale numbers, and the stat
+  coverage protocol test asserts the parsed values. Re-parsed from the
+  spooled chunks: `cycles`, `instructions`, `task-clock` and IPC are all
+  present (container IPC 2.4 on the E-cores its cpuset exposes, ARM IPC
+  1.1).
+- **A-02 verified.** Every chunk after the first carries exactly one stat
+  round of 60.0 s: the whole interval is counted, where 0.11.0 counted
+  about half of it, one chunk late.
+- **A-01 verified.** On the ARM board 26 threads at 99 Hz produce ~17 MB
+  of `perf script` text a minute, so chunks flush on size just before the
+  interval ends; no chunk was dropped.
+- **Plan item 4.11 (parse off the socket thread) is not needed.** With
+  9.8 MB and 16.8 MB chunks parsed inline, the largest gap between system
+  metrics frames was 2.0 s and 2.4 s against a 2 s cadence.
+- **Probe time** is 10.8 s and 12.7 s, down from ~24 s of `perf` sleeps in
+  0.11.0, but above the plan's "under 5 s on x86" target on the hybrid
+  container, where every event is probed per PMU.
+- **Self-update** on the ARM board, over an ssh reverse tunnel to a
+  loopback origin: a tampered asset is refused with "checksum mismatch"
+  and the binary left untouched; a missing sidecar warns and proceeds over
+  curl; a matching sidecar logs "Checksum verified". A plaintext LAN origin
+  is refused outright, as designed.
+- **The armv7 soft-float agent** runs under the ARM board's 64-bit kernel:
+  six record events, `fp`, pipe mode, probe 15.5 s, a headless round of
+  2,048 samples with its stat section.
+- **Not run here:** the big-endian ARMv7 target (the user's checklist, at
+  `~/.perflens-testbeds/bigendian-checklist-0.12.0.md`) and the overnight
+  soak.
 
 ## Previous phase — 0.11.0 released
 
@@ -175,8 +235,9 @@ installs.
       purged from the local object store. GitHub still serves them by hash
       (and through PR #3's force-push event) until GitHub Support removes them;
       that request is the owner's to file.
-- [ ] **Refuse legacy hello tokens when the server has a token set** —
-      scheduled for 0.12.0 in SECURITY.md.
+- [x] **Refuse legacy hello tokens when the server has a token set** —
+      done in the 0.12.0 stabilization pass (Phase 4); the rejection names
+      the upgrade.
 - [ ] **Server RSS drift after the sample ring fills — the overnight soak never
       ran.** Deferred by the user (2026-09-13). The only run under 0.10.0 lasted
       20 minutes and ended in a deliberate stop, not a crash, with the function
@@ -191,7 +252,10 @@ installs.
       running agent through `verify_perf {perf}`.
 - [x] **`perflens push-agent` on big-endian ARM** (2026-09-13): it now probes
       byte order the way `install-agent.sh` does.
-- [ ] Carried, smaller: the armv7 agent is untested under 0.10.0.
+- [x] The armv7 agent under a 64-bit kernel (2026-09-14, the 0.12.0 musl
+      soft-float build on the ARM64 bed's `CONFIG_COMPAT` kernel): probes
+      six record events, `fp` call graphs and pipe mode in 15.5 s and
+      collects a headless round (2,048 samples, 7.4 MB, one stat section).
 
 ### perf outside `PATH`, verified on hardware (2026-09-13)
 

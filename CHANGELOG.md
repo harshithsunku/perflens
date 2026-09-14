@@ -7,6 +7,8 @@ releases may break APIs between minor versions when needed.
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-09-14
+
 The sixth agent unfreeze, decided 2026-09-14 for a stabilization pass over
 the whole project. The wire protocol is unchanged: every frame type, command
 and hello field is as in 0.11.0, and a 0.11.0 server drives this agent as
@@ -45,6 +47,16 @@ source view that reset itself every chunk.
   the parser could not read, and a `cpu: null` in the health summary. A
   bad frame is now dropped and logged (the first three with a trace, the
   rest counted) and the capture goes on.
+- **Every counter longer than three digits vanished under the C locale.**
+  The agent runs perf with `LC_ALL=C` since this release, and the C locale
+  groups nothing, so a `cycles` count arrives as twelve plain digits — which
+  the grouping-tolerant number parser added in the same pass matched under
+  neither of its branches. Every counter but the two-digit `page-faults`
+  was dropped. Found on the first hardware run after the change, on the
+  hybrid container bed; no fixture could have shown it, since every
+  committed capture was made under a grouping locale. Plain digits are
+  accepted first now, and the protocol shim prints them the way the C
+  locale does.
 - **The first chunks after `start` lost their counters.** Continuous mode's
   first chunk or two carry only `PERF_STAT` while `perf record` fills its
   ring buffer, and the server skipped a chunk with no samples before
@@ -535,6 +547,29 @@ source view that reset itself every chunk.
   the Threads tab in replay, the replay exit button, the delete
   confirmation, a search term with a space and an invalid pattern, and
   the header's Disconnect/shortcuts buttons (16 scenarios, was 10).
+
+### Verified on hardware
+
+On an x86_64 hybrid-CPU container and an 8-core ARM64 board, with the
+release's musl agents installed through `install-agent.sh` (checksum
+verified): continuous collection at one event, 60 s intervals, a `perf
+stat` round of exactly 60 s on every chunk after the first, chunks of
+9.8 MB and 16.8 MB of text sent as 0.49 MB and 0.80 MB, the largest gap
+between health frames 2.4 s, the probe 10.8 s and 12.7 s, and a restart on
+the same process in no time at all. Self-update refused a tampered asset
+and verified a good one. The armv7 soft-float agent ran under the board's
+64-bit kernel. That run is also where the C-locale counter regression
+above was found.
+
+### Known issues
+
+- Not yet run on the big-endian ARMv7 target: the armeb asset is the same
+  soft-float BE8 build the 0.11.0 pass validated, rebuilt with musl and
+  the new hardening flags, and checked with `readelf -h` only.
+- The capability probe is still over ten seconds on a hybrid-CPU host,
+  where every candidate event is checked per PMU.
+- Server memory after the sample ring fills: the overnight soak carried
+  since 0.9.0 has still not run.
 
 ## [0.11.0] — 2026-09-13
 

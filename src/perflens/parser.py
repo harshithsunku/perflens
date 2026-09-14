@@ -453,12 +453,18 @@ def build_flamegraph_data(samples):
 # narrow no-break space (fr_FR), an apostrophe (de_CH).
 _GROUPING = ",.'\u202f\u00a0 "
 
-# An integer counter with grouping: digit groups of three after the first.
-_GROUPED_INT_RE = re.compile(r'^\d{1,3}(?:[,.\'\u202f\u00a0 ]\d{3})*$')
-# A decimal with grouping: the last '.' or ',' is the decimal point when it
-# is not followed by exactly three digits and another separator.
+# An integer counter: plain digits (the C locale, which is what the agent
+# runs perf under since 0.12.0, groups nothing), or digit groups of three
+# after the first. The plain form is listed first because a 12-digit
+# `cycles` count without separators used to match neither branch and was
+# dropped -- found on the first hardware run after the LC_ALL=C change,
+# where every counter but the two-digit page-faults vanished.
+_GROUPED_INT_RE = re.compile(
+    r'^(?:\d+|\d{1,3}(?:[,.\'\u202f\u00a0 ]\d{3})*)$')
+# A decimal, plain or grouped: the last '.' or ',' is the decimal point when
+# it is not followed by exactly three digits and another separator.
 _GROUPED_FLOAT_RE = re.compile(
-    r'^\d{1,3}(?:[,.\'\u202f\u00a0 ]\d{3})*(?:[.,]\d+)?$')
+    r'^(?:\d+|\d{1,3}(?:[,.\'\u202f\u00a0 ]\d{3})*)(?:[.,]\d+)?$')
 
 
 def _parse_grouped_number(token, want_float):
@@ -470,12 +476,13 @@ def _parse_grouped_number(token, want_float):
             raise ValueError(token)
         # The decimal point is a trailing '.' or ',' group that is not a
         # thousands group: fewer or more than three digits, or the only
-        # separator kind when groups are ambiguous ('2,950.76' -> '.').
+        # separator kind when groups are ambiguous ('2,950.76' -> '.'), or
+        # a separator after more than three leading digits ('2950.760' is
+        # not grouped at all).
         last_sep = max(token.rfind('.'), token.rfind(','))
-        if last_sep > 0 and len(token) - last_sep - 1 != 3:
-            integer, frac = token[:last_sep], token[last_sep + 1:]
-        elif last_sep > 0 and (token[last_sep] == '.' and ',' in token
-                               or token[last_sep] == ',' and '.' in token):
+        if last_sep > 0 and (len(token) - last_sep - 1 != 3 or last_sep > 3
+                             or token[last_sep] == '.' and ',' in token
+                             or token[last_sep] == ',' and '.' in token):
             integer, frac = token[:last_sep], token[last_sep + 1:]
         else:
             integer, frac = token, ''

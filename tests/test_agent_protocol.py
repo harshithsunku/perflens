@@ -157,13 +157,15 @@ if sub == 'stat':
     want = float(args[args.index('sleep') + 1]) if 'sleep' in args else 0.05
     time.sleep(min(want, float(os.environ.get('PERF_SHIM_STAT_SLEEP', '0.05'))))
     first = (opt('-e') or 'cycles').split(',')[0]
+    # Plain digits, as perf prints under LC_ALL=C (the agent sets it):
+    # a grouped '1,234,567' here hid a parser regression from the suite.
     counter = ("     <not supported>      %%s\n" %% first
                if os.environ.get('PERF_SHIM_STAT_UNSUPPORTED')
-               else "         1,234,567      %%s\n" %% first)
+               else "           1234567      %%s\n" %% first)
     sys.stderr.write(
         " Performance counter stats for process id '%%s':\n\n"
         "%%s"
-        "           234,567      instructions\n"
+        "            234567      instructions\n"
         "                12      page-faults\n"
         "              2.00 msec task-clock\n\n"
         "       0.100 seconds time elapsed\n" %% (opt('-p') or '?', counter))
@@ -1267,6 +1269,17 @@ def test_perf_stat_covers_every_interval(shim_dir, tmp_path, target_pid):
         # every chunk carries one. The old cadence gave 2 of these 5.
         counts = [t.count('### PERF_STAT ###') for t in texts]
         assert sum(1 for c in counts[1:] if c >= 1) >= 4, counts
+        # And the server-side parser reads what perf printed under the C
+        # locale (plain digits): a regression here dropped every counter
+        # longer than three digits on real hardware.
+        from perflens.parser import parse_perf_stat, split_perf_data
+        parsed = [parse_perf_stat(split_perf_data(t)[1])
+                  for t in texts if '### PERF_STAT ###' in t]
+        assert parsed
+        for stat in parsed:
+            assert stat['cycles']['value'] % 1234567 == 0 and stat['cycles']['value'] > 0, stat
+            assert stat['instructions']['value'] % 234567 == 0, stat
+            assert stat['task-clock']['value'] >= 2.0, stat
         with open(h.shim_log) as f:
             rounds = sum(1 for line in f
                          if line.startswith('stat ') and 'task-clock' in line)
