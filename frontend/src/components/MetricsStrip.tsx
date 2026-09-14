@@ -316,6 +316,13 @@ export default function MetricsStrip() {
   const isReplayMode = useLive((s) => s.isReplayMode);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
+  // Process CPU is per core (100 = one busy core, as top shows it), so a
+  // busy multi-threaded process reads several hundred percent. The card
+  // flagged that as critical and the sparkline clipped it at 100; both
+  // now scale with the core count.
+  const lastSys = metricsSystem.length ? metricsSystem[metricsSystem.length - 1] : null;
+  const cores = Math.max(1, lastSys?.cpu?.num_cores ?? 1);
+
   // Rebuilt only when a frame lands, not on every render of the strip
   const panels = useMemo<PanelSpec[]>(() => {
     const sysTs = metricsSystem.map((s) => s.ts ?? null);
@@ -338,16 +345,18 @@ export default function MetricsStrip() {
                      { value: 95, colorVar: '--spark-crit-bg' }] },
     ];
     if (metricsProcess.length > 1) {
-      list.push({ id: 'sp-proc-cpu', label: 'Process CPU %', ts: procTs,
+      list.push({ id: 'sp-proc-cpu',
+        label: cores > 1 ? `Process CPU % (of ${cores * 100})` : 'Process CPU %',
+        ts: procTs,
         data: metricsProcess.map((p) => p.cpu_pct ?? null),
-        colorVar: '--spark-proc-cpu', min: 0, max: 100,
-        thresholds: [{ value: 80, colorVar: '--spark-warn-bg' }] });
+        colorVar: '--spark-proc-cpu', min: 0, max: 100 * cores,
+        thresholds: [{ value: 80 * cores, colorVar: '--spark-warn-bg' }] });
       list.push({ id: 'sp-proc-rss', label: 'Process RSS (MB)', ts: procTs,
         data: metricsProcess.map((p) => p.rss_kb != null ? p.rss_kb / 1024 : null),
         colorVar: '--spark-proc-rss', min: 0, max: null });
     }
     return list;
-  }, [metricsSystem, metricsProcess]);
+  }, [metricsSystem, metricsProcess, cores]);
 
   if (!metricsVisible) return null;
 
@@ -426,7 +435,9 @@ export default function MetricsStrip() {
                            colorVar="--spark-load" min={0} max={null} />
           </div>
         </div>
-        <div className={'metric-card ' + severity('proc_cpu', proc?.cpu_pct)} id="mc-proc">
+        <div className={'metric-card ' + severity('proc_cpu',
+               proc?.cpu_pct != null ? proc.cpu_pct / cores : undefined)} id="mc-proc"
+             title="Per core: 100% is one busy core">
           <div className="metric-value" id="mv-proc">
             {proc ? [
               proc.cpu_pct != null ? 'CPU:' + proc.cpu_pct.toFixed(1) + '%' : '',
@@ -438,7 +449,7 @@ export default function MetricsStrip() {
           </div>
           <div className="metric-spark" id="ms-proc-cpu">
             <CardSparkline data={metricsProcess.map((p) => p.cpu_pct)}
-                           colorVar="--spark-proc-cpu" min={0} max={100} />
+                           colorVar="--spark-proc-cpu" min={0} max={100 * cores} />
           </div>
         </div>
       </div>

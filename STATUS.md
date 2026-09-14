@@ -111,7 +111,7 @@ the big-endian target, and a 0.12.0 release at the end.
       handlers and memoized rects; `var(--…)` sparklines; the six undefined
       CSS tokens defined and the light tertiary contrast fixed; a11y
       labels, focus and tab roles; delete confirmation, `?` button, drag
-      hint, live/recovered session tags. **49 vitest (was 24), 16
+      hint, live/recovered session tags. **51 vitest (was 24), 16
       Playwright scenarios (was 10).** Deferred: component render tests
       needing jsdom, the visual overhaul.
 - [ ] **Phase 7 — docs, hardware pass, 0.12.0.** Done: docs drift
@@ -120,8 +120,15 @@ the big-endian target, and a 0.12.0 release at the end.
       site and CONTRIBUTING, the in-app docs for the single-event default
       and live-only thread views); hardware pass on both SSH beds (below);
       the big-endian checklist written for the user; version bumped to
-      0.12.0 in all seven places. Left: docs screenshots, CI on the pushed
-      branch, the release itself, and the user's big-endian run.
+      0.12.0 in all seven places; PR #5 opened. CI on it found the
+      sanitizer jobs failing at link time: `make check` reused objects from
+      the instrumented build. Fixed with a build-flags stamp that also
+      rebuilds on a `VERSION` change. Reviewing the regenerated screenshots
+      found three UI problems, all fixed: counters running off the stat
+      bar, per-core process CPU shown as critical and clipped, and a
+      "symbolization degraded" banner for one unnamed frame in 2.4 million.
+      Left: the final screenshots, green CI, the release itself, and the
+      user's big-endian run.
 
 ### Hardware pass, 2026-09-14
 

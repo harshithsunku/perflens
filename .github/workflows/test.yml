@@ -85,8 +85,10 @@ jobs:
       - name: Build instrumented agent
         run: make -C agent-c SANITIZE=${{ matrix.sanitize }}
 
+      # Same SANITIZE: the unit tests run instrumented too, and link
+      # against the objects the step above built.
       - name: C unit tests
-        run: make -C agent-c check
+        run: make -C agent-c check SANITIZE=${{ matrix.sanitize }}
 
       - name: Install package + test deps
         run: python -m pip install -e '.[dev]'

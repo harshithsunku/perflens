@@ -810,6 +810,13 @@ def _symbolization_status(ctx):
         detail = ("This target's perf cannot resolve userspace symbols. "
                   "Point --binary at the matching unstripped build "
                   "(--module-map for shared objects) to name them here.")
+    elif unknown * 100 < total:
+        # A stray frame perf could not name (a JIT stub, a vdso address) is
+        # not a degraded profile: the banner fired for 1 frame in 2.4
+        # million and read as though symbolization had failed.
+        mode = 'server' if resolved else 'device'
+        detail = (f'{resolved:,} frames named here from their address'
+                  if resolved else '')
     else:
         mode = 'server' if resolved else 'degraded'
         detail = (f'{unknown:,} of {total:,} userspace frames unnamed '

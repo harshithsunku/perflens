@@ -1107,3 +1107,31 @@ def test_config_patch_closes_the_previous_mapper(client, core, tmp_path):
     assert core.state.source_mapper is not old
     assert old._closed
     core.state.source_mapper.close()
+
+
+@pytest.mark.parametrize('stats, mode, detail', [
+    # One stray frame in 2.4 million is not a degraded profile
+    ({'userspace_frames': 2_420_098, 'unknown_frames': 1, 'resolved_frames': 0},
+     'device', ''),
+    ({'userspace_frames': 1000, 'unknown_frames': 5, 'resolved_frames': 50},
+     'server', '50 frames named'),
+    # A real share unnamed still says so, with the fix
+    ({'userspace_frames': 1000, 'unknown_frames': 300, 'resolved_frames': 0},
+     'degraded', '300 of 1,000'),
+    ({'userspace_frames': 1000, 'unknown_frames': 1000, 'resolved_frames': 0},
+     'degraded', 'cannot resolve'),
+])
+def test_symbolization_mode_ignores_stray_unnamed_frames(core, stats, mode, detail):
+    from perflens import web
+
+    class Mapper:
+        def symbolization_stats(self):
+            return stats
+
+        def close(self):
+            pass
+
+    core.state.source_mapper = Mapper()
+    sym = web._symbolization_status(core)
+    assert sym['mode'] == mode
+    assert (detail in sym['detail']) if detail else sym['detail'] == ''

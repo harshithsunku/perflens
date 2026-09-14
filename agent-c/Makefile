@@ -81,7 +81,15 @@ OBJDIR = $(OUTDIR)/obj
 BIN    = $(OUTDIR)/$(TARGET)
 OBJS   = $(patsubst src/%.c,$(OBJDIR)/%.o,$(SRCS)) $(OBJDIR)/zstd.o
 
-.PHONY: all clean all-cross print-bin check
+# Objects record the flags they were built with. Without this, make reused
+# objects from a different configuration: `make check` after `make
+# SANITIZE=...` linked instrumented objects without the sanitizer runtime
+# (CI's sanitizer jobs failed on exactly that), and a VERSION change left
+# the old version compiled into an agent that rebuilt nothing.
+FLAGS_STAMP = $(OBJDIR)/.flags
+BUILD_FLAGS = $(CC) $(CFLAGS) $(LDFLAGS)
+
+.PHONY: all clean all-cross print-bin check FORCE
 
 all: $(BIN)
 
@@ -90,12 +98,16 @@ all: $(BIN)
 check: $(OBJDIR)/test_metrics
 	$(OBJDIR)/test_metrics
 
-$(OBJDIR)/test_metrics: tests/test_metrics.c src/metrics.c src/agent.h $(OBJDIR)/util.o $(OBJDIR)/subproc.o $(OBJDIR)/collect.o $(OBJDIR)/wire.o $(OBJDIR)/perfcmd.o $(OBJDIR)/probe.o $(OBJDIR)/zstd.o $(OBJDIR)/commands.o $(OBJDIR)/procs.o $(OBJDIR)/auth.o $(OBJDIR)/update.o
+$(OBJDIR)/test_metrics: tests/test_metrics.c src/metrics.c src/agent.h $(FLAGS_STAMP) $(OBJDIR)/util.o $(OBJDIR)/subproc.o $(OBJDIR)/collect.o $(OBJDIR)/wire.o $(OBJDIR)/perfcmd.o $(OBJDIR)/probe.o $(OBJDIR)/zstd.o $(OBJDIR)/commands.o $(OBJDIR)/procs.o $(OBJDIR)/auth.o $(OBJDIR)/update.o
 	@mkdir -p $(OBJDIR)
 	$(CC) $(CFLAGS) -o $@ tests/test_metrics.c $(filter %.o,$^) $(LDFLAGS)
 
 print-bin:
 	@echo $(BIN)
+
+$(FLAGS_STAMP): FORCE
+	@mkdir -p $(OBJDIR)
+	@printf '%s\n' '$(BUILD_FLAGS)' | cmp -s - $@ || printf '%s\n' '$(BUILD_FLAGS)' > $@
 
 $(BIN): $(OBJS)
 	@mkdir -p $(OUTDIR)
@@ -105,11 +117,11 @@ $(BIN): $(OBJS)
 	    echo "error: $@ is not statically linked:"; file $@; exit 1; fi
 	@echo "Built: $@"
 
-$(OBJDIR)/%.o: src/%.c src/agent.h vendor/zstd/zstd.h
+$(OBJDIR)/%.o: src/%.c src/agent.h vendor/zstd/zstd.h $(FLAGS_STAMP)
 	@mkdir -p $(OBJDIR)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-$(OBJDIR)/zstd.o: vendor/zstd/zstd.c vendor/zstd/zstd.h
+$(OBJDIR)/zstd.o: vendor/zstd/zstd.c vendor/zstd/zstd.h $(FLAGS_STAMP)
 	@mkdir -p $(OBJDIR)
 	$(CC) $(CFLAGS) -DZSTD_DISABLE_ASM -c -o $@ $<
 

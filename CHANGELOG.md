@@ -218,6 +218,26 @@ source view that reset itself every chunk.
   thread filter had no border, the core bars no track, the cached memory
   segment no colour); light-theme tertiary text was 2.5:1 on white and is
   4.8:1 now; two dead tokens are gone.
+- **UI: long-running counters ran off the stat bar.** Counters sum over the
+  whole session, so a busy target showed `11219.4B` and a fractional
+  `task-clock` printed every digit; both were cut to `11219.…` on the card.
+  Values now scale to T, and large fractional counters scale like integer
+  ones.
+- **UI: a busy multi-threaded process read as critical.** Process CPU is
+  reported per core (100% is one busy core, as `top` shows it), while the
+  health strip drew it on a 0–100 scale: a process using five cores read
+  `501.2%` in red and its sparkline sat clipped at the top. The card's
+  severity and the chart now scale with the core count.
+- **A banner said symbolization had failed when one frame in 2.4 million
+  was unnamed.** A profile is reported degraded only when at least 1% of
+  userspace frames stay unnamed; a stray JIT or vdso frame no longer
+  raises the "supply the matching unstripped binary" warning.
+- **Switching between a sanitizer build and a normal build left stale
+  objects.** `make check` after `make SANITIZE=…` linked instrumented
+  objects without the sanitizer runtime (both CI sanitizer jobs failed on
+  it), and a `VERSION` change left the old version compiled into an agent
+  that rebuilt nothing. Objects now record the flags they were built with
+  and rebuild when those change; CI runs the unit tests instrumented too.
 - **`perflens push-agent --help` prints usage.** It handed `--help` to ssh as
   the host and failed with `ssh failed: unknown option -- -`. `-h`/`--help`
   now print the usage and exit 0, and any other argument starting with `-` is
@@ -542,8 +562,8 @@ source view that reset itself every chunk.
   during a fetch, a generation reset, the ambiguous-event fallback, a
   failed fetch releasing the in-flight guard, PMU-qualified event
   selection), the event helpers, `unwrap`, the error banner's sticky and
-  auto-hide modes, the reconnect backoff and hash validation (49 tests,
-  was 24); Playwright scenarios for the error banner on a bad deep link,
+  auto-hide modes, the reconnect backoff, hash validation and stat value
+  scaling (51 tests, was 24); Playwright scenarios for the error banner on a bad deep link,
   the Threads tab in replay, the replay exit button, the delete
   confirmation, a search term with a space and an invalid pattern, and
   the header's Disconnect/shortcuts buttons (16 scenarios, was 10).
