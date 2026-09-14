@@ -28,6 +28,11 @@ one bad frame, one dead device or one full disk could do to a session.
   and auth frames (read before the peer has proved anything), 80 MB for a
   session frame, 256 MB for one frame's decompressed text. A garbage header
   claiming 4 GB used to be allocated as asked.
+- **No more `Access-Control-Allow-Origin: *`.** Every API response carried
+  it, so any web page the operator visited could read `/api/browse` (a
+  listing under the home directory), `/api/agent` and every saved profile
+  from `127.0.0.1:8080`. The UI is same-origin and the Vite dev server
+  proxies `/api`, so nothing legitimate needed it.
 
 ### Fixed
 
@@ -77,6 +82,61 @@ one bad frame, one dead device or one full disk could do to a session.
 - `connect_to_agent` closes the socket when installing the session fails
   after a successful handshake, and in-flight commands are failed at once
   on disconnect rather than left to time out.
+- **The source mapper was shared across threads with no lock.** The
+  rebuild worker and every request thread drove the same `addr2line` pipes,
+  whose protocol is "write N addresses, read 2N lines": two threads
+  interleaving read each other's answers — names and line numbers silently
+  swapped — and left the pipe desynchronized for the rest of its life.
+  Each pipe now has a lock held across an exchange, and the mapper one
+  around its cache-mutating phases.
+- **A hung `addr2line` or `readelf` froze the server.** The worker blocked
+  in `readline()` for good, so every UI update stopped with nothing in the
+  log. Reads time out after 30 s of silence; the tool is killed and
+  restarted, and after three deaths in a row it is given up on with one
+  log line. Addresses an exchange did not answer are left for the next
+  chunk rather than cached — and persisted, in `symbols.db`, for as long
+  as the cache lived — as `??`; a symbol table `readelf` did not finish is
+  not persisted either.
+- **A replaced source mapper leaked.** `PATCH /api/config` swapped in a new
+  mapper and dropped the old one with its `addr2line` children and sqlite
+  handle open (`close()` had no production caller). The old mapper is
+  closed after the swap, two PATCHes cannot race, and the mapper is closed
+  at shutdown.
+- **The UI showed the previous session after a reconnect.** `chunk_count`
+  restarts at 0 on every session reset while the browser's last-fetched
+  version held the old count, so nothing refetched until the new count
+  overtook it. Version stamps (`/api/status`, `/api/snapshot`, the
+  `data_version` SSE event) carry a `generation` that a reset bumps, and
+  name both totals: `ring_samples` (the bounded ring, what `total_samples`
+  always was) and `session_samples` (everything parsed this session).
+- **A browser attaching to a running session never learned an agent was
+  connected.** The SSE stream's opening burst carried only the data version
+  and counters; it now starts with `status` and, when one is connected,
+  `agent`.
+- IPC and the miss rates were blank on hybrid CPUs (`cpu_core/cycles/` and
+  `cpu_atom/cycles/`, never a bare `cycles`) and the branch-miss rate was
+  blank whenever the counter was spelled `branch-instructions`, which is
+  how perf spells it when asked by that name. Both the server's derived
+  stats and the MCP `perflens_perf_stat` tool resolve counters through the
+  event's base name and sum the PMU-qualified spellings. The MCP default
+  event falls back to `cpu-clock`/`task-clock` before "whatever sorts
+  first", for targets with no hardware PMU.
+- Error paths that used to be tracebacks or lies: a truncated
+  `metadata.json` is a 500 with the error envelope (`bad_metadata`) on
+  replay and export and is skipped by the list; `DELETE /api/sessions/<id>`
+  reports a failure instead of `ok` after `ignore_errors=True` left the
+  directory; the replay cache is written to a temp name and renamed, and
+  one session is built by one request at a time (two tabs used to build it
+  twice and race on the file); a `perf.data` upload is written to disk off
+  the event loop (up to 500 MB used to be written on it, stalling SSE for
+  every browser meanwhile); `--import` at startup reports any failure
+  rather than only `RuntimeError`; `/api/sessions?limit=` is bounded at
+  1000; `--port` equal to `--http-port` is refused; a malformed
+  `--path-map`/`--module-map` entry is reported instead of dropped.
+- The symbolization tally on `/api/index/status` counted replayed and
+  exported frames as if they were the live capture's.
+- `verify_perf` mutated the hello dict other threads were serializing; it
+  now replaces it.
 - **`perflens push-agent --help` prints usage.** It handed `--help` to ssh as
   the host and failed with `ssh failed: unknown option -- -`. `-h`/`--help`
   now print the usage and exit 0, and any other argument starting with `-` is
@@ -294,6 +354,31 @@ one bad frame, one dead device or one full disk could do to a session.
 - `tests/test_parser_compat.py` is gone: its two tests had no assertions
   and duplicated `test_parser.py`'s parametrized cases. The `core` fixture
   is defined once, in `conftest.py`.
+- **Snapshot cost no longer grows with the session.** On every chunk the
+  aggregator deep-copied every event's whole flamegraph tree and re-sorted
+  every function, and `/api/snapshot` then re-serialized and re-gzipped
+  the dict per request. The tree is now kept in its serializable shape
+  (child lookup maps live beside it, depth is capped at insert time), the
+  worker serializes a changed event once — JSON bytes plus a raw-deflate
+  segment — and `/api/snapshot` splices those into its response, gzip
+  included, without re-encoding or recompressing a multi-megabyte profile.
+- **Ring-derived views are memoized per chunk.** `/api/threads`,
+  `/api/threads/<tid>`, `/api/window` and `/api/source` copied and rescanned
+  the whole ring (up to `--max-samples` entries, inline expansion
+  allocating a dict per sample) on every request, and the UI refetches
+  them on every chunk and every timeline drag. A small LRU on the context,
+  keyed by the view's parameters and the ring's `(generation, chunk_count)`,
+  answers repeats. The load-base recovery pass runs once per chunk instead
+  of once per resolution phase.
+- **The parser is twice as fast**: a tab-led line is a call-chain frame
+  and only frames are, so the two header regexes are no longer tried on
+  every one of them first (1.6 s → 0.8 s over 840 000 lines of the fixture
+  captures). A line over 16 KB is skipped rather than matched (the header
+  regex backtracks quadratically on a long non-matching line).
+- `/api/sessions` re-reads a session's `metadata.json` only when its mtime
+  changes.
+- `ProfilingState.get_snapshot` (no callers) and `models.SourceLine`
+  (unreferenced, and the wrong shape) are gone.
 
 ### Tests
 
@@ -328,6 +413,20 @@ one bad frame, one dead device or one full disk could do to a session.
   session frame, and an `accept()` error. The legacy-token test in
   `test_agentlink_auth.py` now asserts the refusal, and a second one that a
   tokenless server still pairs an old agent.
+- Server: four threads resolving disjoint address sets through one mapper
+  get exactly the single-thread answers; a fake `addr2line` that hangs, one
+  that answers one address per life, and one that dies on start (the pipe
+  is given up after three) — with the persistent cache checked for what
+  must not be in it; the worker's cached bytes decode to the snapshot and
+  the spliced gzip body decodes with both `gzip` and `zlib`; the fixture
+  captures parse to the sample count their metadata records; a 40 KB line;
+  hybrid-spelled counters; `generation` and both totals on `/api/status`;
+  the bytes path answering exactly what the dict path did, gzipped or not;
+  no CORS header; the SSE burst starting with `status` and `agent`; the
+  session list's bound and metadata cache; corrupt metadata as an error
+  envelope; a refused delete; view memoization across chunks and resets;
+  the previous mapper closed on `PATCH /api/config`; equal ports refused;
+  malformed map entries reported.
 
 ## [0.11.0] — 2026-09-13
 

@@ -582,7 +582,7 @@
         "type": "object"
       },
       "DataVersion": {
-        "description": "Version stamp for the notify-and-fetch cycle. Broadcast over SSE\n(with event_types) and echoed by /api/snapshot (without).",
+        "description": "Version stamp for the notify-and-fetch cycle. Broadcast over SSE\n(with event_types) and echoed by /api/snapshot (without).\n\nA stamp is newer than another when its generation is higher, or equal\nand its chunk_count higher: chunk_count restarts at 0 on every reset.",
         "properties": {
           "chunk_count": {
             "title": "Chunk Count",
@@ -602,6 +602,21 @@
             ],
             "default": null,
             "title": "Event Types"
+          },
+          "generation": {
+            "default": 1,
+            "title": "Generation",
+            "type": "integer"
+          },
+          "ring_samples": {
+            "default": 0,
+            "title": "Ring Samples",
+            "type": "integer"
+          },
+          "session_samples": {
+            "default": 0,
+            "title": "Session Samples",
+            "type": "integer"
           },
           "total_samples": {
             "title": "Total Samples",
@@ -1358,6 +1373,21 @@
           },
           "chunk_count": {
             "title": "Chunk Count",
+            "type": "integer"
+          },
+          "generation": {
+            "default": 1,
+            "title": "Generation",
+            "type": "integer"
+          },
+          "ring_samples": {
+            "default": 0,
+            "title": "Ring Samples",
+            "type": "integer"
+          },
+          "session_samples": {
+            "default": 0,
+            "title": "Session Samples",
             "type": "integer"
           },
           "status": {
@@ -2416,6 +2446,16 @@
               }
             },
             "description": "Validation Error"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal Server Error"
           }
         },
         "summary": "Api Session Delete"

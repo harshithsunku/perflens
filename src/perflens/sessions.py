@@ -70,19 +70,32 @@ def load_session_chunks(cfg, session_dir):
     return all_samples
 
 
+def read_metadata(session_dir):
+    """A session's metadata.json as a dict. Raises FileNotFoundError when
+    there is none and ValueError when it cannot be read as a JSON object
+    (a server killed mid-write, a full disk)."""
+    path = os.path.join(session_dir, 'metadata.json')
+    try:
+        with open(path) as f:
+            meta = json.load(f)
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        raise ValueError(str(e)) from e
+    if not isinstance(meta, dict):
+        raise ValueError('metadata is not a JSON object')
+    return meta
+
+
 def load_session_samples(cfg, session_id):
     """Load all samples from a saved session. Returns (samples, metadata)
-    or (None, None)."""
+    or (None, None) when there is no such session; raises ValueError when
+    its metadata is unreadable."""
     session_dir = safe_session_dir(cfg, session_id)
     if session_dir is None:
         return None, None
-    meta_path = os.path.join(session_dir, 'metadata.json')
-    if not os.path.isfile(meta_path):
+    try:
+        metadata = read_metadata(session_dir)
+    except FileNotFoundError:
         return None, None
-
-    with open(meta_path) as f:
-        metadata = json.load(f)
-
     return load_session_chunks(cfg, session_dir), metadata
 
 
@@ -310,8 +323,7 @@ def import_perf_data(cfg, perf_data_path):
         'event_types': event_types,
         'perf_stat': {},
     }
-    with open(os.path.join(session_dir, 'metadata.json'), 'w') as f:
-        json.dump(metadata, f, indent=2)
+    write_metadata(session_dir, metadata)
 
     print(f"[server] Import complete: {session_id} "
           f"({len(samples)} samples, events: {event_types})",

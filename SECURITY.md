@@ -177,6 +177,15 @@ hello and auth frames are capped at 64 KB, a session frame at 80 MB, and
 one frame's decompressed size at 256 MB; a malformed frame is dropped and
 logged rather than ending the session.
 
+## The web UI and cross-origin pages
+
+The HTTP API binds to `127.0.0.1` by default and has no authentication (see
+`--http-bind`). Until 0.12.0 every response also carried
+`Access-Control-Allow-Origin: *`, which let any web page the operator
+visited read `/api/browse` (a directory listing under `--browse-root`),
+`/api/agent` and every saved profile from the local server. The header is
+gone; the UI is same-origin and the Vite dev server proxies `/api`.
+
 **Upgrade order: server first, then agents.** A 0.10.0 agent sends no hello
 token, so an older server configured with `--token` will reject it.
 

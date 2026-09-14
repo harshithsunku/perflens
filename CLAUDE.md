@@ -86,7 +86,18 @@ resolution. See [STATUS.md](STATUS.md) for what is open.
 - HTTP layer (`web.py`): FastAPI on uvicorn. SSE fan-out is an asyncio
   hub; worker threads publish via `loop.call_soon_threadsafe`. Live
   updates use notify-and-fetch: a tiny `data_version` SSE stamp, then the
-  browser pulls `/api/snapshot` for the event it is viewing.
+  browser pulls `/api/snapshot` for the event it is viewing. The rebuild
+  worker serializes each changed event once (JSON bytes plus a raw-deflate
+  segment, `aggregator.EventAccumulator.blob`); `/api/snapshot` splices
+  those into its response (`api/responses.gzip_join`) rather than
+  re-encoding the profile per request. Ring-derived views (`/api/threads`,
+  `/api/window`, `/api/source`) are memoized on `AppContext.views`, keyed
+  by their parameters and the ring's `(generation, chunk_count)`.
+- The `SourceMapper` is shared by the rebuild worker and every request
+  thread: each `Addr2LinePipe` holds a lock across an exchange, and the
+  mapper's `RLock` covers its cache-mutating phases. Tool reads time out
+  after 30 s of silence; a pipe is given up after three consecutive
+  failures; an address the tool did not answer is never cached as `??`.
 - The agent TCP listener, recv loops, and the aggregation rebuild worker
   are plain threads (blocking sockets + subprocess work); uvicorn owns
   only the HTTP side. Heavy request handlers are sync `def` routes that
@@ -234,11 +245,11 @@ perflens/
 
 | Endpoint                  | Method | Description                                     |
 |---------------------------|--------|-------------------------------------------------|
-| `/api/status`             | GET    | Server + agent connection state, sample totals  |
-| `/api/stream`             | GET    | SSE: `status`, `agent`, `data_version` (carries event types), `perf_stat`, `metrics` (typed by payload) |
-| `/api/snapshot?event=`    | GET    | Cached per-event snapshot (gzip); pairs with SSE `data_version` |
+| `/api/status`             | GET    | Server + agent connection state, sample totals, `generation` |
+| `/api/stream`             | GET    | SSE: `status`, `agent`, `data_version` (carries event types), `perf_stat`, `metrics` (typed by payload); opens with `status` (+ `agent`, `data_version`, `perf_stat` when present) |
+| `/api/snapshot?event=`    | GET    | Cached per-event snapshot (gzip, spliced from the worker's bytes); pairs with SSE `data_version` |
 | `/api/sessions?offset=&limit=` | GET | List saved sessions (paginated)               |
-| `/api/sessions/<id>`      | GET    | Lazy-replay a session from saved chunks (cached); 404 when missing |
+| `/api/sessions/<id>`      | GET    | Lazy-replay a session from saved chunks (cached); 404 when missing, 500 `bad_metadata` when unreadable |
 | `/api/sessions/<id>`      | DELETE | Delete a saved session                          |
 | `/api/sessions/<id>/export?format=&event=` | GET | Export: `collapsed`, `json`, or `svg` |
 | `/api/sessions/import`    | POST   | Import an uploaded `perf.data` as a session     |
@@ -275,7 +286,15 @@ head, since `perf_stat` has no REST endpoint.
 
 Error model: every failure is `{"error": {"code": "<slug>", "message":
 "..."}}` with a real status code (400 validation, 403 permission, 404
-missing, 409 wrong server state, 413 too large, 502 agent transport).
+missing, 409 wrong server state, 413 too large, 500 server-side failure
+such as unreadable metadata or a refused delete, 502 agent transport).
+
+Version stamps (`/api/status`, `/api/snapshot`, SSE `data_version`) carry
+`generation` (bumped on every session reset — compare it before
+`chunk_count`, which restarts at 0), `ring_samples` (the bounded ring;
+`total_samples` is the same number, kept for compatibility) and
+`session_samples` (everything parsed this session). Responses carry no
+CORS header: the UI is same-origin and the dev server proxies `/api`.
 
 ---
 

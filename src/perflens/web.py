@@ -42,9 +42,11 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from perflens import agentlink, export, sessions
 from perflens.api import models
+from perflens.api.responses import deflate_segment
 from perflens.api.responses import dumps as _dumps
 from perflens.api.responses import error_response as _err
 from perflens.api.responses import json_response as _json
+from perflens.api.responses import spliced_response as _spliced
 from perflens.config import create_source_mapper
 from perflens.parser import (build_flamegraph_data, build_function_summary,
                              filter_samples_by_event, get_event_types,
@@ -126,13 +128,15 @@ def _sse_frame(event_type, data):
 @router.get('/api/status', response_model=models.Status)
 def api_status(ctx=Ctx):
     st = ctx.state
-    return _json({
-        'status': 'ok',
-        'agent_connected': st.agent_connected,
-        'agent_addr': st.agent_addr,
-        'total_samples': len(st.all_samples),
-        'chunk_count': st.chunk_count,
-    })
+    with st.lock:
+        version = st.version_locked()
+        connected, addr = st.agent_connected, st.agent_addr
+    return _json({'status': 'ok', 'agent_connected': connected,
+                  'agent_addr': addr, **version})
+
+
+def _segment(raw):
+    return (raw, deflate_segment(raw))
 
 
 @router.get('/api/snapshot',
@@ -146,17 +150,31 @@ def api_snapshot(request: Request, event: Optional[str] = None, ctx=Ctx):
     st = ctx.state
     with st.lock:
         per_event = st._cached_per_event
-        version = {
-            'chunk_count': st.chunk_count,
-            'total_samples': len(st.all_samples),
-        }
+        blobs = st._cached_blobs
+        version = st.version_locked()
+    # The worker serialized (and deflated) each event once when it changed;
+    # a request splices those bytes around its own small envelope instead of
+    # re-encoding and re-compressing a multi-megabyte profile every time.
+    # The dict path remains for state seeded without blobs.
     if event is not None:
         event, error = _resolve_event_name(event, per_event.keys())
         if error:
             return error
-        return _json({'event': event, 'data': per_event[event],
-                      'version': version},
-                     request=request, allow_gzip=True)
+        blob = blobs.get(event)
+        if blob is None:
+            return _json({'event': event, 'data': per_event[event],
+                          'version': version},
+                         request=request, allow_gzip=True)
+        head = (b'{"event":' + _dumps(event) + b',"version":'
+                + _dumps(version) + b',"data":')
+        return _spliced([_segment(head), blob, _segment(b'}')], request)
+    if per_event and set(blobs) == set(per_event):
+        parts = [_segment(b'{"version":' + _dumps(version) + b',"per_event":{')]
+        for i, evt in enumerate(sorted(blobs)):
+            parts.append(_segment((b',' if i else b'') + _dumps(evt) + b':'))
+            parts.append(blobs[evt])
+        parts.append(_segment(b'}}'))
+        return _spliced(parts, request)
     return _json({'per_event': per_event, 'version': version},
                  request=request, allow_gzip=True)
 
@@ -176,17 +194,22 @@ async def api_stream(request: Request, ctx=Ctx):
         try:
             # Send current state (small events only — the browser pulls
             # the heavy per-event snapshot from /api/snapshot when it
-            # sees the version stamp)
+            # sees the version stamp). `status` and `agent` first: a
+            # browser attaching to a running session used to learn the
+            # data version but never that an agent was connected.
             st = ctx.state
+            session = ctx.agent.current()
             with st.lock:
-                event_types = list(st.event_types)
                 perf_stat = dict(st.perf_stat)
                 have_data = bool(st._cached_per_event)
-                version = {
-                    'chunk_count': st.chunk_count,
-                    'total_samples': len(st.all_samples),
-                    'event_types': event_types,
-                }
+                version = st.version_locked(with_events=True)
+                connected, addr = st.agent_connected, st.agent_addr
+            yield _sse_frame('status', {'connected': connected, 'agent': addr})
+            if connected and session is not None and session.connected:
+                yield _sse_frame('agent', {
+                    'agent': session.addr,
+                    'platform': (session.hello or {}).get('platform', {}),
+                })
             if have_data:
                 yield _sse_frame('data_version', version)
                 yield _sse_frame('perf_stat', perf_stat)
@@ -202,7 +225,6 @@ async def api_stream(request: Request, ctx=Ctx):
 
     return StreamingResponse(gen(), media_type='text/event-stream', headers={
         'Cache-Control': 'no-cache',
-        'Access-Control-Allow-Origin': '*',
         'X-Accel-Buffering': 'no',
     })
 
@@ -211,22 +233,44 @@ async def api_stream(request: Request, ctx=Ctx):
 # Sessions — list / replay / delete / export / import
 # ---------------------------------------------------------------------------
 
+def _session_meta_cached(ctx, meta_path):
+    """metadata.json as a dict, re-read only when its mtime changes (the
+    list used to parse every session's metadata on every call), or None
+    when missing or unreadable."""
+    try:
+        mtime = os.stat(meta_path).st_mtime_ns
+    except OSError:
+        return None
+    hit = ctx.session_meta_cache.get(meta_path)
+    if hit is not None and hit[0] == mtime:
+        return hit[1]
+    try:
+        with open(meta_path) as f:
+            meta = json.load(f)
+    except (ValueError, OSError):
+        return None
+    if not isinstance(meta, dict):
+        return None
+    ctx.session_meta_cache[meta_path] = (mtime, meta)
+    return meta
+
+
 @router.get('/api/sessions', response_model=models.SessionListResponse)
 def api_sessions_list(offset: int = 0, limit: int = 100, ctx=Ctx):
     metas = []
+    seen = set()
     if os.path.isdir(ctx.config.sessions_dir):
         for name in sorted(os.listdir(ctx.config.sessions_dir), reverse=True):
             meta_path = os.path.join(ctx.config.sessions_dir, name,
                                      'metadata.json')
-            if os.path.isfile(meta_path):
-                try:
-                    with open(meta_path) as f:
-                        meta = json.load(f)
-                    metas.append(meta)
-                except (json.JSONDecodeError, IOError):
-                    pass
+            seen.add(meta_path)
+            meta = _session_meta_cached(ctx, meta_path)
+            if meta is not None:
+                metas.append(meta)
+    for stale in [k for k in ctx.session_meta_cache if k not in seen]:
+        ctx.session_meta_cache.pop(stale, None)
     offset = max(offset, 0)
-    limit = max(limit, 0)
+    limit = max(0, min(limit, 1000))
     return _json({
         'sessions': metas[offset:offset + limit],
         'total': len(metas),
@@ -248,8 +292,11 @@ def api_session_replay(session_id: str, request: Request, ctx=Ctx):
     if not session_dir or not os.path.isfile(meta_path):
         return _err('not_found', 'session not found', 404)
 
-    with open(meta_path) as f:
-        metadata = json.load(f)
+    try:
+        metadata = sessions.read_metadata(session_dir)
+    except ValueError as e:
+        # A truncated metadata.json used to surface as a traceback
+        return _err('bad_metadata', f'session metadata unreadable: {e}', 500)
 
     # Replay cache key guards against config changes that alter annotation.
     # 'schema' bumps whenever the replay response shape changes, so caches
@@ -266,27 +313,35 @@ def api_session_replay(session_id: str, request: Request, ctx=Ctx):
         'sysroot': ctx.config.sysroot,
         'inline': ctx.config.inline,
     }
-    per_event = None
-    if os.path.isfile(cache_path):
-        try:
-            with gzip.open(cache_path, 'rt') as f:
-                cached = json.load(f)
-            if cached.get('key') == cache_key:
-                per_event = cached.get('per_event')
-        except (OSError, ValueError):
-            pass
+    # One build per session at a time: two tabs replaying the same session
+    # used to build it twice and race on the cache file.
+    with ctx.replay_lock(session_id):
+        per_event = None
+        if os.path.isfile(cache_path):
+            try:
+                with gzip.open(cache_path, 'rt') as f:
+                    cached = json.load(f)
+                if cached.get('key') == cache_key:
+                    per_event = cached.get('per_event')
+            except (OSError, ValueError):
+                pass
 
-    if per_event is None:
-        all_samples = sessions.load_session_chunks(ctx.config, session_dir)
-        event_types = get_event_types(all_samples)
-        mapper = ctx.state.source_mapper
-        per_event = sessions.build_per_event_data(all_samples, event_types,
-                                                  mapper, source=True)
-        try:
-            with gzip.open(cache_path, 'wt') as f:
-                json.dump({'key': cache_key, 'per_event': per_event}, f)
-        except OSError:
-            pass
+        if per_event is None:
+            all_samples = sessions.load_session_chunks(ctx.config, session_dir)
+            event_types = get_event_types(all_samples)
+            mapper = ctx.state.source_mapper
+            per_event = sessions.build_per_event_data(all_samples, event_types,
+                                                      mapper, source=True)
+            tmp = cache_path + '.tmp'
+            try:
+                with gzip.open(tmp, 'wt') as f:
+                    json.dump({'key': cache_key, 'per_event': per_event}, f)
+                os.replace(tmp, cache_path)
+            except OSError:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
 
     result = {'metadata': metadata, 'per_event': per_event}
 
@@ -303,13 +358,18 @@ def api_session_replay(session_id: str, request: Request, ctx=Ctx):
 
 @router.delete('/api/sessions/{session_id}',
                response_model=models.SessionDeleteResponse,
-               responses={404: _ERR})
+               responses={404: _ERR, 500: _ERR})
 def api_session_delete(session_id: str, ctx=Ctx):
     session_dir = sessions.safe_session_dir(ctx.config, session_id)
-    if not session_dir or not os.path.isfile(
-            os.path.join(session_dir, 'metadata.json')):
+    meta_path = os.path.join(session_dir, 'metadata.json') if session_dir else ''
+    if not session_dir or not os.path.isfile(meta_path):
         return _err('not_found', 'session not found', 404)
-    shutil.rmtree(session_dir, ignore_errors=True)
+    ctx.session_meta_cache.pop(meta_path, None)
+    try:
+        shutil.rmtree(session_dir)
+    except OSError as e:
+        # It used to answer ok after ignore_errors=True left the directory
+        return _err('delete_failed', f'could not delete session: {e}', 500)
     return _json({'ok': True, 'session_id': session_id})
 
 
@@ -414,8 +474,11 @@ def api_session_export(session_id: str, format: str = 'collapsed',
                        event: Optional[str] = None, ctx=Ctx):
     """Export a saved session: collapsed stacks or an SVG flamegraph for one
     event, or JSON for every event unless `event` names one."""
-    all_samples, metadata = sessions.load_session_samples(ctx.config,
-                                                          session_id)
+    try:
+        all_samples, metadata = sessions.load_session_samples(ctx.config,
+                                                              session_id)
+    except ValueError as e:
+        return _err('bad_metadata', f'session metadata unreadable: {e}', 500)
     if all_samples is None:
         return _err('not_found', 'session not found', 404)
     return _export_response(ctx, all_samples, metadata, format, event,
@@ -467,7 +530,9 @@ async def api_sessions_import(request: Request, ctx=Ctx):
             received += len(chunk)
             if received > sessions.MAX_IMPORT_SIZE:
                 return _err('too_large', 'file too large', 413)
-            tmp.write(chunk)
+            # Disk writes off the event loop: up to 500 MB used to be
+            # written on it, stalling SSE for every browser meanwhile
+            await run_in_threadpool(tmp.write, chunk)
         tmp.close()
 
         session_id, samples, metadata = await run_in_threadpool(
@@ -498,14 +563,43 @@ async def api_sessions_import(request: Request, ctx=Ctx):
 # Threads / time window / source
 # ---------------------------------------------------------------------------
 
+def _cached_view(ctx, key, build):
+    """Memoize a view derived from the raw ring.
+
+    These views copy and rescan the whole ring (up to --max-samples
+    entries, with inline expansion allocating a dict per sample), and the
+    UI refetches them on every chunk and every timeline drag. The ring
+    only changes when a chunk lands or the session resets, so the result
+    is keyed by (generation, chunk_count) on top of the view's own
+    parameters. `build` returns a dict to cache, or an error response,
+    which is not cached.
+    """
+    with ctx.state.lock:
+        stamp = (ctx.state.generation, ctx.state.chunk_count)
+    full_key = key + stamp
+    hit = ctx.views.get(full_key)
+    if hit is not None:
+        return hit
+    result = build()
+    if isinstance(result, dict):
+        ctx.views.put(full_key, result)
+    return result
+
+
 @router.get('/api/threads', response_model=models.ThreadSummaryResponse,
             responses={400: _ERR, 404: _ERR})
 def api_threads(event: Optional[str] = None, ctx=Ctx):
     """Overview of all threads with CPU breakdown, for one event."""
+    result = _cached_view(ctx, ('threads', event),
+                          lambda: _threads_view(ctx, event))
+    return result if isinstance(result, Response) else _json(result)
+
+
+def _threads_view(ctx, event):
     with ctx.state.lock:
         all_samples = list(ctx.state.all_samples)
     if not all_samples:
-        return _json({'total_samples': 0, 'threads': []})
+        return {'total_samples': 0, 'threads': []}
 
     event, error = _pick_event(event, get_event_types(all_samples),
                                'the thread overview')
@@ -555,7 +649,7 @@ def api_threads(event: Optional[str] = None, ctx=Ctx):
             'top_functions': top_functions,
         })
 
-    return _json({'total_samples': total, 'threads': threads})
+    return {'total_samples': total, 'threads': threads}
 
 
 @router.get('/api/threads/{tid}', response_model=models.ThreadViewResponse,
@@ -563,6 +657,14 @@ def api_threads(event: Optional[str] = None, ctx=Ctx):
 def api_thread_view(tid: int, request: Request, event: Optional[str] = None,
                     ctx=Ctx):
     """Per-thread flamegraph + summary + source_files, for one event."""
+    result = _cached_view(ctx, ('thread', event, tid),
+                          lambda: _thread_view(ctx, tid, event))
+    if isinstance(result, Response):
+        return result
+    return _json(result, request=request, allow_gzip=True)
+
+
+def _thread_view(ctx, tid, event):
     with ctx.state.lock:
         all_samples = list(ctx.state.all_samples)
 
@@ -576,11 +678,9 @@ def api_thread_view(tid: int, request: Request, event: Optional[str] = None,
                     if s.get('tid', s.get('pid', 0)) == tid]
 
     if not filtered:
-        return _json({'flamegraph': {'name': 'root', 'value': 0,
-                                     'children': []},
-                      'function_summary': {'total_samples': 0,
-                                           'functions': []},
-                      'source_files': []})
+        return {'flamegraph': {'name': 'root', 'value': 0, 'children': []},
+                'function_summary': {'total_samples': 0, 'functions': []},
+                'source_files': []}
 
     mapper = ctx.state.source_mapper
     expanded = mapper.expand_inline_frames(filtered) if mapper else filtered
@@ -592,7 +692,7 @@ def api_thread_view(tid: int, request: Request, event: Optional[str] = None,
         result['source_files'] = mapper.get_files_with_samples(filtered)
     else:
         result['source_files'] = []
-    return _json(result, request=request, allow_gzip=True)
+    return result
 
 
 @router.get('/api/window', response_model=models.TimeWindowResponse,
@@ -605,6 +705,14 @@ def api_window(request: Request, start: float, end: float,
     scrubbing: samples are stamped with arrival time, so a window on the
     Device Health timeline maps to the profile chunks collected in that
     window. Bounded by the raw-sample ring buffer (--max-samples)."""
+    result = _cached_view(ctx, ('window', event, tid, start, end),
+                          lambda: _window_view(ctx, start, end, event, tid))
+    if isinstance(result, Response):
+        return result
+    return _json(result, request=request, allow_gzip=True)
+
+
+def _window_view(ctx, start, end, event, tid):
     with ctx.state.lock:
         all_samples = list(ctx.state.all_samples)
 
@@ -622,19 +730,17 @@ def api_window(request: Request, start: float, end: float,
 
     window = {'start': start, 'end': end, 'samples': len(filtered)}
     if not filtered:
-        return _json({'flamegraph': {'name': 'root', 'value': 0,
-                                     'children': []},
-                      'function_summary': {'total_samples': 0,
-                                           'functions': []},
-                      'window': window})
+        return {'flamegraph': {'name': 'root', 'value': 0, 'children': []},
+                'function_summary': {'total_samples': 0, 'functions': []},
+                'window': window}
 
     mapper = ctx.state.source_mapper
     expanded = mapper.expand_inline_frames(filtered) if mapper else filtered
-    return _json({
+    return {
         'flamegraph': build_flamegraph_data(expanded),
         'function_summary': build_function_summary(expanded),
         'window': window,
-    }, request=request, allow_gzip=True)
+    }
 
 
 @router.get('/api/source', response_model=models.SourceResponse,
@@ -645,7 +751,14 @@ def api_source(request: Request, file: str, event: Optional[str] = None,
     mapper = ctx.state.source_mapper
     if not mapper:
         return _err('no_mapper', 'source mapper not available', 409)
+    result = _cached_view(ctx, ('source', file, event, tid),
+                          lambda: _source_view(ctx, mapper, file, event, tid))
+    if isinstance(result, Response):
+        return result
+    return _json(result, request=request, allow_gzip=True)
 
+
+def _source_view(ctx, mapper, file, event, tid):
     with ctx.state.lock:
         all_samples = list(ctx.state.all_samples)
 
@@ -664,8 +777,7 @@ def api_source(request: Request, file: str, event: Optional[str] = None,
 
     if file in line_data:
         lines = mapper.annotate_source(file, line_data[file])
-        return _json({'file': file, 'lines': lines},
-                     request=request, allow_gzip=True)
+        return {'file': file, 'lines': lines}
     return _err('not_found', f'no data for file: {file}', 404)
 
 
@@ -881,9 +993,12 @@ async def api_agent_command(body: models.AgentCommandRequest, ctx=Ctx):
             and resp.get('version')):
         # A perf chosen at runtime changes what the hello reported at connect
         # time, and /api/agent and the device strip both read the hello.
-        platform = (session.hello or {}).get('platform')
+        hello = session.hello or {}
+        platform = hello.get('platform')
         if isinstance(platform, dict):
-            platform['perf_version'] = resp['version']
+            # A new dict: the old one is being serialized by other threads
+            platform = {**platform, 'perf_version': resp['version']}
+            session.hello = {**hello, 'platform': platform}
             ctx.broadcast('agent', {'agent': session.addr,
                                     'platform': platform})
     return _json(resp)
@@ -894,9 +1009,14 @@ async def api_agent_command(body: models.AgentCommandRequest, ctx=Ctx):
 # ---------------------------------------------------------------------------
 
 def _reload_mapper(ctx, pre_index=False):
-    """Swap in a fresh SourceMapper built from the (mutated) config."""
+    """Swap in a fresh SourceMapper built from the (mutated) config, and
+    close the old one -- its addr2line children, sqlite handle and index
+    thread used to leak on every PATCH."""
+    old = ctx.state.source_mapper
     mapper = create_source_mapper(ctx.config)
     ctx.state.source_mapper = mapper
+    if old is not None:
+        old.close()
     if pre_index:
         # Pre-index symbols and DWARF source files in background
         threading.Thread(target=mapper.pre_index, daemon=True).start()
@@ -993,8 +1113,12 @@ def api_config_get(ctx=Ctx):
 async def api_config_patch(body: models.ConfigUpdate, ctx=Ctx):
     """Update binary / source dir / path map / module map / toolchain /
     sysroot in one request; the source mapper rebuilds once."""
-    # Mapper recreation touches disk (persisted index) — threadpool
-    return await run_in_threadpool(_config_patch_impl, ctx, body)
+    # Mapper recreation touches disk (persisted index) — threadpool; and
+    # one at a time, so two PATCHes cannot each swap in a mapper.
+    def patch():
+        with ctx.config_lock:
+            return _config_patch_impl(ctx, body)
+    return await run_in_threadpool(patch)
 
 
 # ---------------------------------------------------------------------------
@@ -1048,6 +1172,9 @@ async def _lifespan(app):
     # capture used to leave the session's directory without metadata --
     # unlisted, unreplayable, and never cleaned up.
     await run_in_threadpool(agentlink.shutdown_agent, app.state.ctx)
+    mapper = app.state.ctx.state.source_mapper
+    if mapper is not None:
+        await run_in_threadpool(mapper.close)
 
 
 def create_app(ctx):

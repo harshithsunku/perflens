@@ -699,6 +699,9 @@ export interface components {
          * DataVersion
          * @description Version stamp for the notify-and-fetch cycle. Broadcast over SSE
          *     (with event_types) and echoed by /api/snapshot (without).
+         *
+         *     A stamp is newer than another when its generation is higher, or equal
+         *     and its chunk_count higher: chunk_count restarts at 0 on every reset.
          */
         DataVersion: {
             /** Chunk Count */
@@ -708,6 +711,21 @@ export interface components {
              * @default null
              */
             event_types: string[] | null;
+            /**
+             * Generation
+             * @default 1
+             */
+            generation: number;
+            /**
+             * Ring Samples
+             * @default 0
+             */
+            ring_samples: number;
+            /**
+             * Session Samples
+             * @default 0
+             */
+            session_samples: number;
             /** Total Samples */
             total_samples: number;
         };
@@ -1074,6 +1092,21 @@ export interface components {
             agent_connected: boolean;
             /** Chunk Count */
             chunk_count: number;
+            /**
+             * Generation
+             * @default 1
+             */
+            generation: number;
+            /**
+             * Ring Samples
+             * @default 0
+             */
+            ring_samples: number;
+            /**
+             * Session Samples
+             * @default 0
+             */
+            session_samples: number;
             /**
              * Status
              * @constant
@@ -1847,6 +1880,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };

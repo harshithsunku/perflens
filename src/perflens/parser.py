@@ -52,6 +52,12 @@ FRAME_BARE_RE = re.compile(
     r'^\s+([0-9a-f]+)\s+(\S+)\s*$'
 )
 
+# A line longer than this is not perf output (a symbol name of a few
+# hundred bytes is the realistic maximum, C++ templates included). The
+# header regexes backtrack quadratically on a long non-matching line, so
+# one is skipped rather than matched.
+MAX_LINE_LEN = 16384
+
 
 # perf stat stderr always ends with "N.NN seconds time elapsed"; in a
 # multi-round file (agent --output --rounds N) that line is the boundary
@@ -208,6 +214,18 @@ def parse_perf_script(text):
         if not line.strip():
             continue
         total_lines += 1
+        if len(line) > MAX_LINE_LEN:
+            unrecognized += 1
+            continue
+
+        # A call-chain frame starts with a tab, and only frames do (perf
+        # pads comm with spaces). Most lines are frames, and trying both
+        # header regexes on each of them first was most of the parse time.
+        if line[0] == '\t' and current_sample is not None:
+            frame = _parse_frame(line)
+            if frame is not None:
+                current_sample['frames'].append(frame)
+                continue
 
         m = HEADER_RE.match(line)
         if m:
@@ -544,30 +562,53 @@ def _accumulate_stat(metrics, name, value, comment):
     metrics[name] = {'value': value, 'comment': comment}
 
 
+def stat_counter(metrics, *names):
+    """The value of a counter under any of `names`, or 0.
+
+    An exact key wins. Otherwise the PMU-qualified spellings are summed:
+    a hybrid CPU reports `cpu_core/cycles/` and `cpu_atom/cycles/` and
+    never a bare `cycles`, which used to leave IPC and the miss rates
+    blank on every such machine.
+    """
+    for name in names:
+        entry = metrics.get(name)
+        if isinstance(entry, dict) and isinstance(entry.get('value'),
+                                                  (int, float)):
+            return entry['value']
+    for name in names:
+        total = 0
+        found = False
+        for key, entry in metrics.items():
+            if (key not in _DERIVED_STAT_KEYS and isinstance(entry, dict)
+                    and isinstance(entry.get('value'), (int, float))
+                    and event_base(key) == name):
+                total += entry['value']
+                found = True
+        if found:
+            return total
+    return 0
+
+
 def _compute_derived_stats(metrics):
     """(Re)compute IPC / cache-miss / branch-miss rates from counters."""
-    cycles = metrics.get('cycles', {}).get('value', 0)
-    instructions = metrics.get('instructions', {}).get('value', 0)
+    cycles = stat_counter(metrics, 'cycles', 'cpu-cycles')
+    instructions = stat_counter(metrics, 'instructions')
     if cycles > 0 and instructions > 0:
         metrics['ipc'] = {
             'value': round(instructions / cycles, 2),
             'comment': 'instructions per cycle',
         }
 
-    cache_refs = metrics.get('cache-references', {}).get('value', 0)
-    cache_misses = metrics.get('cache-misses', {}).get('value', 0)
+    cache_refs = stat_counter(metrics, 'cache-references')
+    cache_misses = stat_counter(metrics, 'cache-misses')
     if cache_refs > 0 and cache_misses > 0:
         metrics['cache_miss_rate'] = {
             'value': round(100.0 * cache_misses / cache_refs, 2),
             'comment': '% cache miss rate',
         }
 
-    branches = 0
-    for k in metrics:
-        if 'branches' in k and 'misses' not in k:
-            branches = metrics[k].get('value', 0)
-            break
-    branch_misses = metrics.get('branch-misses', {}).get('value', 0)
+    branches = stat_counter(metrics, 'branches', 'branch-instructions')
+    branch_misses = stat_counter(metrics, 'branch-misses')
     if branches > 0 and branch_misses > 0:
         metrics['branch_miss_rate'] = {
             'value': round(100.0 * branch_misses / branches, 2),

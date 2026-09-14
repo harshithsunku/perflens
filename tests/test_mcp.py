@@ -661,3 +661,24 @@ def test_pick_event_plain_hardware_unchanged():
     plain = {'cycles': {}, 'instructions': {}}
     assert pick_event(plain) == 'cycles'
     assert pick_event(plain, 'instructions') == 'instructions'
+
+
+def test_pick_event_falls_back_to_the_software_clock():
+    """A target with no hardware PMU samples on cpu-clock; `available[0]`
+    used to hand back whatever sorted first."""
+    from perflens.mcp.client import pick_event
+    assert pick_event({'page-faults': {}, 'cpu-clock': {}}) == 'cpu-clock'
+    assert pick_event({'task-clock': {}, 'context-switches': {}}) == 'task-clock'
+
+
+def test_derived_counters_sum_hybrid_spellings():
+    from perflens.mcp.format import derived_counters
+    derived = derived_counters({
+        'cpu_core/cycles/': {'value': 1000}, 'cpu_atom/cycles/': {'value': 500},
+        'cpu_core/instructions/': {'value': 3000},
+        'cpu_atom/instructions/': {'value': 750},
+        'cpu_core/branch-instructions/': {'value': 400},
+        'cpu_core/branch-misses/': {'value': 8},
+    })
+    assert derived['ipc'] == 2.5
+    assert derived['branch_miss_rate_percent'] == 2.0

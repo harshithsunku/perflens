@@ -221,6 +221,24 @@ def create_source_mapper(cfg):
     return mapper
 
 
+def _parse_map_flag(raw, flag):
+    """FROM=TO[,FROM=TO...] into a dict. A malformed entry is reported
+    and skipped; it used to be dropped without a word, and a typo in a
+    path map read as "the source view has no lines"."""
+    out = {}
+    for mapping in (raw or '').split(','):
+        mapping = mapping.strip()
+        if not mapping:
+            continue
+        src, sep, dst = mapping.partition('=')
+        if not sep or not src or not dst:
+            print(f"[server] Warning: ignoring {flag} entry {mapping!r} "
+                  f"(expected FROM=TO)", file=sys.stderr)
+            continue
+        out[src] = dst
+    return out
+
+
 def config_from_args(argv=None):
     """Parse server CLI flags into a ServerConfig."""
     import argparse
@@ -293,21 +311,11 @@ def config_from_args(argv=None):
                              '(default: ~/.perflens/sessions)')
     args = parser.parse_args(argv)
 
-    # Parse path-map
-    path_map = {}
-    if args.path_map:
-        for mapping in args.path_map.split(','):
-            if '=' in mapping:
-                src, dst = mapping.split('=', 1)
-                path_map[src] = dst
+    if args.port == args.http_port:
+        parser.error(f'--port and --http-port must differ (both {args.port})')
 
-    # Parse module-map, same FROM=TO shape
-    module_map = {}
-    if args.module_map:
-        for mapping in args.module_map.split(','):
-            if '=' in mapping:
-                src, dst = mapping.split('=', 1)
-                module_map[src] = dst
+    path_map = _parse_map_flag(args.path_map, '--path-map')
+    module_map = _parse_map_flag(args.module_map, '--module-map')
 
     # Toolchain prefix: derive addr2line and readelf from prefix
     if args.toolchain_prefix:

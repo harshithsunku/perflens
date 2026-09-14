@@ -8,6 +8,7 @@ Skipped when gcc/addr2line/readelf aren't available.
 import os
 import shutil
 import subprocess
+import time
 
 import pytest
 
@@ -445,4 +446,159 @@ def test_shared_library_without_a_local_copy_stays_unknown(fixture_so,
     mapper = make_mapper(None, perflens_home)
     assert mapper.resolve_unknown_frames(samples) == 0
     assert samples[0]['frames'][0]['func'] == '[unknown]'
+    mapper.close()
+
+
+# ---------------------------------------------------------------------------
+# One mapper, many threads; a tool that hangs or dies
+# ---------------------------------------------------------------------------
+
+def test_concurrent_resolution_matches_single_thread(fixture_binary,
+                                                     perflens_home):
+    """The rebuild worker and the request threads share one mapper. Its
+    addr2line protocol is "write N, read 2N lines", so two threads
+    interleaving on a pipe read each other's answers -- names and lines
+    silently swapped, and the pipe desynchronized for good."""
+    import threading
+
+    probe = make_mapper(fixture_binary, perflens_home)
+    jobs = []
+    for func in ('cpu_intensive', 'memory_churner', 'string_worker',
+                 'sorting_worker'):
+        _base, start, addrs = spread_over(probe, fixture_binary, func)
+        jobs.append(offset_samples_for(fixture_binary, start, addrs, func))
+    probe.close()
+
+    expected = []
+    for job in jobs:
+        m = make_mapper(fixture_binary, perflens_home)
+        expected.append(m.map_samples_to_lines(job))
+        m.close()
+    assert all(expected), 'fixture resolves to nothing'
+
+    shared = make_mapper(fixture_binary, perflens_home)
+    results = [None] * len(jobs)
+    errors = []
+
+    def run(i):
+        try:
+            for _ in range(20):
+                results[i] = shared.map_samples_to_lines(jobs[i])
+        except Exception as e:      # noqa: BLE001 - reported below
+            errors.append(e)
+
+    threads = [threading.Thread(target=run, args=(i,)) for i in range(len(jobs))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    shared.close()
+    assert not errors
+    assert results == expected
+
+
+def _fake_addr2line(tmp_path, body):
+    script = tmp_path / 'addr2line'
+    script.write_text('#!/bin/sh\n' + body)
+    script.chmod(0o755)
+    return str(script)
+
+
+def _cached_pairs(mapper, binary):
+    return {k: v for k, v in mapper._addr2line_cache.items() if k[0] == binary}
+
+
+def test_hung_addr2line_is_killed_and_nothing_is_cached(fixture_binary,
+                                                        perflens_home,
+                                                        tmp_path, monkeypatch):
+    """A hung addr2line used to block the worker in readline() forever,
+    freezing every UI update with nothing in the log. It is killed after
+    the read timeout, its unanswered addresses stay unresolved rather than
+    cached as '??', and a healthy tool resolves them afterwards."""
+    from perflens import symcache
+    from perflens.source_mapper import Addr2LinePipe
+
+    monkeypatch.setattr(Addr2LinePipe, 'read_timeout', 0.3)
+    hung = _fake_addr2line(tmp_path, 'exec sleep 30\n')
+    mapper = make_mapper(fixture_binary, perflens_home, addr2line_bin=hung)
+    samples = samples_for(fixture_binary, 'main', '0x0')
+    t0 = time.monotonic()
+    assert mapper.map_samples_to_lines(samples) == {}
+    assert time.monotonic() - t0 < 5
+    pipe = mapper._pipes[fixture_binary]
+    assert pipe.failures == 1 and not pipe.disabled
+    assert _cached_pairs(mapper, fixture_binary) == {}
+    mapper.close()
+    assert symcache.SymbolCache().load_addr2line(
+        symcache.binary_key(fixture_binary)) == {}
+
+    healthy = make_mapper(fixture_binary, perflens_home)
+    assert healthy.map_samples_to_lines(samples)
+    healthy.close()
+
+
+def test_addr2line_dying_mid_batch_leaves_the_rest_for_a_retry(
+        fixture_binary, perflens_home, tmp_path):
+    """Answers one address per life, then exits. Each call resolves one
+    more; the unanswered ones are never remembered as '??'."""
+    flaky = _fake_addr2line(tmp_path,
+                            'read a\necho main\necho /src/w.c:7\nexit 0\n')
+    mapper = make_mapper(fixture_binary, perflens_home, addr2line_bin=flaky)
+    samples = [samples_for(fixture_binary, 'main', hex(o))[0]
+               for o in (0x0, 0x4, 0x8)]
+    got = mapper.map_samples_to_lines(samples)
+    assert sum(sum(d['samples'] for d in lines.values())
+               for lines in got.values()) == 1
+    assert len(_cached_pairs(mapper, fixture_binary)) == 1
+    assert mapper._pipes[fixture_binary].failures == 1
+    mapper.map_samples_to_lines(samples)
+    got = mapper.map_samples_to_lines(samples)
+    assert len(_cached_pairs(mapper, fixture_binary)) == 3
+    assert all(v == ('/src/w.c', 7)
+               for v in _cached_pairs(mapper, fixture_binary).values())
+    assert got == {'/src/w.c': {7: {'samples': 3}}}
+    mapper.close()
+
+
+def test_pipe_is_given_up_after_repeated_failures(fixture_binary,
+                                                   perflens_home, tmp_path):
+    """Three deaths in a row disable the pipe with one log line; later
+    lookups answer '??' at once instead of respawning a broken tool per
+    chunk, and nothing about it is persisted."""
+    from perflens import symcache
+    dead = _fake_addr2line(tmp_path, 'exit 1\n')
+    mapper = make_mapper(fixture_binary, perflens_home, addr2line_bin=dead)
+    samples = samples_for(fixture_binary, 'main', '0x0')
+    for _ in range(3):
+        assert mapper.map_samples_to_lines(samples) == {}
+    pipe = mapper._pipes[fixture_binary]
+    assert pipe.disabled and pipe.failures == 3
+    assert mapper._get_pipe(fixture_binary) is None
+    assert mapper.map_samples_to_lines(samples) == {}
+    assert list(_cached_pairs(mapper, fixture_binary).values()) == [('??', 0)]
+    mapper.close()
+    assert symcache.SymbolCache().load_addr2line(
+        symcache.binary_key(fixture_binary)) == {}
+
+
+def test_close_stops_the_mapper_spawning_tools(fixture_binary, perflens_home):
+    mapper = make_mapper(fixture_binary, perflens_home)
+    assert mapper.map_samples_to_lines(samples_for(fixture_binary))
+    assert mapper._pipes
+    mapper.close()
+    assert not mapper._pipes
+    assert mapper._get_pipe(fixture_binary) is None
+
+
+def test_replay_resolution_does_not_count_toward_the_live_tally(
+        fixture_binary, perflens_home):
+    mapper = make_mapper(fixture_binary, perflens_home)
+    frames = [{'addr': '0', 'func': '[unknown]', 'offset': '',
+               'module': fixture_binary}]
+    samples = [{'comm': 'w', 'pid': 1, 'tid': 1, 'event_count': 1,
+                'event_type': 'cycles', 'frames': list(frames)}]
+    mapper.resolve_unknown_frames(samples, count=False)
+    assert mapper.symbolization_stats()['userspace_frames'] == 0
+    mapper.resolve_unknown_frames(samples)
+    assert mapper.symbolization_stats()['userspace_frames'] == 1
     mapper.close()

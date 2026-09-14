@@ -77,7 +77,23 @@ the big-endian target, and a 0.12.0 release at the end.
       command replies no longer wait on the data send since Phase 1's
       `writev` change, so the case for it is weaker than when the plan was
       written. **9 new session tests** in `tests/test_agentlink_session.py`.
-- [ ] Phase 5 — server.
+- [x] **Phase 5 — server.** The shared source mapper gets a lock per
+      `addr2line` pipe and one around its cache-mutating phases; tool reads
+      time out (30 s), a dead or hung tool is restarted and given up after
+      three failures, and unanswered addresses are never cached or
+      persisted as `??`; the mapper is closed when replaced or at shutdown.
+      Snapshot cost is per chunk again: no tree copy, the worker serializes
+      a changed event once (JSON + a deflate segment) and `/api/snapshot`
+      splices the bytes, gzip included. Ring-derived views are memoized per
+      `(generation, chunk_count)`; the parser is 2× faster (tab-led lines
+      are frames); `generation`, `ring_samples` and `session_samples` on
+      every version stamp; the SSE burst starts with `status`/`agent`; the
+      CORS wildcard is gone; hybrid-spelled counters derive IPC and the
+      miss rates (server and MCP); corrupt metadata, failed deletes, the
+      replay-cache race, the on-loop import write, `--import` failures,
+      unbounded `limit`, equal ports and malformed map entries all
+      answer honestly. Deferred: per-sample memory layout (5.13), pending
+      the soak. **32 new tests.**
 - [ ] Phase 6 — UI.
 - [ ] Phase 7 — docs, hardware pass, 0.12.0.
 

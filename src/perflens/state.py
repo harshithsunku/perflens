@@ -21,6 +21,14 @@ class ProfilingState:
         self.lock = threading.Lock()
         self.all_samples = collections.deque(maxlen=max_samples)
         self.chunk_count = 0
+        # Parsed samples this session, which the ring above under-reports
+        # once it wraps (--max-samples).
+        self.session_samples = 0
+        # Bumped by reset(): the browser compares version stamps to decide
+        # whether to refetch, and chunk_count restarting at 0 on every
+        # (re)connect kept it showing the previous session until the new
+        # count overtook the old one.
+        self.generation = 1
         self.last_update = 0
         self.agent_connected = False
         self.agent_addr = None
@@ -41,6 +49,22 @@ class ProfilingState:
         self._rebuild_needed = threading.Condition(self.lock)
         self._dirty = False
         self._cached_per_event = {}
+        # event -> (json bytes, deflate segment) of _cached_per_event[event],
+        # serialized once by the worker; /api/snapshot splices these.
+        self._cached_blobs = {}
+
+    def version_locked(self, with_events=False):
+        """The notify-and-fetch stamp. Caller holds self.lock."""
+        v = {
+            'generation': self.generation,
+            'chunk_count': self.chunk_count,
+            'total_samples': len(self.all_samples),
+            'ring_samples': len(self.all_samples),
+            'session_samples': self.session_samples,
+        }
+        if with_events:
+            v['event_types'] = list(self.event_types)
+        return v
 
     def add_samples(self, new_samples, perf_stat=None):
         """Add samples and return (total_count, event_types_copy)."""
@@ -51,6 +75,7 @@ class ProfilingState:
         with self.lock:
             self.all_samples.extend(new_samples)
             self.chunk_count += 1
+            self.session_samples += len(new_samples)
             self.last_update = time.time()
             self._event_types_set.update(
                 s['event_type'] for s in new_samples)
@@ -74,11 +99,14 @@ class ProfilingState:
         with self.lock:
             self.all_samples.clear()
             self.chunk_count = 0
+            self.session_samples = 0
+            self.generation += 1
             self.event_types = []
             self._event_types_set.clear()
             self.perf_stat = {}
             self._pending_chunks = []
             self._cached_per_event = {}
+            self._cached_blobs = {}
             self._dirty = False
             # Swap (don't reset in place): the rebuild worker may be folding
             # already-popped chunks into the old set right now — folding into
@@ -229,7 +257,7 @@ def rebuild_worker(ctx):
         try:
             for chunk in pending:
                 aggs.add_chunk(chunk, mapper)
-            per_event = aggs.snapshot_per_event(mapper)
+            per_event, blobs = aggs.snapshot_blobs(mapper)
         except Exception as e:
             # Never let one bad chunk (or a mapper hiccup) kill the worker —
             # that would silently freeze all UI updates for the session.
@@ -242,11 +270,8 @@ def rebuild_worker(ctx):
             if state.aggregators is not aggs:
                 continue  # session was reset mid-fold — discard stale build
             state._cached_per_event = per_event
-            version = {
-                'chunk_count': state.chunk_count,
-                'total_samples': len(state.all_samples),
-                'event_types': list(state.event_types),
-            }
+            state._cached_blobs = blobs
+            version = state.version_locked(with_events=True)
 
         # Notify-and-fetch: browsers get a tiny version stamp and pull the
         # event they're actually viewing from /api/snapshot — the full

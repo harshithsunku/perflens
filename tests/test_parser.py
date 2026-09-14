@@ -2,6 +2,7 @@
 merging, multi-round file splitting, and malformed-input tolerance."""
 
 import pytest
+from conftest import fixture_session_names
 
 from perflens.parser import (HEADER_RE, PERF_STAT_MARKER, _normalize_event,
                              event_base, filter_samples_by_event,
@@ -335,3 +336,63 @@ def test_perf_stat_skips_what_it_cannot_read():
     assert stats['task-clock']['value'] == 2.0
     assert 'instructions' not in stats
     assert 'time_elapsed' not in stats
+
+
+# ---------------------------------------------------------------------------
+# Fast path, long lines, hybrid counters
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize('name', fixture_session_names())
+def test_fixture_sample_counts_match_their_metadata(name):
+    """The frame fast path (a tab-led line is a frame) must parse the real
+    captures to the sample count the device reported when they were
+    saved."""
+    import json
+    import os
+
+    from conftest import REPO, load_fixture_chunks
+    with open(os.path.join(REPO, 'tests', 'fixtures', name, 'metadata.json')) as f:
+        expected = json.load(f)['total_samples']
+    assert sum(len(c) for c in load_fixture_chunks(name)) == expected
+
+
+def test_overlong_line_is_skipped_not_matched():
+    import time
+    junk = 'comm 1 ' + 'x' * 40000 + ' 1.0: 1 cycles:\n'
+    good = ("sample_workload 12345 6543210.123456: 1000003 cycles:\n"
+            "\t    7f1234567890 main+0x10 (/usr/bin/sample_workload)\n")
+    t0 = time.monotonic()
+    samples = parse_perf_script(junk + good)
+    assert time.monotonic() - t0 < 2
+    assert len(samples) == 1 and samples[0]['frames'][0]['func'] == 'main'
+
+
+def test_tab_led_line_that_is_not_a_frame_still_reaches_the_header_regex():
+    """A header never starts with a tab, but the fast path must fall through
+    rather than drop a line it could not parse as a frame."""
+    text = ("\tsample_workload 1 6543210.1: 1 cycles:\n"
+            "\t    7f1234567890 main+0x10 (/usr/bin/x)\n")
+    samples = parse_perf_script(text)
+    assert len(samples) == 1 and samples[0]['comm'] == 'sample_workload'
+
+
+def test_derived_stats_sum_pmu_qualified_counters():
+    """A hybrid CPU reports cpu_core/cycles/ and cpu_atom/cycles/, never a
+    bare cycles; IPC and the miss rates used to be blank there."""
+    text = ("     1,000      cpu_core/cycles/\n"
+            "       500      cpu_atom/cycles/\n"
+            "     3,000      cpu_core/instructions/\n"
+            "       750      cpu_atom/instructions/\n"
+            "       200      cpu_core/cache-references/\n"
+            "        50      cpu_core/cache-misses/\n")
+    stats = parse_perf_stat(text)
+    assert stats['ipc']['value'] == 2.5
+    assert stats['cache_miss_rate']['value'] == 25.0
+
+
+def test_branch_miss_rate_from_branch_instructions():
+    """perf spells the counter `branch-instructions` when asked for it by
+    that name (the fixtures do); only `branches` used to be recognised."""
+    stats = parse_perf_stat("     4,000      branch-instructions\n"
+                            "        80      branch-misses\n")
+    assert stats['branch_miss_rate']['value'] == 2.0
