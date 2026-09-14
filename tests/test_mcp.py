@@ -31,23 +31,6 @@ FIXTURE = FIXTURES[0]
 # Fixtures
 # ---------------------------------------------------------------------------
 
-@pytest.fixture()
-def core(tmp_path, perflens_home):
-    """An AppContext with a stub UI dir (no workers, no source mapper)."""
-    from perflens.app import AppContext
-    from perflens.config import ServerConfig
-    from perflens.state import MetricsState, ProfilingState
-
-    sessions_dir = str(tmp_path / 'sessions')
-    os.makedirs(sessions_dir)
-    ui_dir = tmp_path / 'ui'
-    ui_dir.mkdir()
-    (ui_dir / 'index.html').write_text('<!DOCTYPE html><title>stub</title>')
-    cfg = ServerConfig(source_dir=str(tmp_path), sessions_dir=sessions_dir,
-                       browse_root=str(tmp_path), ui_dir=str(ui_dir))
-    return AppContext(config=cfg, state=ProfilingState(max_samples=100000),
-                      metrics=MetricsState())
-
 
 @pytest.fixture()
 def session_id(core):

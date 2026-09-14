@@ -25,42 +25,6 @@ REPLAY_CACHE_SCHEMA = 3
 FIXTURE = fixture_session_names()[0]
 
 
-@pytest.fixture()
-def core(tmp_path, perflens_home):
-    """Build a fresh AppContext (no workers, no source mapper).
-
-    ui_dir is a stand-in for the built frontend, so the suite always
-    exercises the shipped configuration (static assets mounted) whether
-    or not this machine has run `npm --prefix frontend run build`. The
-    two tests that care about the real assets, or about their absence,
-    build their own app.
-    """
-    from perflens.app import AppContext
-    from perflens.config import ServerConfig
-    from perflens.state import MetricsState, ProfilingState
-
-    sessions_dir = str(tmp_path / 'sessions')
-    os.makedirs(sessions_dir)
-    ui_dir = tmp_path / 'ui'
-    ui_dir.mkdir()
-    (ui_dir / 'index.html').write_text('<!DOCTYPE html><title>stub</title>')
-    cfg = ServerConfig(
-        source_dir=str(tmp_path),
-        sessions_dir=sessions_dir,
-        browse_root=str(tmp_path),
-        ui_dir=str(ui_dir),
-    )
-    yield AppContext(config=cfg,
-                     state=ProfilingState(max_samples=100000),
-                     metrics=MetricsState())
-
-
-@pytest.fixture()
-def client(core):
-    from perflens import web
-    with TestClient(web.create_app(core)) as c:
-        yield c
-
 
 @pytest.fixture()
 def session_id(core):
