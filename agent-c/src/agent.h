@@ -126,7 +126,7 @@
  * between an attacker and the agent. */
 #define TOKEN_BYTES       16
 #define TOKEN_HEX_LEN     (TOKEN_BYTES * 2)   /* 32 chars, +1 for NUL */
-#define AUTH_TIMEOUT_SECS 30    /* peer must authenticate within this */
+#define AUTH_TIMEOUT_SECS 10    /* peer must authenticate within this */
 #define AUTH_MAX_FAILURES 3     /* wrong codes before the session is dropped */
 
 /* Wire protocol flags (5-byte header: 4-byte length + 1-byte flag) */
@@ -140,6 +140,7 @@
 #define AGENT_IDLE       0
 #define AGENT_PROFILING  1
 #define AGENT_PAUSED     2
+#define AGENT_PROBING    3   /* a start or reprobe is probing capabilities */
 
 /* Process list limits */
 #define MAX_PROCS        4096
@@ -219,6 +220,19 @@ struct cmd_queue {
     pthread_cond_t cond;
 };
 
+/* What a start or reprobe asked for. The command thread validates it and
+ * hands it to the collection thread, which probes (that takes seconds to
+ * minutes), answers the command, and -- for start -- goes on to collect.
+ * Meanwhile ping, status and stop keep being answered. */
+struct start_job {
+    int  pid;
+    int  frequency;
+    int  duration;
+    int  then_start;            /* 1 = start, 0 = reprobe */
+    char cmd_id[80];
+    char req_events[512];       /* comma list the peer asked for, or "" */
+};
+
 struct agent_state {
     /* Socket (protected by sock_lock) */
     int sock_fd;
@@ -263,6 +277,11 @@ struct agent_state {
     pthread_t collect_thread;
     int collect_thread_active;
     atomic_int collect_stop;
+    struct start_job job;       /* read by the thread at start */
+
+    /* Woken by stop/pause/resume so a sleeping loop reacts at once */
+    pthread_mutex_t wake_lock;
+    pthread_cond_t  wake;
 
     /* Per-session disconnect signal */
     atomic_int session_done;
@@ -378,14 +397,17 @@ int   reap_child(pid_t pid, int grace_ms);
 /* Signal a child and the workload it spawned (perf record -- sleep N). */
 void  kill_child_group(pid_t pid, int sig);
 
+/* `a` may be NULL. Otherwise a stop or a lost session cancels the wait:
+ * the child is signalled and reaped, and -1 is returned. */
 int   run_cmd(char *const argv[], struct buf *out, struct buf *err,
-              int timeout_sec);
+              int timeout_sec, const struct agent_state *a);
 pid_t fork_cmd(char *const argv[], int *out_fd_p, int *err_fd_p, int flags);
 int   fork_pipeline(char *const argv_a[], char *const argv_b[],
                     pid_t *pid_a_p, pid_t *pid_b_p,
                     int *a_err_p, int *b_out_p, int *b_err_p);
 int   run_pipeline_once(char *const argv_a[], char *const argv_b[],
-                        struct buf *out, int timeout_sec);
+                        struct buf *out, int timeout_sec,
+                        const struct agent_state *a);
 
 /* --------------------------------------------------------------------------
  * perfcmd.c — one place that knows what a perf command line looks like
@@ -405,8 +427,10 @@ int build_record_argv(char **argv, int cap, const char *events,
                       const char *sleep_secs);
 int build_script_argv(char **argv, int cap, const char *fields,
                       const char *input);
+/* csv=1 adds `-x ,` (one line per event, machine-readable), which is how
+ * the probe asks about every candidate in a single run. */
 int build_stat_argv(char **argv, int cap, const char *events,
-                    const char *pid_str, const char *sleep_secs);
+                    const char *pid_str, const char *sleep_secs, int csv);
 
 /* --------------------------------------------------------------------------
  * wire.c
@@ -454,7 +478,14 @@ int  agent_consttime_eq(const char *a, const char *b);
 extern char g_perf[PERF_PATH_MAX];
 int  perf_use(const char *path, char *err, size_t errlen);
 void detect_platform(struct platform_info *info);
-void probe_capabilities(int pid, struct capabilities *caps);
+/* Returns 0, or -1 when cancelled part-way (caps is then incomplete). */
+int  probe_capabilities(int pid, struct capabilities *caps,
+                        const struct agent_state *a);
+/* Everything in caps depends on the kernel, the perf build and the
+ * permissions -- not on the pid, except that recording another user's
+ * process may be refused. One short record answers that. */
+int  probe_pid_records(const struct capabilities *caps, int pid,
+                       const struct agent_state *a);
 void free_capabilities(struct capabilities *caps);
 /* Does this perf script output carry call chains (indented frame lines)? */
 int  callchains_present(const struct buf *out);
@@ -474,13 +505,19 @@ char *collect_one_round(const struct capabilities *caps, const char *events,
                         int want_compress, size_t *out_len,
                         size_t *out_raw_len, uint8_t *out_flag,
                         const struct agent_state *a);
+/* The collection loop proper (rounds or continuous), run on the
+ * collection thread once capabilities are known. */
+void  collection_run(struct agent_state *a);
+/* Sleep up to ms, waking early on stop/pause/resume, session end, or
+ * shutdown. */
+void  session_sleep(struct agent_state *a, int ms);
+void  agent_wake(struct agent_state *a);
 /* True once the collection thread has been told to stop, or the session
  * ended. NULL means headless mode, which only stops on a signal. */
 static inline int collection_cancelled(const struct agent_state *a)
 {
     return a && (a->collect_stop || a->session_done);
 }
-void *collection_thread_fn(void *arg);
 
 /* --------------------------------------------------------------------------
  * metrics.c
@@ -493,6 +530,9 @@ void *metrics_thread_fn(void *arg);
  * -------------------------------------------------------------------------- */
 
 void dispatch_command(struct agent_state *a, const char *json);
+/* The collection thread's entry: probe as the job requires, answer the
+ * start or reprobe, then collect. */
+void *collection_thread_fn(void *arg);
 
 /* Defined in main.c; called by cmd_auth once a peer has proved itself.
  * Idempotent — metrics must not stream before authentication. */

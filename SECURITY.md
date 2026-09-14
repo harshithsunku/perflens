@@ -73,8 +73,11 @@ handshake, before that peer has proved anything, so everything in it is public
 by construction. Until the exchange succeeds, every command is answered
 `{"ok":false,"error":"unauthenticated"}`, and no metrics are streamed.
 
-Three wrong codes, or 30 seconds without a valid one, and the agent drops the
-connection and returns to listening.
+Three wrong codes, or 10 seconds without a valid one, and the agent drops the
+connection and returns to listening. While a peer has not yet authenticated,
+the agent keeps accepting: a new connection replaces the silent one at once,
+so a peer that connects and sends nothing cannot hold the slot. An
+authenticated session is never replaced by a newcomer.
 
 ### Getting the code, in practice
 

@@ -430,8 +430,12 @@ protocol tests shorten it).
 - Single agent connection at a time — a new agent replaces the current one.
 - `perf_event_paranoid > 1` may restrict the set of usable events (the agent
   warns at startup).
-- Capability probing adds ~10-20 s on a typical target, longer on slow or hybrid-CPU hardware to first-connection startup (events,
-  call-graph modes `fp`/`dwarf`/`lbr`, script fields, pipe mode).
+- Capability probing adds a few seconds on a typical target (about 6 s of
+  `perf` sleeps: one batched `stat`, one batched `record`, one call-graph
+  recording, the pipe-mode probe), longer on slow or hybrid-CPU hardware.
+  It runs on the collection thread, so `ping`/`status`/`stop` answer
+  meanwhile and `status` reports `probing`. Switching process re-checks
+  only that the new pid can be recorded.
 - In continuous mode, `perf record` flushes its ring buffer in batches, so
   the first chunk or two after `start` may carry only PERF_STAT data before
   samples begin flowing.

@@ -234,7 +234,7 @@ int reap_child(pid_t pid, int grace_ms)
  * -------------------------------------------------------------------------- */
 
 int run_cmd(char *const argv[], struct buf *out, struct buf *err,
-                   int timeout_sec)
+                   int timeout_sec, const struct agent_state *a)
 {
     int stdout_pipe[2] = {-1, -1};
     int stderr_pipe[2] = {-1, -1};
@@ -279,7 +279,15 @@ int run_cmd(char *const argv[], struct buf *out, struct buf *err,
     struct timespec start;
     clock_gettime(CLOCK_MONOTONIC, &start);
 
+    int cancelled = 0;
     while (open_fds > 0 && !g_shutdown) {
+        if (collection_cancelled(a)) {
+            /* A stop, or the session is gone: the probe this belongs to is
+             * moot. Ask nicely first; reap_child() escalates. */
+            kill_child_group(pid, SIGTERM);
+            cancelled = 1;
+            break;
+        }
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
         int elapsed_ms = (int)((now.tv_sec - start.tv_sec) * 1000 +
@@ -292,7 +300,7 @@ int run_cmd(char *const argv[], struct buf *out, struct buf *err,
             break;
         }
 
-        int ret = poll(fds, 2, remaining_ms < 500 ? remaining_ms : 500);
+        int ret = poll(fds, 2, remaining_ms < 200 ? remaining_ms : 200);
         if (ret < 0) {
             if (errno == EINTR) continue;
             break;
@@ -332,6 +340,7 @@ int run_cmd(char *const argv[], struct buf *out, struct buf *err,
     int status = reap_child(pid, killed ? 0 : CHILD_GRACE_MS);
     untrack_child(pid);
 
+    if (cancelled) return -1;
     if (WIFEXITED(status))
         return WEXITSTATUS(status);
     return -1;
@@ -454,7 +463,8 @@ int fork_pipeline(char *const argv_a[], char *const argv_b[],
 /* Run a pipeline to completion, capturing b's stdout. Returns b's exit
  * code, or -1 on error/timeout. Used by the pipe-mode capability probe. */
 int run_pipeline_once(char *const argv_a[], char *const argv_b[],
-                             struct buf *out, int timeout_sec)
+                             struct buf *out, int timeout_sec,
+                             const struct agent_state *a)
 {
     pid_t pid_a, pid_b;
     int a_err_fd, b_out_fd, b_err_fd;
@@ -475,7 +485,14 @@ int run_pipeline_once(char *const argv_a[], char *const argv_b[],
     struct timespec start;
     clock_gettime(CLOCK_MONOTONIC, &start);
 
+    int cancelled = 0;
     while (open_fds > 0 && !g_shutdown) {
+        if (collection_cancelled(a)) {
+            kill_child_group(pid_a, SIGTERM);
+            kill_child_group(pid_b, SIGTERM);
+            cancelled = 1;
+            break;
+        }
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
         int elapsed_ms = (int)((now.tv_sec - start.tv_sec) * 1000 +
@@ -488,7 +505,7 @@ int run_pipeline_once(char *const argv_a[], char *const argv_b[],
             break;
         }
 
-        int ret = poll(fds, 3, remaining_ms < 500 ? remaining_ms : 500);
+        int ret = poll(fds, 3, remaining_ms < 200 ? remaining_ms : 200);
         if (ret < 0) {
             if (errno == EINTR) continue;
             break;
@@ -527,6 +544,7 @@ int run_pipeline_once(char *const argv_a[], char *const argv_b[],
     int status_b = reap_child(pid_b, grace);
     untrack_child(pid_b);
 
+    if (cancelled) return -1;
     if (WIFEXITED(status_b))
         return WEXITSTATUS(status_b);
     return -1;

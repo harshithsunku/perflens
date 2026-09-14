@@ -35,8 +35,16 @@ the big-endian target, and a 0.12.0 release at the end.
       session socket — the protocol suite caught it as "agent disconnected"
       right after `stop`. **58 protocol tests** (was 43 collected), 385
       pytest in all. Cross builds green on all three local toolchains.
-- [ ] Phase 2 — agent responsiveness (A-07, A-12, A-16, A-19, A-20, A-23,
-      A-24, A-36).
+- [x] **Phase 2 — agent responsiveness (same unfreeze).** A-07 (probe on
+      the collection thread, cancellable, `status: probing`), A-12 (10 s
+      window, silent peer replaced), A-16 (overlapping rounds, free-space
+      check), A-19 (metrics: open-once files, thermal zone choice, cpufreq
+      holes, pre-3.14 meminfo, dynamic core count), A-20 (process list
+      reads less, per-core CPU%), A-23 (batched probe, ~7 runs), A-24
+      (per-pid check on switch), A-36 (wakeable sleeps). Not moved off the
+      command thread, deliberately: `list_processes` (0.5 s), `verify_perf`
+      (≤15 s) and `update`. `make -C agent-c check` runs C unit tests over
+      the metrics parsers. **68 protocol tests.**
 - [ ] Phase 3 — build, update, CI hardening (A-30, A-32, A-33, A-34).
 - [ ] Phase 4 — transport (server side of the socket).
 - [ ] Phase 5 — server.

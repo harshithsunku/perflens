@@ -56,12 +56,12 @@ static int download_file(const char *url, const char *dest)
     char *curl_argv[] = { (char *)"curl", (char *)"-fsSL",
                           (char *)"--connect-timeout", (char *)"20",
                           (char *)"-o", (char *)dest, (char *)url, NULL };
-    int rc = run_cmd(curl_argv, NULL, &err, 300);
+    int rc = run_cmd(curl_argv, NULL, &err, 300, NULL);
     if (rc == 127) {
         char *wget_argv[] = { (char *)"wget", (char *)"-q",
                               (char *)"-T", (char *)"20",
                               (char *)"-O", (char *)dest, (char *)url, NULL };
-        rc = run_cmd(wget_argv, NULL, &err, 300);
+        rc = run_cmd(wget_argv, NULL, &err, 300, NULL);
         if (rc == 127) {
             agent_warn("Neither curl nor wget found — cannot download");
             buf_free(&err);
@@ -134,7 +134,7 @@ int self_update(char *msg, size_t msglen)
     struct buf out;
     buf_init(&out);
     char *ver_argv[] = { tmp, (char *)"--version", NULL };
-    int rc = run_cmd(ver_argv, &out, NULL, 30);
+    int rc = run_cmd(ver_argv, &out, NULL, 30, NULL);
     if (rc != 0 || out.len == 0 ||
         !str_contains_lower(out.data, out.len, "perflens-agent")) {
         snprintf(msg, msglen, "downloaded binary failed verification (rc=%d)", rc);

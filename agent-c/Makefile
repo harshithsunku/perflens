@@ -54,9 +54,18 @@ OBJDIR = $(OUTDIR)/obj
 BIN    = $(OUTDIR)/$(TARGET)
 OBJS   = $(patsubst src/%.c,$(OBJDIR)/%.o,$(SRCS)) $(OBJDIR)/zstd.o
 
-.PHONY: all clean all-cross print-bin
+.PHONY: all clean all-cross print-bin check
 
 all: $(BIN)
+
+# Native unit tests for the parsers that read /proc and /sys. They include
+# the module source directly, so the static parsers are reachable.
+check: $(OBJDIR)/test_metrics
+	$(OBJDIR)/test_metrics
+
+$(OBJDIR)/test_metrics: tests/test_metrics.c src/metrics.c src/agent.h $(OBJDIR)/util.o $(OBJDIR)/subproc.o $(OBJDIR)/collect.o $(OBJDIR)/wire.o $(OBJDIR)/perfcmd.o $(OBJDIR)/probe.o $(OBJDIR)/zstd.o $(OBJDIR)/commands.o $(OBJDIR)/procs.o $(OBJDIR)/auth.o $(OBJDIR)/update.o
+	@mkdir -p $(OBJDIR)
+	$(CC) $(CFLAGS) -o $@ tests/test_metrics.c $(filter %.o,$^) $(LDFLAGS)
 
 print-bin:
 	@echo $(BIN)

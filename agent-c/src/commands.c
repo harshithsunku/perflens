@@ -105,9 +105,23 @@ static int max_sample_rate(void)
 static int agent_busy(struct agent_state *a)
 {
     pthread_mutex_lock(&a->state_lock);
-    int busy = a->state == AGENT_PROFILING || a->state == AGENT_PAUSED;
+    int busy = a->state == AGENT_PROFILING || a->state == AGENT_PAUSED ||
+               a->state == AGENT_PROBING;
     pthread_mutex_unlock(&a->state_lock);
     return busy;
+}
+
+/* Reap a collection thread that ended on its own (target exited, probe
+ * cancelled) so its slot can be reused. Never blocks for long: a thread
+ * that is still running is what agent_busy() guards against. */
+static void join_finished_collection(struct agent_state *a)
+{
+    if (a->collect_thread_active) {
+        a->collect_stop = 1;
+        agent_wake(a);
+        pthread_join(a->collect_thread, NULL);
+        a->collect_thread_active = 0;
+    }
 }
 
 /* --------------------------------------------------------------------------
@@ -124,21 +138,6 @@ static void cmd_status(struct agent_state *a, const char *cmd_id,
                        const char *args, const char *aend)
 {
     const char *state_str;
-    int st, pid, freq, dur;
-
-    pthread_mutex_lock(&a->state_lock);
-    st = a->state;
-    pid = a->pid;
-    freq = a->frequency;
-    dur = a->duration;
-    pthread_mutex_unlock(&a->state_lock);
-
-    switch (st) {
-    case AGENT_PROFILING: state_str = "profiling"; break;
-    case AGENT_PAUSED:    state_str = "paused";    break;
-    default:              state_str = "idle";       break;
-    }
-
     char esc_pv[256], esc_path[PERF_PATH_MAX * 2];
     char esc_arch[256], esc_kernel[256];
     json_escape(esc_pv, sizeof(esc_pv), a->platform.perf_version);
@@ -150,13 +149,23 @@ static void cmd_status(struct agent_state *a, const char *cmd_id,
     struct wbuf w;
     wbuf_init(&w, storage, sizeof(storage));
     begin_ok(&w, cmd_id);
+
+    /* caps and sel_events belong to the collection thread while a probe
+     * or a session runs; read them under the lock it swaps them under. */
+    pthread_mutex_lock(&a->state_lock);
+    switch (a->state) {
+    case AGENT_PROFILING: state_str = "profiling"; break;
+    case AGENT_PAUSED:    state_str = "paused";    break;
+    case AGENT_PROBING:   state_str = "probing";   break;
+    default:              state_str = "idle";       break;
+    }
     wbuf_addf(&w,
         ",\"state\":\"%s\",\"pid\":%d,\"frequency\":%d,\"duration\":%d,"
         "\"agent_version\":\"" AGENT_VERSION "\","
         "\"platform\":{\"arch\":\"%s\",\"kernel\":\"%s\","
         "\"perf_version\":\"%s\",\"perf_path\":\"%s\","
         "\"perf_event_paranoid\":%d}",
-        state_str, pid, freq, dur, esc_arch, esc_kernel,
+        state_str, a->pid, a->frequency, a->duration, esc_arch, esc_kernel,
         esc_pv, esc_path, a->platform.perf_event_paranoid);
 
     if (a->caps) {
@@ -166,6 +175,7 @@ static void cmd_status(struct agent_state *a, const char *cmd_id,
         append_effective_events(&w, a);
         wbuf_add(&w, "]");
     }
+    pthread_mutex_unlock(&a->state_lock);
     wbuf_add(&w, "}");
     send_built(a, cmd_id, &w);
 }
@@ -281,10 +291,13 @@ static void cmd_verify_perf(struct agent_state *a, const char *cmd_id,
         if (perf_use(want, adopt_err, sizeof(adopt_err)) == 0) {
             agent_log("Using perf: %s", g_perf);
             detect_platform(&a->platform);
-            if (a->caps) {
-                free_capabilities(a->caps);
-                free(a->caps);
-                a->caps = NULL;
+            pthread_mutex_lock(&a->state_lock);
+            struct capabilities *old = a->caps;
+            a->caps = NULL;
+            pthread_mutex_unlock(&a->state_lock);
+            if (old) {
+                free_capabilities(old);
+                free(old);
             }
         }
     }
@@ -309,7 +322,7 @@ static void cmd_verify_perf(struct agent_state *a, const char *cmd_id,
     char *argv[] = { g_perf, "--version", NULL };
     struct buf out;
     buf_init(&out);
-    int rc = run_cmd(argv, &out, NULL, 5);
+    int rc = run_cmd(argv, &out, NULL, 5, NULL);
 
     char version[256] = "";
     if (rc == 0 && out.len > 0) {
@@ -333,15 +346,18 @@ static void cmd_verify_perf(struct agent_state *a, const char *cmd_id,
      * target is known to record, or cpu-clock, which exists without a PMU:
      * `-e cycles` exited 0 with `<not supported>` on a PMU-less target and
      * reported the perf functional when it was not. */
-    const char *ev = (a->caps && a->caps->record_event_count > 0)
-                   ? a->caps->record_events[0] : "cpu-clock";
+    char ev[128] = "cpu-clock";
+    pthread_mutex_lock(&a->state_lock);
+    if (a->caps && a->caps->record_event_count > 0)
+        snprintf(ev, sizeof(ev), "%s", a->caps->record_events[0]);
+    pthread_mutex_unlock(&a->state_lock);
     char pid_str[16];
     snprintf(pid_str, sizeof(pid_str), "%d", (int)getpid());
     char *argv_check[MAX_CMD_ARGS];
-    build_stat_argv(argv_check, MAX_CMD_ARGS, ev, pid_str, "0");
+    build_stat_argv(argv_check, MAX_CMD_ARGS, ev, pid_str, "0", 0);
     struct buf errbuf;
     buf_init(&errbuf);
-    int functional = (run_cmd(argv_check, NULL, &errbuf, 10) == 0);
+    int functional = (run_cmd(argv_check, NULL, &errbuf, 10, NULL) == 0);
     if (functional && errbuf.len > 0 &&
         (str_contains_lower(errbuf.data, errbuf.len, "not supported") ||
          str_contains_lower(errbuf.data, errbuf.len, "not counted")))
@@ -371,149 +387,72 @@ static void cmd_verify_perf(struct agent_state *a, const char *cmd_id,
     send_built(a, cmd_id, &w);
 }
 
-static void cmd_reprobe(struct agent_state *a, const char *cmd_id,
-                        const char *args, const char *aend)
+/* Validate a start/reprobe request and launch the collection thread with
+ * it. The thread probes (which used to block every other command for the
+ * 20 s to minutes a probe takes), answers `cmd_id`, and -- for start --
+ * collects. Returns 0 when the thread is running, -1 after an error
+ * response has already been sent. */
+static int launch_job(struct agent_state *a, const char *cmd_id,
+                      const char *args, const char *aend, int then_start)
 {
-    /* The collection thread reads a->caps while running — re-probing now
-     * would free it out from under it. */
     if (agent_busy(a)) {
-        send_error(a, cmd_id, "cannot reprobe while profiling — stop first");
-        return;
-    }
-
-    int pid = a->pid;
-    if (args) json_get_int_n(args, aend, "pid", &pid);
-
-    if (pid < 0) {
-        send_error(a, cmd_id, "pid required");
-        return;
-    }
-
-    if (!process_exists(pid)) {
-        send_error(a, cmd_id, "process %d not found", pid);
-        return;
-    }
-
-    agent_log("Re-probing capabilities for PID %d...", pid);
-
-    if (a->caps) {
-        free_capabilities(a->caps);
-        free(a->caps);
-        a->caps = NULL;
-    }
-
-    struct capabilities *caps = malloc(sizeof(*caps));
-    if (!caps) {
-        send_error(a, cmd_id, "out of memory");
-        return;
-    }
-
-    probe_capabilities(pid, caps);
-
-    pthread_mutex_lock(&a->state_lock);
-    a->caps = caps;
-    a->pid = pid;
-    a->pid_start = process_start_time(pid);
-    pthread_mutex_unlock(&a->state_lock);
-
-    char storage[4096];
-    struct wbuf w;
-    wbuf_init(&w, storage, sizeof(storage));
-    begin_ok(&w, cmd_id);
-    wbuf_add(&w, ",");
-    append_capabilities(&w, caps);
-    wbuf_add(&w, "}");
-    send_built(a, cmd_id, &w);
-}
-
-static void cmd_start(struct agent_state *a, const char *cmd_id,
-                      const char *args, const char *aend)
-{
-    pthread_mutex_lock(&a->state_lock);
-    if (a->state == AGENT_PROFILING || a->state == AGENT_PAUSED) {
-        int paused = (a->state == AGENT_PAUSED);
+        pthread_mutex_lock(&a->state_lock);
+        int st = a->state;
         pthread_mutex_unlock(&a->state_lock);
-        send_error(a, cmd_id, "%s",
-                   paused ? "already profiling (paused — use resume or stop)"
-                          : "already profiling");
-        return;
+        const char *why = st == AGENT_PAUSED
+            ? "already profiling (paused — use resume or stop)"
+            : st == AGENT_PROBING ? (then_start ? "already probing — stop first"
+                                                : "cannot reprobe while probing — stop first")
+            : then_start ? "already profiling"
+                         : "cannot reprobe while profiling — stop first";
+        send_error(a, cmd_id, "%s", why);
+        return -1;
     }
+    join_finished_collection(a);
+
+    struct start_job job;
+    memset(&job, 0, sizeof(job));
+    job.then_start = then_start;
+    snprintf(job.cmd_id, sizeof(job.cmd_id), "%s", cmd_id);
+    pthread_mutex_lock(&a->state_lock);
+    job.pid = a->pid;
+    job.frequency = a->frequency;
+    job.duration = a->duration;
     pthread_mutex_unlock(&a->state_lock);
-
-    /* A previous collection thread may have ended on its own (e.g. target
-     * process exited set state back to IDLE) without anyone joining it. */
-    if (a->collect_thread_active) {
-        a->collect_stop = 1;
-        pthread_join(a->collect_thread, NULL);
-        a->collect_thread_active = 0;
-    }
-
-    int pid = a->pid;
-    int freq = a->frequency;
-    int dur = a->duration;
 
     if (args) {
-        json_get_int_n(args, aend, "pid", &pid);
-        json_get_int_n(args, aend, "frequency", &freq);
-        json_get_int_n(args, aend, "duration", &dur);
+        json_get_int_n(args, aend, "pid", &job.pid);
+        json_get_int_n(args, aend, "frequency", &job.frequency);
+        json_get_int_n(args, aend, "duration", &job.duration);
     }
 
-    if (pid < 0) {
+    if (job.pid < 0) {
         send_error(a, cmd_id, "pid required");
-        return;
+        return -1;
     }
 
     /* Validate like configure does. duration 0 spun rounds mode through
      * record and script back to back; a frequency past the kernel's
      * perf_event_max_sample_rate makes perf fail or throttle every round. */
     int max_freq = max_sample_rate();
-    if (freq < 1 || freq > max_freq) {
+    if (job.frequency < 1 || job.frequency > max_freq) {
         send_error(a, cmd_id, "frequency must be between 1 and %d Hz "
                    "(perf_event_max_sample_rate)", max_freq);
-        return;
+        return -1;
     }
-    if (dur < 1 || dur > MAX_DURATION) {
+    if (job.duration < 1 || job.duration > MAX_DURATION) {
         send_error(a, cmd_id, "duration must be between 1 and %d seconds",
                    MAX_DURATION);
-        return;
+        return -1;
     }
 
-    if (!process_exists(pid)) {
-        send_error(a, cmd_id, "process %d not found", pid);
-        return;
+    if (!process_exists(job.pid)) {
+        send_error(a, cmd_id, "process %d not found", job.pid);
+        return -1;
     }
 
-    /* Probe capabilities if needed (deferred — no PID at startup) */
-    if (!a->caps || a->pid != pid) {
-        if (a->caps) {
-            free_capabilities(a->caps);
-            free(a->caps);
-            a->caps = NULL;
-        }
-        struct capabilities *caps = malloc(sizeof(*caps));
-        if (!caps) {
-            send_error(a, cmd_id, "out of memory");
-            return;
-        }
-        probe_capabilities(pid, caps);
-        a->caps = caps;
-    }
-
-    pthread_mutex_lock(&a->state_lock);
-    a->pid = pid;
-    a->pid_start = process_start_time(pid);
-    a->frequency = freq;
-    a->duration = dur;
-    pthread_mutex_unlock(&a->state_lock);
-
-    if (a->caps->record_event_count == 0) {
-        send_error(a, cmd_id, "no perf record events available for PID %d", pid);
-        return;
-    }
-
-    /* Optional args.events: record only this subset of the probed
-     * events. Unknown names are dropped; absent/empty means all. */
-    a->sel_events[0] = '\0';
+    /* Optional args.events: the names the peer wants recorded. Checked
+     * against the probed events once those are known. */
     const char *arr = args ? json_find_array_n(args, aend, "events") : NULL;
     if (arr) {
         const char *arr_end = json_object_end(arr);
@@ -531,53 +470,43 @@ static void cmd_start(struct agent_state *a, const char *cmd_id,
             name[ni] = '\0';
             while (p < arr_end && *p && *p != '"') p++;
             if (p < arr_end && *p == '"') p++;
-            for (int i = 0; i < a->caps->record_event_count; i++) {
-                if (strcmp(name, a->caps->record_events[i]) == 0) {
-                    if (a->sel_events[0])
-                        strncat(a->sel_events, ",",
-                                sizeof(a->sel_events) - strlen(a->sel_events) - 1);
-                    strncat(a->sel_events, name,
-                            sizeof(a->sel_events) - strlen(a->sel_events) - 1);
-                    break;
-                }
-            }
+            if (!name[0]) continue;
+            if (job.req_events[0])
+                strncat(job.req_events, ",",
+                        sizeof(job.req_events) - strlen(job.req_events) - 1);
+            strncat(job.req_events, name,
+                    sizeof(job.req_events) - strlen(job.req_events) - 1);
         }
-        if (a->sel_events[0])
-            agent_log("Recording selected events: %s", a->sel_events);
-        else
-            agent_log("No valid events in selection — recording all probed");
     }
 
-    /* Start collection thread */
+    a->job = job;
     a->collect_stop = 0;
-
     pthread_mutex_lock(&a->state_lock);
-    a->state = AGENT_PROFILING;
+    a->state = AGENT_PROBING;
     pthread_mutex_unlock(&a->state_lock);
 
-    if (pthread_create(&a->collect_thread, NULL, collection_thread_fn, a) == 0) {
-        a->collect_thread_active = 1;
-    } else {
+    if (pthread_create(&a->collect_thread, NULL, collection_thread_fn, a) != 0) {
         agent_warn("Failed to create collection thread");
         pthread_mutex_lock(&a->state_lock);
         a->state = AGENT_IDLE;
         pthread_mutex_unlock(&a->state_lock);
         send_error(a, cmd_id, "thread creation failed");
-        return;
+        return -1;
     }
+    a->collect_thread_active = 1;
+    return 0;
+}
 
-    /* Build success response */
-    char storage[4096];
-    struct wbuf w;
-    wbuf_init(&w, storage, sizeof(storage));
-    begin_ok(&w, cmd_id);
-    wbuf_addf(&w, ",\"pid\":%d,\"frequency\":%d,\"duration\":%d,\"events\":[",
-              pid, freq, dur);
-    append_effective_events(&w, a);
-    wbuf_addf(&w, "],\"callgraph\":\"%s\",\"mode\":\"%s\"}",
-              a->caps->callgraph,
-              a->caps->pipe_mode ? "continuous" : "rounds");
-    send_built(a, cmd_id, &w);
+static void cmd_reprobe(struct agent_state *a, const char *cmd_id,
+                        const char *args, const char *aend)
+{
+    launch_job(a, cmd_id, args, aend, 0);
+}
+
+static void cmd_start(struct agent_state *a, const char *cmd_id,
+                      const char *args, const char *aend)
+{
+    launch_job(a, cmd_id, args, aend, 1);
 }
 
 static void cmd_stop(struct agent_state *a, const char *cmd_id,
@@ -589,8 +518,11 @@ static void cmd_stop(struct agent_state *a, const char *cmd_id,
     }
 
     a->collect_stop = 1;
+    agent_wake(a);
 
-    /* Kill active perf subprocesses for immediate stop */
+    /* Kill active perf subprocesses for immediate stop -- the probe's as
+     * well as collection's. A stop during a probe cancels it; the pending
+     * start or reprobe is answered "cancelled" by the thread on its way out. */
     kill_tracked_children();
 
     if (a->collect_thread_active) {
@@ -619,6 +551,7 @@ static void cmd_pause(struct agent_state *a, const char *cmd_id,
 
     /* Kill active perf subprocesses to stop collecting immediately */
     kill_tracked_children();
+    agent_wake(a);
 
     send_ok(a, cmd_id);
 }
@@ -634,6 +567,7 @@ static void cmd_resume(struct agent_state *a, const char *cmd_id,
     }
     a->state = AGENT_PROFILING;
     pthread_mutex_unlock(&a->state_lock);
+    agent_wake(a);
 
     send_ok(a, cmd_id);
 }
@@ -870,4 +804,149 @@ void dispatch_command(struct agent_state *a, const char *json)
     }
 
     send_error(a, cmd_id, "unknown command: %s", cmd);
+}
+
+/* --------------------------------------------------------------------------
+ * The collection thread
+ *
+ * Runs the probe a start or reprobe needs, answers that command, and (for
+ * start) goes on to collect. Capabilities depend on the kernel, the perf
+ * build and the permissions -- not on the pid -- so switching process
+ * re-checks only that the new pid can be recorded, and re-probes fully only
+ * when it cannot.
+ * -------------------------------------------------------------------------- */
+
+static void job_end_idle(struct agent_state *a)
+{
+    pthread_mutex_lock(&a->state_lock);
+    if (a->state == AGENT_PROBING)
+        a->state = AGENT_IDLE;
+    pthread_mutex_unlock(&a->state_lock);
+}
+
+void *collection_thread_fn(void *arg)
+{
+    struct agent_state *a = (struct agent_state *)arg;
+    block_signals_in_thread();
+
+    struct start_job job = a->job;
+    const char *id = job.cmd_id;
+
+    pthread_mutex_lock(&a->state_lock);
+    struct capabilities *caps = a->caps;
+    int pid_changed = caps && a->pid != job.pid;
+    pthread_mutex_unlock(&a->state_lock);
+
+    int need_probe = !caps || !job.then_start;
+    if (!need_probe && pid_changed) {
+        agent_log("Checking that PID %d can be recorded with the probed "
+                  "capabilities...", job.pid);
+        if (probe_pid_records(caps, job.pid, a)) {
+            agent_log("  yes — capabilities carried over, no re-probe");
+        } else if (!collection_cancelled(a)) {
+            agent_log("  no — probing again for this process");
+            need_probe = 1;
+        }
+    }
+
+    if (need_probe && !collection_cancelled(a)) {
+        struct capabilities *fresh = malloc(sizeof(*fresh));
+        if (!fresh) {
+            send_error(a, id, "out of memory");
+            job_end_idle(a);
+            return NULL;
+        }
+        if (probe_capabilities(job.pid, fresh, a) < 0) {
+            free_capabilities(fresh);
+            free(fresh);
+        } else {
+            pthread_mutex_lock(&a->state_lock);
+            struct capabilities *old = a->caps;
+            a->caps = fresh;
+            caps = fresh;
+            pthread_mutex_unlock(&a->state_lock);
+            if (old) {
+                free_capabilities(old);
+                free(old);
+            }
+        }
+    }
+
+    if (collection_cancelled(a)) {
+        agent_log("%s cancelled", job.then_start ? "start" : "reprobe");
+        send_error(a, id, "cancelled");
+        job_end_idle(a);
+        return NULL;
+    }
+
+    pthread_mutex_lock(&a->state_lock);
+    a->pid = job.pid;
+    a->pid_start = process_start_time(job.pid);
+    a->frequency = job.frequency;
+    a->duration = job.duration;
+    pthread_mutex_unlock(&a->state_lock);
+
+    char storage[4096];
+    struct wbuf w;
+    wbuf_init(&w, storage, sizeof(storage));
+
+    if (!job.then_start) {
+        begin_ok(&w, id);
+        wbuf_add(&w, ",");
+        pthread_mutex_lock(&a->state_lock);
+        append_capabilities(&w, caps);
+        pthread_mutex_unlock(&a->state_lock);
+        wbuf_add(&w, "}");
+        send_built(a, id, &w);
+        job_end_idle(a);
+        return NULL;
+    }
+
+    if (caps->record_event_count == 0) {
+        send_error(a, id, "no perf record events available for PID %d", job.pid);
+        job_end_idle(a);
+        return NULL;
+    }
+
+    /* The requested subset of the probed record events. Unknown names are
+     * dropped; none left, or none asked for, means all. */
+    pthread_mutex_lock(&a->state_lock);
+    a->sel_events[0] = '\0';
+    if (job.req_events[0]) {
+        char tmp[512];
+        snprintf(tmp, sizeof(tmp), "%s", job.req_events);
+        char *save = NULL;
+        for (char *tok = strtok_r(tmp, ",", &save); tok;
+             tok = strtok_r(NULL, ",", &save)) {
+            for (int i = 0; i < caps->record_event_count; i++) {
+                if (strcmp(tok, caps->record_events[i]) == 0) {
+                    if (a->sel_events[0])
+                        strncat(a->sel_events, ",",
+                                sizeof(a->sel_events) - strlen(a->sel_events) - 1);
+                    strncat(a->sel_events, tok,
+                            sizeof(a->sel_events) - strlen(a->sel_events) - 1);
+                    break;
+                }
+            }
+        }
+        if (a->sel_events[0])
+            agent_log("Recording selected events: %s", a->sel_events);
+        else
+            agent_log("No valid events in selection — recording all probed");
+    }
+    a->state = AGENT_PROFILING;
+    pthread_mutex_unlock(&a->state_lock);
+
+    begin_ok(&w, id);
+    wbuf_addf(&w, ",\"pid\":%d,\"frequency\":%d,\"duration\":%d,\"events\":[",
+              job.pid, job.frequency, job.duration);
+    pthread_mutex_lock(&a->state_lock);
+    append_effective_events(&w, a);
+    pthread_mutex_unlock(&a->state_lock);
+    wbuf_addf(&w, "],\"callgraph\":\"%s\",\"mode\":\"%s\"}",
+              caps->callgraph, caps->pipe_mode ? "continuous" : "rounds");
+    send_built(a, id, &w);
+
+    collection_run(a);
+    return NULL;
 }

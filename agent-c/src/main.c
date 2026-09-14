@@ -141,6 +141,13 @@ static void agent_state_init(struct agent_state *a)
     a->metrics_network = 1;
     a->metrics_disk = 0;    /* extra cost on embedded targets — opt-in */
     a->metrics_threads = 0; /* opt-in, same reasoning */
+    memset(&a->job, 0, sizeof(a->job));
+    pthread_mutex_init(&a->wake_lock, NULL);
+    pthread_condattr_t attr;
+    pthread_condattr_init(&attr);
+    pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+    pthread_cond_init(&a->wake, &attr);
+    pthread_condattr_destroy(&attr);
     cmdq_init(&a->cmdq);
 }
 
@@ -239,9 +246,18 @@ static double monotonic_now(void)
 }
 
 /* Returns 1 if the session authenticated, 0 otherwise. run_connect uses this
- * to decide whether the reconnect backoff should reset. */
-static int run_interactive(struct agent_state *a)
+ * to decide whether the reconnect backoff should reset.
+ *
+ * In --listen mode the listening socket is polled while the session is
+ * still unauthenticated: a new peer replaces a silent one at once, and its
+ * descriptor is handed back in *next_fd. A peer that connected and sent
+ * nothing used to hold the only slot for the whole auth window -- a
+ * trivial denial of service from anywhere on the LAN, and what an operator
+ * saw when a server crashed without a FIN. An authenticated session is
+ * never replaced. */
+static int run_interactive(struct agent_state *a, int listen_fd, int *next_fd)
 {
+    if (next_fd) *next_fd = -1;
     /* Fresh per-session state. authed and auth_failures must reset here and
      * not once at startup: both run modes loop over sessions, and a sticky
      * flag would let one authenticated peer authorize its successor. */
@@ -313,11 +329,33 @@ static int run_interactive(struct agent_state *a)
             break;
         }
 
-        char *json = cmdq_pop(&a->cmdq, 1000);
-        if (!json) continue;
+        int waiting_for_auth = !a->authed && listen_fd >= 0;
+        char *json = cmdq_pop(&a->cmdq, waiting_for_auth ? 200 : 1000);
+        if (json) {
+            dispatch_command(a, json);
+            free(json);
+        }
 
-        dispatch_command(a, json);
-        free(json);
+        if (waiting_for_auth && !a->authed && next_fd) {
+            struct pollfd pfd;
+            pfd.fd = listen_fd;
+            pfd.events = POLLIN;
+            if (poll(&pfd, 1, 0) == 1) {
+                struct sockaddr_in peer;
+                socklen_t plen = sizeof(peer);
+                int fd = accept4(listen_fd, (struct sockaddr *)&peer, &plen,
+                                 SOCK_CLOEXEC);
+                if (fd >= 0) {
+                    char ip[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, &peer.sin_addr, ip, sizeof(ip));
+                    agent_log("Server connected from %s:%d while the previous "
+                              "peer had not authenticated — replacing it",
+                              ip, ntohs(peer.sin_port));
+                    *next_fd = fd;
+                    break;
+                }
+            }
+        }
     }
     int authenticated = a->authed;
 
@@ -326,6 +364,7 @@ static int run_interactive(struct agent_state *a)
 
     /* Stop collection */
     a->collect_stop = 1;
+    agent_wake(a);
     kill_tracked_children();
     if (a->collect_thread_active) {
         pthread_join(a->collect_thread, NULL);
@@ -455,26 +494,37 @@ static void run_listen(struct agent_state *a, const char *bind_addr, int port)
                   "this agent.");
     }
 
+    int pending = -1;   /* a peer accepted while the last one sat unauthenticated */
     while (!g_shutdown) {
-        /* Accept with poll timeout for shutdown check */
-        struct pollfd pfd;
-        pfd.fd = listen_fd;
-        pfd.events = POLLIN;
-        int ret = poll(&pfd, 1, 2000);
-        if (ret < 0) {
-            if (errno == EINTR) continue;
-            break;
-        }
-        if (ret == 0) continue;
-
+        int conn_fd = -1;
         struct sockaddr_in client_addr;
         socklen_t client_len = sizeof(client_addr);
-        int conn_fd = accept4(listen_fd, (struct sockaddr *)&client_addr,
+
+        if (pending >= 0) {
+            conn_fd = pending;
+            pending = -1;
+            if (getpeername(conn_fd, (struct sockaddr *)&client_addr,
+                            &client_len) != 0)
+                memset(&client_addr, 0, sizeof(client_addr));
+        } else {
+            /* Accept with poll timeout for shutdown check */
+            struct pollfd pfd;
+            pfd.fd = listen_fd;
+            pfd.events = POLLIN;
+            int ret = poll(&pfd, 1, 2000);
+            if (ret < 0) {
+                if (errno == EINTR) continue;
+                break;
+            }
+            if (ret == 0) continue;
+
+            conn_fd = accept4(listen_fd, (struct sockaddr *)&client_addr,
                               &client_len, SOCK_CLOEXEC);
-        if (conn_fd < 0) {
-            if (errno == EINTR) continue;
-            agent_warn("accept() failed: %s", strerror(errno));
-            continue;
+            if (conn_fd < 0) {
+                if (errno == EINTR) continue;
+                agent_warn("accept() failed: %s", strerror(errno));
+                continue;
+            }
         }
 
         char client_ip[INET_ADDRSTRLEN];
@@ -486,9 +536,9 @@ static void run_listen(struct agent_state *a, const char *bind_addr, int port)
         tcp_session_opts(conn_fd);
         a->sock_fd = conn_fd;
         g_agent_sock_fd = conn_fd;
-        run_interactive(a);
+        run_interactive(a, listen_fd, &pending);
 
-        if (!g_shutdown)
+        if (!g_shutdown && pending < 0)
             agent_log("Session ended, waiting for new connection...");
     }
 
@@ -581,7 +631,7 @@ static void run_connect(struct agent_state *a, const char *host, int port)
         a->sock_fd = sock;
         g_agent_sock_fd = sock;
 
-        int authenticated = run_interactive(a);
+        int authenticated = run_interactive(a, -1, NULL);
 
         if (authenticated) {
             /* A session that authenticated is a working server; start the
@@ -760,7 +810,7 @@ int main(int argc, char *argv[])
         detect_platform(&pinfo);
 
         struct capabilities caps;
-        probe_capabilities(pid, &caps);
+        probe_capabilities(pid, &caps, NULL);
 
         if (g_shutdown) { free_capabilities(&caps); return 0; }
 
@@ -872,6 +922,8 @@ int main(int argc, char *argv[])
     cmdq_destroy(&agent.cmdq);
     pthread_mutex_destroy(&agent.sock_lock);
     pthread_mutex_destroy(&agent.state_lock);
+    pthread_mutex_destroy(&agent.wake_lock);
+    pthread_cond_destroy(&agent.wake);
 
     agent_log("Shutting down.");
     return 0;

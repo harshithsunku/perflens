@@ -3,6 +3,7 @@
  */
 
 #include "agent.h"
+#include <sys/statvfs.h>
 
 /* Same pid, same start time. kill(pid, 0) alone would happily keep
  * profiling whatever process the kernel handed the recycled pid to. */
@@ -29,26 +30,35 @@ static void copy_first_line(char *dst, size_t cap, const struct buf *b)
  * Collection: one round of perf record + perf stat + perf script
  * -------------------------------------------------------------------------- */
 
-/* Runs one round of perf record + stat + script. Returns a malloc'd
- * payload ready to send (zstd-compressed when want_compress and the
- * stream initialized, raw otherwise), or NULL on failure/no data.
- * out_len is the payload size, out_raw_len the uncompressed size,
- * out_flag the wire flag matching the payload encoding. */
-char *collect_one_round(const struct capabilities *caps, const char *events,
-                        int pid, int frequency, int duration,
-                        int want_compress, size_t *out_len,
-                        size_t *out_raw_len, uint8_t *out_flag,
-                        const struct agent_state *a)
+/* A round in flight: perf record and perf stat running together, writing
+ * perf.data to tmpl. */
+struct round {
+    char  tmpl[PATH_MAX];
+    pid_t rec_pid, stat_pid;
+    int   fds[4];                 /* rec out, rec err, stat out, stat err */
+    struct buf rec_err, stat_err;
+    int   timeout;
+    int   rc_rec, rc_stat;
+};
+
+static int round_start(struct round *r, const struct capabilities *caps,
+                       const char *events, int pid, int frequency,
+                       int duration)
 {
-    if (caps->record_event_count == 0) return NULL;
+    memset(r, 0, sizeof(*r));
+    r->rec_pid = r->stat_pid = -1;
+    for (int i = 0; i < 4; i++) r->fds[i] = -1;
+    buf_init(&r->rec_err);
+    buf_init(&r->stat_err);
+    r->timeout = duration + 10;
 
     /* Create temp file for perf.data */
-    char tmpl[PATH_MAX];
-    snprintf(tmpl, sizeof(tmpl), "%s/perflens-data-XXXXXX", agent_tmpdir());
-    int fd = mkstemp(tmpl);
+    snprintf(r->tmpl, sizeof(r->tmpl), "%s/perflens-data-XXXXXX", agent_tmpdir());
+    int fd = mkstemp(r->tmpl);
     if (fd < 0) {
         agent_warn("mkstemp failed in %s: %s", agent_tmpdir(), strerror(errno));
-        return NULL;
+        r->tmpl[0] = '\0';
+        return -1;
     }
     close(fd);
 
@@ -56,8 +66,6 @@ char *collect_one_round(const struct capabilities *caps, const char *events,
     snprintf(pid_str, sizeof(pid_str), "%d", pid);
     snprintf(freq_str, sizeof(freq_str), "%d", frequency);
     snprintf(dur_str, sizeof(dur_str), "%d", duration);
-
-    int timeout = duration + 10;
 
     /* Record events: caller-selected subset, or all probed */
     char rec_events[512];
@@ -74,57 +82,58 @@ char *collect_one_round(const struct capabilities *caps, const char *events,
 
     char *argv_rec[MAX_CMD_ARGS], *argv_stat[MAX_CMD_ARGS];
     build_record_argv(argv_rec, MAX_CMD_ARGS, rec_events, pid_str, freq_str,
-                      tmpl, caps->callgraph, dur_str);
-    build_stat_argv(argv_stat, MAX_CMD_ARGS, all_events, pid_str, dur_str);
+                      r->tmpl, caps->callgraph, dur_str);
+    build_stat_argv(argv_stat, MAX_CMD_ARGS, all_events, pid_str, dur_str, 0);
 
-    /* --- Fork perf record and perf stat concurrently --- */
-    struct buf rec_err, stat_err;
-    buf_init(&rec_err); buf_init(&stat_err);
-
-    int rec_out_fd, rec_err_fd, stat_out_fd, stat_err_fd;
-    pid_t rec_pid = fork_cmd(argv_rec, &rec_out_fd, &rec_err_fd, 0);
-    if (rec_pid < 0) {
-        unlink(tmpl);
-        return NULL;
+    r->rec_pid = fork_cmd(argv_rec, &r->fds[0], &r->fds[1], 0);
+    if (r->rec_pid < 0) {
+        unlink(r->tmpl);
+        r->tmpl[0] = '\0';
+        return -1;
     }
-
-    pid_t stat_pid = fork_cmd(argv_stat, &stat_out_fd, &stat_err_fd, 0);
-    if (stat_pid < 0) {
-        kill_child_group(rec_pid, SIGKILL);
-        reap_child(rec_pid, 0);
-        untrack_child(rec_pid);
-        close(rec_out_fd); close(rec_err_fd);
-        unlink(tmpl);
-        return NULL;
+    r->stat_pid = fork_cmd(argv_stat, &r->fds[2], &r->fds[3], 0);
+    if (r->stat_pid < 0) {
+        kill_child_group(r->rec_pid, SIGKILL);
+        reap_child(r->rec_pid, 0);
+        untrack_child(r->rec_pid);
+        r->rec_pid = -1;
+        close(r->fds[0]); close(r->fds[1]);
+        unlink(r->tmpl);
+        r->tmpl[0] = '\0';
+        return -1;
     }
+    return 0;
+}
 
-    /* Poll all 4 pipe fds: rec stdout (discard), rec stderr (capture),
-     *                       stat stdout (discard), stat stderr (capture) */
+/* Wait for record and stat to finish (they last `duration` seconds).
+ * Stops early on cancel: a perf that ignores SIGTERM keeps its pipes open,
+ * and waiting for EOF would hold `stop` for the whole round timeout;
+ * reap_child() then escalates to SIGKILL. */
+static void round_wait(struct round *r, const struct agent_state *a)
+{
     struct pollfd pfds[4];
-    pfds[0].fd = rec_out_fd;  pfds[0].events = POLLIN;
-    pfds[1].fd = rec_err_fd;  pfds[1].events = POLLIN;
-    pfds[2].fd = stat_out_fd; pfds[2].events = POLLIN;
-    pfds[3].fd = stat_err_fd; pfds[3].events = POLLIN;
-    struct buf *targets[4] = { NULL, &rec_err, NULL, &stat_err };
-    int open_pfds = 4;
+    struct buf *targets[4] = { NULL, &r->rec_err, NULL, &r->stat_err };
+    int open_pfds = 0;
+    for (int i = 0; i < 4; i++) {
+        pfds[i].fd = r->fds[i];
+        pfds[i].events = POLLIN;
+        if (r->fds[i] >= 0) open_pfds++;
+    }
     int killed = 0;
 
     struct timespec poll_start;
     clock_gettime(CLOCK_MONOTONIC, &poll_start);
 
-    /* Stops early on cancel too: a perf that ignores SIGTERM keeps its
-     * pipes open, and waiting for EOF would hold `stop` for the whole
-     * round timeout. reap_child() below then escalates to SIGKILL. */
     while (open_pfds > 0 && !g_shutdown && !collection_cancelled(a)) {
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
         int elapsed_ms = (int)((now.tv_sec - poll_start.tv_sec) * 1000 +
                                (now.tv_nsec - poll_start.tv_nsec) / 1000000);
-        int remaining_ms = timeout * 1000 - elapsed_ms;
+        int remaining_ms = r->timeout * 1000 - elapsed_ms;
         if (remaining_ms <= 0) {
-            agent_warn("Record+stat timed out after %ds, killing", timeout);
-            kill_child_group(rec_pid, SIGKILL);
-            kill_child_group(stat_pid, SIGKILL);
+            agent_warn("Record+stat timed out after %ds, killing", r->timeout);
+            kill_child_group(r->rec_pid, SIGKILL);
+            kill_child_group(r->stat_pid, SIGKILL);
             killed = 1;
             break;
         }
@@ -161,33 +170,62 @@ char *collect_one_round(const struct capabilities *caps, const char *events,
         }
     }
 
-    /* Close any remaining pipe fds */
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < 4; i++) {
         if (pfds[i].fd >= 0) close(pfds[i].fd);
+        r->fds[i] = -1;
+    }
 
-    /* Wait for both children -- bounded: a perf stuck flushing a slow
-     * RAM-backed /tmp used to hang this thread, and stop with it. */
+    /* Bounded: a perf stuck flushing a slow RAM-backed /tmp used to hang
+     * this thread, and stop with it. */
     int grace = killed ? 0 : CHILD_GRACE_MS;
-    int rec_status = reap_child(rec_pid, grace);
-    untrack_child(rec_pid);
-    int stat_status = reap_child(stat_pid, grace);
-    untrack_child(stat_pid);
+    int rec_status = reap_child(r->rec_pid, grace);
+    untrack_child(r->rec_pid);
+    int stat_status = reap_child(r->stat_pid, grace);
+    untrack_child(r->stat_pid);
+    r->rec_pid = r->stat_pid = -1;
 
-    int rc_rec = WIFEXITED(rec_status) ? WEXITSTATUS(rec_status) : -1;
-    int rc_stat = WIFEXITED(stat_status) ? WEXITSTATUS(stat_status) : -1;
+    r->rc_rec = WIFEXITED(rec_status) ? WEXITSTATUS(rec_status) : -1;
+    r->rc_stat = WIFEXITED(stat_status) ? WEXITSTATUS(stat_status) : -1;
+}
 
+static void round_free(struct round *r)
+{
+    if (r->rec_pid > 0) {
+        kill_child_group(r->rec_pid, SIGTERM);
+        reap_child(r->rec_pid, CHILD_GRACE_MS);
+        untrack_child(r->rec_pid);
+    }
+    if (r->stat_pid > 0) {
+        kill_child_group(r->stat_pid, SIGTERM);
+        reap_child(r->stat_pid, CHILD_GRACE_MS);
+        untrack_child(r->stat_pid);
+    }
+    for (int i = 0; i < 4; i++)
+        if (r->fds[i] >= 0) close(r->fds[i]);
+    buf_free(&r->rec_err);
+    buf_free(&r->stat_err);
+    if (r->tmpl[0]) unlink(r->tmpl);
+    r->rec_pid = r->stat_pid = -1;
+    r->tmpl[0] = '\0';
+}
+
+/* Symbolize a finished round through the sink and attach its stat
+ * section. Returns the payload (caller frees) or NULL. Frees the round. */
+static char *round_pack(struct round *r, const struct capabilities *caps,
+                        int want_compress, size_t *out_len,
+                        size_t *out_raw_len, uint8_t *out_flag,
+                        const struct agent_state *a)
+{
     if (collection_cancelled(a)) {
-        buf_free(&rec_err); buf_free(&stat_err);
-        unlink(tmpl);
+        round_free(r);
         return NULL;
     }
 
-    if (rc_rec != 0) {
+    if (r->rc_rec != 0) {
         char msg[256];
-        copy_first_line(msg, sizeof(msg), &rec_err);
-        agent_log("perf record failed (rc=%d): %s", rc_rec, msg);
-        buf_free(&rec_err); buf_free(&stat_err);
-        unlink(tmpl);
+        copy_first_line(msg, sizeof(msg), &r->rec_err);
+        agent_log("perf record failed (rc=%d): %s", r->rc_rec, msg);
+        round_free(r);
         return NULL;
     }
 
@@ -196,47 +234,43 @@ char *collect_one_round(const struct capabilities *caps, const char *events,
      * symbolizer, and on the single-core targets that run rounds mode it
      * competes with the very workload it measures. */
     char *argv_script[MAX_CMD_ARGS];
-    build_script_argv(argv_script, MAX_CMD_ARGS, caps->script_fields, tmpl);
+    build_script_argv(argv_script, MAX_CMD_ARGS, caps->script_fields, r->tmpl);
 
     struct sink sk;
     sink_init(&sk, want_compress);
 
     struct buf script_err;
     buf_init(&script_err);
-    int rc_script = run_cmd_to_sink(argv_script, &sk, &script_err, timeout,
+    int rc_script = run_cmd_to_sink(argv_script, &sk, &script_err, r->timeout,
                                     CHILD_NICE, a);
 
     if (rc_script != 0 || sk.error) {
         char msg[256];
         copy_first_line(msg, sizeof(msg), &script_err);
-        agent_log("perf script failed (rc=%d%s): %s", rc_script,
-                  sk.error ? ", output cap or compression error" : "", msg);
+        if (!collection_cancelled(a))
+            agent_log("perf script failed (rc=%d%s): %s", rc_script,
+                      sk.error ? ", output cap or compression error" : "", msg);
         sink_free(&sk);
         buf_free(&script_err);
-        buf_free(&rec_err); buf_free(&stat_err);
-        unlink(tmpl);
+        round_free(r);
         return NULL;
     }
     buf_free(&script_err);
 
     /* Append stat marker + stat stderr into the same stream */
-    if (rc_stat == 0 && stat_err.len > 0) {
+    if (r->rc_stat == 0 && r->stat_err.len > 0) {
         const char *marker = "\n### PERF_STAT ###\n";
         sink_write(&sk, marker, strlen(marker));
-        sink_write(&sk, stat_err.data, stat_err.len);
+        sink_write(&sk, r->stat_err.data, r->stat_err.len);
     }
 
     if (sink_finish(&sk) < 0) {
         agent_warn("Round dropped: compression failed");
         sink_free(&sk);
-        buf_free(&rec_err); buf_free(&stat_err);
-        unlink(tmpl);
+        round_free(r);
         return NULL;
     }
-
-    buf_free(&rec_err);
-    buf_free(&stat_err);
-    unlink(tmpl);
+    round_free(r);
 
     *out_len = sk.out.len;
     *out_raw_len = sk.raw_len;
@@ -246,6 +280,35 @@ char *collect_one_round(const struct capabilities *caps, const char *events,
     char *result = sk.out.data;
     if (sk.zcs) ZSTD_freeCStream(sk.zcs);
     return result;
+}
+
+/* Is there room in the temp dir for another round's perf.data? Embedded
+ * targets often keep /tmp small and RAM-backed. */
+static int tmpdir_has_room(void)
+{
+    struct statvfs vfs;
+    if (statvfs(agent_tmpdir(), &vfs) != 0) return 1;   /* unknown: try */
+    unsigned long long avail = (unsigned long long)vfs.f_bavail * vfs.f_frsize;
+    return avail >= 32ULL * 1024 * 1024;
+}
+
+/* Runs one round of perf record + stat + script. Returns a malloc'd
+ * payload ready to send (zstd-compressed when want_compress and the
+ * stream initialized, raw otherwise), or NULL on failure/no data.
+ * out_len is the payload size, out_raw_len the uncompressed size,
+ * out_flag the wire flag matching the payload encoding. */
+char *collect_one_round(const struct capabilities *caps, const char *events,
+                        int pid, int frequency, int duration,
+                        int want_compress, size_t *out_len,
+                        size_t *out_raw_len, uint8_t *out_flag,
+                        const struct agent_state *a)
+{
+    if (caps->record_event_count == 0) return NULL;
+    struct round r;
+    if (round_start(&r, caps, events, pid, frequency, duration) < 0)
+        return NULL;
+    round_wait(&r, a);
+    return round_pack(&r, caps, want_compress, out_len, out_raw_len, out_flag, a);
 }
 
 /* --------------------------------------------------------------------------
@@ -292,21 +355,46 @@ static int carry_feed(struct buf *carry, struct sink *sk, int have_callgraph)
     return 0;
 }
 
-static void short_sleep(struct agent_state *a, int ms)
-{
-    struct timespec tick = {0, 200000000L};
-    while (ms > 0 && !a->collect_stop && !g_shutdown && !a->session_done) {
-        nanosleep(&tick, NULL);
-        ms -= 200;
-    }
-}
-
 static int agent_state_now(struct agent_state *a)
 {
     pthread_mutex_lock(&a->state_lock);
     int st = a->state;
     pthread_mutex_unlock(&a->state_lock);
     return st;
+}
+
+/* Sleep on the wake condition: stop, pause, resume and session end signal
+ * it, so a paused or backing-off loop reacts at once instead of on its
+ * next 200 ms tick; shutdown (a signal, which cannot signal a condition
+ * variable) is still noticed within 200 ms. */
+void agent_wake(struct agent_state *a)
+{
+    pthread_mutex_lock(&a->wake_lock);
+    pthread_cond_broadcast(&a->wake);
+    pthread_mutex_unlock(&a->wake_lock);
+}
+
+void session_sleep(struct agent_state *a, int ms)
+{
+    int st0 = agent_state_now(a);
+    pthread_mutex_lock(&a->wake_lock);
+    while (ms > 0 && !a->collect_stop && !g_shutdown && !a->session_done) {
+        int slice = ms < 200 ? ms : 200;
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        ts.tv_nsec += (long)slice * 1000000L;
+        if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+        int rc = pthread_cond_timedwait(&a->wake, &a->wake_lock, &ts);
+        if (rc != ETIMEDOUT) break;          /* woken: something changed */
+        ms -= slice;
+    }
+    pthread_mutex_unlock(&a->wake_lock);
+    (void)st0;
+}
+
+static void short_sleep(struct agent_state *a, int ms)
+{
+    session_sleep(a, ms);
 }
 
 static void collect_pipeline_loop(struct agent_state *a)
@@ -410,7 +498,7 @@ static void collect_pipeline_loop(struct agent_state *a)
                 snprintf(dur_str, sizeof(dur_str), "%d", dur);
                 char *argv_stat[MAX_CMD_ARGS];
                 build_stat_argv(argv_stat, MAX_CMD_ARGS, all_events, pid_str,
-                                dur_str);
+                                dur_str, 0);
                 stat_out.len = 0;
                 stat_pid = fork_cmd(argv_stat, &stat_ofd, &stat_efd, 0);
                 if (stat_pid < 0) { stat_ofd = -1; stat_efd = -1; }
@@ -629,14 +717,11 @@ static void collect_pipeline_loop(struct agent_state *a)
 }
 
 /* --------------------------------------------------------------------------
- * Collection loop thread
+ * The collection loop (rounds or continuous)
  * -------------------------------------------------------------------------- */
 
-void *collection_thread_fn(void *arg)
+void collection_run(struct agent_state *a)
 {
-    struct agent_state *a = (struct agent_state *)arg;
-    block_signals_in_thread();
-
     if (a->caps && a->caps->pipe_mode) {
         collect_pipeline_loop(a);
         pthread_mutex_lock(&a->state_lock);
@@ -644,19 +729,31 @@ void *collection_thread_fn(void *arg)
             a->state = AGENT_IDLE;
         pthread_mutex_unlock(&a->state_lock);
         agent_log("Collection loop ended");
-        return NULL;
+        return;
     }
 
     int round_num = 0;
     unsigned long long raw_total = 0, sent_total = 0;
+    int warned_space = 0;
+
+    /* Rounds overlap: as soon as round N's record exits, round N+1's is
+     * forked, and only then is round N symbolized (perf script at nice 5,
+     * alongside the new recording). Nothing was sampled while perf script
+     * ran before -- seconds to tens of seconds on the single-core targets
+     * where rounds mode is the only mode, which biased every profile away
+     * from whatever happened during symbolization. */
+    struct round cur;
+    int have_cur = 0;
 
     while (!a->collect_stop && !g_shutdown && !a->session_done) {
         if (agent_state_now(a) == AGENT_PAUSED) {
-            short_sleep(a, 1000);
+            if (have_cur) { round_free(&cur); have_cur = 0; }
+            session_sleep(a, 1000);
             continue;
         }
 
         if (!target_alive(a)) {
+            if (have_cur) { round_free(&cur); have_cur = 0; }
             agent_log("Process %d exited", a->pid);
             pthread_mutex_lock(&a->state_lock);
             a->state = AGENT_IDLE;
@@ -669,29 +766,57 @@ void *collection_thread_fn(void *arg)
         int dur = a->duration;
         pthread_mutex_unlock(&a->state_lock);
 
+        if (!have_cur) {
+            if (!tmpdir_has_room()) {
+                if (!warned_space)
+                    agent_warn("Less than 32 MB free in %s; waiting for room "
+                               "before recording (set TMPDIR to a larger "
+                               "filesystem)", agent_tmpdir());
+                warned_space = 1;
+                session_sleep(a, 2000);
+                continue;
+            }
+            warned_space = 0;
+            if (round_start(&cur, a->caps, a->sel_events, a->pid, freq, dur) < 0) {
+                session_sleep(a, 1000);
+                continue;
+            }
+            have_cur = 1;
+        }
+
         round_num++;
         agent_debug("Round %d: collecting (%ds)...", round_num, dur);
+        round_wait(&cur, a);
+        if (a->collect_stop || g_shutdown || a->session_done) {
+            round_free(&cur);
+            have_cur = 0;
+            break;
+        }
+
+        /* The next round starts recording before this one is symbolized */
+        struct round next;
+        int have_next = 0;
+        if (agent_state_now(a) != AGENT_PAUSED && target_alive(a) &&
+            tmpdir_has_room() &&
+            round_start(&next, a->caps, a->sel_events, a->pid, freq, dur) == 0)
+            have_next = 1;
 
         size_t payload_len = 0, raw_len = 0;
         uint8_t flag = FLAG_DATA_RAW;
-        char *payload = collect_one_round(a->caps, a->sel_events,
-                                          a->pid, freq, dur, 1,
-                                          &payload_len, &raw_len, &flag, a);
+        char *payload = round_pack(&cur, a->caps, 1, &payload_len, &raw_len,
+                                   &flag, a);
+        have_cur = 0;
 
         if (a->collect_stop || g_shutdown || a->session_done) {
             free(payload);
+            if (have_next) round_free(&next);
             break;
         }
 
         if (!payload || raw_len == 0) {
             agent_debug("Round %d: no data", round_num);
             free(payload);
-            short_sleep(a, 1000);
-            continue;
-        }
-
-        /* Send */
-        if (agent_send_frame(a, payload, payload_len, flag) == 0) {
+        } else if (agent_send_frame(a, payload, payload_len, flag) == 0) {
             raw_total += raw_len;
             sent_total += payload_len;
             agent_debug("Round %d: perf script %zu bytes, sent %zu bytes%s",
@@ -703,14 +828,22 @@ void *collection_thread_fn(void *arg)
                           round_num == 1 ? "" : "s",
                           (double)raw_total / 1048576.0,
                           (double)sent_total / 1048576.0);
+            free(payload);
         } else {
             agent_log("Round %d: send failed: %s", round_num, strerror(errno));
             free(payload);
+            if (have_next) round_free(&next);
             break;
         }
 
-        free(payload);
+        if (have_next) {
+            cur = next;
+            have_cur = 1;
+        } else {
+            session_sleep(a, 1000);
+        }
     }
+    if (have_cur) round_free(&cur);
 
     pthread_mutex_lock(&a->state_lock);
     if (a->state == AGENT_PROFILING || a->state == AGENT_PAUSED)
@@ -718,5 +851,4 @@ void *collection_thread_fn(void *arg)
     pthread_mutex_unlock(&a->state_lock);
 
     agent_log("Collection loop ended");
-    return NULL;
 }

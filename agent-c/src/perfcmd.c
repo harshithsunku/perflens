@@ -86,11 +86,15 @@ int build_script_argv(char **argv, int cap, const char *fields,
 }
 
 int build_stat_argv(char **argv, int cap, const char *events,
-                    const char *pid_str, const char *sleep_secs)
+                    const char *pid_str, const char *sleep_secs, int csv)
 {
     int n = 0;
     n = put(argv, cap, n, g_perf);
     n = put(argv, cap, n, "stat");
+    if (csv) {
+        n = put(argv, cap, n, "-x");
+        n = put(argv, cap, n, ",");
+    }
     n = put(argv, cap, n, "-e");
     n = put(argv, cap, n, events);
     n = put(argv, cap, n, "-p");

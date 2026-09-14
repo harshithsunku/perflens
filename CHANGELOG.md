@@ -115,6 +115,49 @@ authenticated.
   containing a `cmd` key cannot shadow the command, and a string value that
   equals a key name is not a key. Responses are built with a bounded
   writer that answers an error instead of sending a truncated document.
+- **A probe blocked every other command, and a disconnect did not stop
+  it.** `start` and `reprobe` probed on the command thread — 20 s on a
+  typical target, minutes on a slow single-core one — so `ping`, `status`
+  and `stop` waited behind it, the server's command timeout could expire
+  while the agent later started profiling anyway, and a peer that went
+  away mid-probe left perf running against the target until the probe
+  finished. The probe now runs on the collection thread: `status` reports
+  `probing`, `stop` cancels it within a poll interval and the pending
+  `start`/`reprobe` is answered `cancelled`, and a lost session ends it.
+- **Switching process re-ran the whole probe.** Events, call-graph method,
+  script fields and pipe mode depend on the kernel, the perf build and the
+  permissions, not on the pid. A `start` on another pid now runs one
+  short `perf record` against it and keeps the rest; only if that is
+  refused (another user's process, say) does it probe again.
+- **One silent connection held `--listen` for the whole auth window.** A
+  peer that connected and sent nothing kept the only slot for 30 s, and a
+  server that crashed without a FIN kept it until keepalive noticed. The
+  window is 10 s, and while a session is unauthenticated the listening
+  socket is still polled: a new peer replaces the silent one at once. An
+  authenticated session is never replaced.
+- **Metrics: cpufreq stopped at the first offline core** (every later
+  core's frequency was dropped; missing cores are now `null`); **only
+  `thermal_zone0` was read**, which on many SoCs is a PMIC, battery or
+  board sensor (the zone typed as CPU/SoC/package is chosen at startup,
+  else the hottest zone each tick); **kernels before 3.14**, which lack
+  `MemAvailable`, counted the page cache as used memory; and hosts with
+  more than 128 cores were silently truncated. The collector also opens
+  each `/proc` and `/sys` file once and re-reads it in place, instead of
+  opening, parsing and closing about thirty files every two seconds.
+- **The process list read every process's `comm` and `cmdline`** — up to
+  4096 opens each — before sorting and keeping 200, and its CPU% divided
+  by the ticks of every core, so one saturated core on a 24-core host read
+  4.2 % there and 100 % in the health strip for the same process. It reads
+  `comm` from the stat line it already has, `cmdline` for the entries it
+  returns, and reports per-core CPU% like `top` and the process metrics.
+  Hosts with more processes than the old fixed cap no longer lose
+  whichever came last.
+- **Rounds mode sampled nothing while `perf script` ran.** Round N+1's
+  recording now starts the moment round N's ends, and round N is
+  symbolized alongside it — on the single-core targets that get rounds
+  mode, that was seconds to tens of seconds of blind time per round. A
+  round is also not started when the temp filesystem has under 32 MB
+  free, with a warning naming `TMPDIR`.
 - **Three `send()` calls per frame.** Length, flag and payload went out
   separately, so Nagle held the later segments for the peer's delayed ACK
   (40 ms on Linux) and every small response paid it. One `writev()` per
@@ -152,6 +195,15 @@ authenticated.
 - The perf command lines every probe and both collection loops run are
   assembled in one place (`perfcmd.c`); the drift that had the call-graph
   probe on a different event than everything else cannot recur.
+- **The capability probe is about four times faster**: one `perf stat -x ,`
+  over every candidate instead of one per event (with the per-event form
+  as the fallback for a perf that rejects the batch), one `perf record`
+  over every survivor (bisected only if it fails), and the call-graph
+  recording reused for the `-F` check — about 7 perf runs and 6 s of
+  `sleep` where there were ~25 and 24 s. The probe logs how long it took.
+- Sleeping loops (paused, backing off, between metrics ticks) wait on a
+  condition variable that stop, pause and resume signal, so they react at
+  once rather than on their next 200 ms tick.
 - Small buffers (stderr captures, stat output) no longer start at 256 KB,
   continuous mode reads straight into its carry buffer, and one zstd
   context serves a whole pipeline instead of one per chunk.
@@ -171,7 +223,14 @@ authenticated.
   the Nagle round trip, and the `verify_perf` functional check. The
   chains-dropped pipe-mode case now models perf 4.4 exactly — chains
   through a file, none through a pipe — since the call-graph probe no
-  longer accepts chainless output.
+  longer accepts chainless output. Ten more cover the batched probe and
+  its per-event fallback, commands answered during a probe, stop and
+  disconnect cancelling one, a process switch without a re-probe, a
+  silent `--listen` peer being replaced and dropped, overlapping rounds,
+  the shared CPU% convention, and the per-core metrics. `make -C agent-c
+  check` runs C unit tests over the `/proc` and `/sys` parsers with
+  captured input (an offline core, a kernel without `MemAvailable`, the
+  thermal zone choice).
 
 ## [0.11.0] — 2026-09-13
 

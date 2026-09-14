@@ -6,59 +6,53 @@
 
 /* --------------------------------------------------------------------------
  * Process listing (for list_processes command)
+ *
+ * Two snapshots of every process's CPU ticks half a second apart, sorted by
+ * the delta. Only the top entries get their cmdline read: the old version
+ * opened /proc/<pid>/comm and cmdline for every one of up to 4096
+ * processes before sorting, and comm is in the stat line anyway. CPU% is
+ * per core (100 = one busy core, as `top` shows it), the same convention
+ * the process metrics use -- they used to disagree for the same pid.
  * -------------------------------------------------------------------------- */
 
 struct proc_snap {
     int pid;
     unsigned long ticks;
+    char comm[64];
 };
 
-static unsigned long read_total_cpu(void)
-{
-    FILE *f = fopen("/proc/stat", "r");
-    if (!f) return 0;
-
-    char line[512];
-    if (!fgets(line, sizeof(line), f)) { fclose(f); return 0; }
-    fclose(f);
-
-    unsigned long total = 0, val;
-    char *p = line;
-    if (strncmp(p, "cpu", 3) != 0) return 0;
-    p += 3;
-    while (*p) {
-        while (*p == ' ') p++;
-        if (*p == '\0' || *p == '\n') break;
-        char *end;
-        val = strtoul(p, &end, 10);
-        if (end == p) break;
-        total += val;
-        p = end;
-    }
-    return total;
-}
-
-static int read_proc_ticks(int pid, unsigned long *ticks)
+/* comm (from between the parens) and utime+stime (fields 14 and 15) from
+ * one /proc/<pid>/stat line. */
+static int read_proc_stat(int pid, unsigned long *ticks, char *comm, size_t clen)
 {
     char path[64];
     snprintf(path, sizeof(path), "/proc/%d/stat", pid);
-    FILE *f = fopen(path, "r");
-    if (!f) return -1;
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
 
     char line[1024];
-    if (!fgets(line, sizeof(line), f)) { fclose(f); return -1; }
-    fclose(f);
+    ssize_t n = read(fd, line, sizeof(line) - 1);
+    close(fd);
+    if (n <= 0) return -1;
+    line[n] = '\0';
 
-    /* Skip past (comm) which may contain spaces or parens */
-    char *p = strrchr(line, ')');
-    if (!p) return -1;
-    p++;
+    /* comm may contain spaces or parens: it ends at the last ')' */
+    char *open_p = strchr(line, '(');
+    char *close_p = strrchr(line, ')');
+    if (!open_p || !close_p || close_p < open_p) return -1;
+    if (comm) {
+        size_t len = (size_t)(close_p - open_p - 1);
+        if (len >= clen) len = clen - 1;
+        memcpy(comm, open_p + 1, len);
+        comm[len] = '\0';
+    }
 
-    /* Now at field 3 (state). Need fields 14 (utime) and 15 (stime). */
+    char *p = close_p + 1;
     int field = 3;
     unsigned long utime = 0, stime = 0;
     while (*p) {
         while (*p == ' ') p++;
+        if (!*p) break;
         if (field == 14) {
             utime = strtoul(p, NULL, 10);
         } else if (field == 15) {
@@ -68,9 +62,25 @@ static int read_proc_ticks(int pid, unsigned long *ticks)
         while (*p && *p != ' ') p++;
         field++;
     }
-
     *ticks = utime + stime;
     return 0;
+}
+
+static void read_cmdline(int pid, char *out, size_t cap)
+{
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
+    out[0] = '\0';
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return;
+    ssize_t n = read(fd, out, cap - 1);
+    close(fd);
+    if (n < 0) n = 0;
+    out[n] = '\0';
+    for (ssize_t j = 0; j < n; j++)
+        if (out[j] == '\0') out[j] = ' ';
+    while (n > 0 && out[n - 1] == ' ')
+        out[--n] = '\0';
 }
 
 static int cmp_proc_cpu(const void *a, const void *b)
@@ -79,99 +89,79 @@ static int cmp_proc_cpu(const void *a, const void *b)
     const struct proc_entry *pb = (const struct proc_entry *)b;
     if (pb->cpu > pa->cpu) return 1;
     if (pb->cpu < pa->cpu) return -1;
-    return 0;
+    return pa->pid - pb->pid;
+}
+
+static double monotonic_seconds(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
 }
 
 int do_list_processes(struct proc_entry *result, int max_results)
 {
-    struct proc_snap *snap1 = malloc(sizeof(struct proc_snap) * MAX_PROCS);
-    if (!snap1) return 0;
-    int snap1_count = 0;
+    long clk_tck = sysconf(_SC_CLK_TCK);
+    if (clk_tck <= 0) clk_tck = 100;
 
-    unsigned long total1 = read_total_cpu();
+    /* First snapshot: every pid, growable -- a host with more processes
+     * than a fixed cap used to lose whichever came last in readdir order,
+     * which could be the one the operator was looking for. */
+    size_t cap = 1024, count = 0;
+    struct proc_snap *snap = malloc(sizeof(*snap) * cap);
+    if (!snap) return 0;
 
     DIR *d = opendir("/proc");
-    if (!d) { free(snap1); return 0; }
+    if (!d) { free(snap); return 0; }
 
+    double t0 = monotonic_seconds();
     struct dirent *ent;
-    while ((ent = readdir(d)) != NULL && snap1_count < MAX_PROCS) {
+    while ((ent = readdir(d)) != NULL) {
         char *end;
         int pid = (int)strtol(ent->d_name, &end, 10);
         if (*end != '\0' || pid <= 0) continue;
-
-        unsigned long ticks;
-        if (read_proc_ticks(pid, &ticks) == 0) {
-            snap1[snap1_count].pid = pid;
-            snap1[snap1_count].ticks = ticks;
-            snap1_count++;
+        if (count == cap) {
+            struct proc_snap *grown = realloc(snap, sizeof(*snap) * cap * 2);
+            if (!grown) break;
+            snap = grown;
+            cap *= 2;
+        }
+        if (read_proc_stat(pid, &snap[count].ticks, snap[count].comm,
+                           sizeof(snap[count].comm)) == 0) {
+            snap[count].pid = pid;
+            count++;
         }
     }
     closedir(d);
 
     usleep(500000);
+    double elapsed = monotonic_seconds() - t0;
+    if (elapsed <= 0) elapsed = 0.5;
 
-    unsigned long total2 = read_total_cpu();
-    unsigned long total_delta = total2 - total1;
-    if (total_delta == 0) total_delta = 1;
+    /* Second snapshot, into entries; sort; cmdline for the top ones only */
+    struct proc_entry *all = malloc(sizeof(*all) * (count ? count : 1));
+    if (!all) { free(snap); return 0; }
 
-    /* Collect ALL processes first, then sort and return top max_results */
-    struct proc_entry *all = malloc(sizeof(struct proc_entry) * (size_t)snap1_count);
-    if (!all) { free(snap1); return 0; }
-
-    int count = 0;
-    for (int i = 0; i < snap1_count; i++) {
-        int pid = snap1[i].pid;
+    size_t n = 0;
+    for (size_t i = 0; i < count; i++) {
         unsigned long ticks2;
-        if (read_proc_ticks(pid, &ticks2) < 0) continue;
-
-        unsigned long delta = ticks2 - snap1[i].ticks;
-        double cpu_pct = ((double)delta / (double)total_delta) * 100.0;
-
-        struct proc_entry *e = &all[count];
-        e->pid = pid;
-        e->cpu = cpu_pct;
-
-        char path[64];
-        FILE *f;
-
-        snprintf(path, sizeof(path), "/proc/%d/comm", pid);
-        f = fopen(path, "r");
-        if (f) {
-            if (fgets(e->comm, sizeof(e->comm), f)) {
-                char *nl = strchr(e->comm, '\n');
-                if (nl) *nl = '\0';
-            } else {
-                strcpy(e->comm, "?");
-            }
-            fclose(f);
-        } else {
-            strcpy(e->comm, "?");
-        }
-
-        snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
-        f = fopen(path, "r");
-        if (f) {
-            size_t n = fread(e->cmdline, 1, sizeof(e->cmdline) - 1, f);
-            fclose(f);
-            e->cmdline[n] = '\0';
-            for (size_t j = 0; j < n; j++) {
-                if (e->cmdline[j] == '\0') e->cmdline[j] = ' ';
-            }
-            while (n > 0 && e->cmdline[n - 1] == ' ')
-                e->cmdline[--n] = '\0';
-        } else {
-            e->cmdline[0] = '\0';
-        }
-
-        count++;
+        if (read_proc_stat(snap[i].pid, &ticks2, NULL, 0) < 0) continue;
+        unsigned long delta = ticks2 >= snap[i].ticks ? ticks2 - snap[i].ticks : 0;
+        struct proc_entry *e = &all[n++];
+        e->pid = snap[i].pid;
+        e->cpu = 100.0 * (double)delta / (elapsed * (double)clk_tck);
+        snprintf(e->comm, sizeof(e->comm), "%s",
+                 snap[i].comm[0] ? snap[i].comm : "?");
+        e->cmdline[0] = '\0';
     }
+    free(snap);
 
-    free(snap1);
-    qsort(all, (size_t)count, sizeof(struct proc_entry), cmp_proc_cpu);
+    qsort(all, n, sizeof(*all), cmp_proc_cpu);
 
-    int ret = count < max_results ? count : max_results;
-    memcpy(result, all, sizeof(struct proc_entry) * (size_t)ret);
+    int ret = (int)(n < (size_t)max_results ? n : (size_t)max_results);
+    for (int i = 0; i < ret; i++)
+        read_cmdline(all[i].pid, all[i].cmdline, sizeof(all[i].cmdline));
+    memcpy(result, all, sizeof(*all) * (size_t)ret);
     free(all);
     return ret;
 }
-

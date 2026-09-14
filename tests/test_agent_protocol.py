@@ -91,9 +91,9 @@ def shim_log(line):
 
 # Every invocation records how it was run, so tests can assert on the
 # environment perf really got: nice level, locale, inherited descriptors.
-env_note = ' [pid=%%d nice=%%d LC_ALL=%%s fds:%%s]' %% (
-    os.getpid(), nice_level(), os.environ.get('LC_ALL', '<unset>'),
-    inherited_fds())
+env_note = ' [t=%%.6f pid=%%d nice=%%d LC_ALL=%%s fds:%%s]' %% (
+    time.monotonic(), os.getpid(), nice_level(),
+    os.environ.get('LC_ALL', '<unset>'), inherited_fds())
 shim_log(' '.join(args) + env_note)
 
 def spawn_workload(seconds):
@@ -116,11 +116,42 @@ if sub == '--version':
     print('perf version 6.99.shim')
     sys.exit(0)
 
+# Names perf knows. Asking for one it cannot count prints `<not supported>`
+# (exit 0); asking for a name it has never heard of aborts the run.
+KNOWN = ('cycles', 'instructions', 'cache-misses', 'cache-references',
+         'branch-misses', 'branch-instructions', 'page-faults',
+         'context-switches', 'cpu-migrations', 'cpu-clock', 'task-clock')
+
+def probe_delay():
+    # PERF_SHIM_SLOW_PROBE: seconds every probe step takes, for tests that
+    # need a probe to still be running when the next command arrives.
+    slow = os.environ.get('PERF_SHIM_SLOW_PROBE')
+    if slow:
+        time.sleep(float(slow))
+
 if sub == 'stat':
-    for ev in (opt('-e') or '').split(','):
-        if ev and ev not in SUPPORTED and ev != 'task-clock':
+    evs = [e for e in (opt('-e') or '').split(',') if e]
+    for ev in evs:
+        if ev not in KNOWN:
             sys.stderr.write("event syntax error: '%%s'\n" %% ev)
             sys.exit(1)
+    if '-x' in args:
+        if os.environ.get('PERF_SHIM_NO_CSV'):
+            sys.stderr.write("stat: unknown option -x\n")
+            sys.exit(1)
+        probe_delay()
+        time.sleep(0.05)
+        for ev in evs:
+            if ev in SUPPORTED or ev == 'task-clock':
+                sys.stderr.write('1234567,,%%s,1000000,100.00,,\n' %% ev)
+            else:
+                sys.stderr.write('<not supported>,,%%s,0,100.00,,\n' %% ev)
+        sys.exit(0)
+    for ev in evs:
+        if ev not in SUPPORTED and ev != 'task-clock':
+            sys.stderr.write("event syntax error: '%%s'\n" %% ev)
+            sys.exit(1)
+    probe_delay()
     # PERF_SHIM_STAT_SLEEP: honour `-- sleep N` up to this many seconds, so
     # a stat round takes as long as a real one (the probes ask for 1 s).
     want = float(args[args.index('sleep') + 1]) if 'sleep' in args else 0.05
@@ -148,6 +179,8 @@ if sub == 'record':
             sys.stderr.write('invalid event: %%s\n' %% ev)
             sys.exit(1)
     out = opt('-o')
+    if out and 'perflens-probe' in out or (out == '-' and 'sleep' in args):
+        probe_delay()
     if os.environ.get('PERF_SHIM_IGNORE_TERM'):
         # A perf stuck in uninterruptible I/O: SIGTERM does nothing.
         import signal
@@ -212,6 +245,9 @@ if sub == 'script':
         except (BrokenPipeError, IOError):
             pass
         sys.exit(0)
+    # PERF_SHIM_SCRIPT_SLEEP: how long symbolizing a round's file takes.
+    if 'perflens-data' in (opt('-i') or ''):
+        time.sleep(float(os.environ.get('PERF_SHIM_SCRIPT_SLEEP', '0')))
     sys.stdout.write(SCRIPT_OUTPUT)
     sys.exit(0)
 
@@ -355,6 +391,7 @@ class AgentHarness:
         sentinel must not leak into the new session."""
         self.conn = conn
         self.frames = queue.Queue()
+        self.responses = {}
         self.conn.settimeout(30)
         self._reader = threading.Thread(
             target=self._read_loop, args=(self.conn, self.frames, self._reading),
@@ -403,8 +440,10 @@ class AgentHarness:
             frames.put((None, repr(e).encode()))
 
     def wait_frame(self, flags, timeout=30, pred=None):
-        """Next frame whose flag is in `flags` (and matches pred);
-        other frames are discarded."""
+        """Next frame whose flag is in `flags` (and matches pred). Other
+        frames are discarded -- except command responses, which are kept by
+        id for a later wait_response(): a cancelled start is answered
+        before the stop that cancelled it."""
         deadline = time.monotonic() + timeout
         while True:
             remaining = deadline - time.monotonic()
@@ -413,17 +452,34 @@ class AgentHarness:
             assert flag is not None, f'agent disconnected: {payload.decode()}'
             if flag in flags and (pred is None or pred(payload)):
                 return flag, payload
+            if flag == FLAG_CMD_RESPONSE:
+                try:
+                    rid = json.loads(payload).get('id')
+                except ValueError:
+                    rid = None
+                if rid:
+                    self.responses[rid] = payload
 
-    def command(self, cmd, timeout=30, **kwargs):
-        """Send a command frame, return the matching JSON response."""
+    def send_command(self, cmd, **kwargs):
+        """Send a command frame without waiting; returns its id."""
         cmd_id = uuid.uuid4().hex[:12]
         payload = json.dumps({'cmd': cmd, 'id': cmd_id, **kwargs}).encode()
         self.conn.sendall(struct.pack('>IB', len(payload), FLAG_CMD_REQUEST)
                           + payload)
+        return cmd_id
+
+    def wait_response(self, cmd_id, timeout=30):
+        kept = self.responses.pop(cmd_id, None)
+        if kept is not None:
+            return json.loads(kept)
         _, resp = self.wait_frame(
             {FLAG_CMD_RESPONSE}, timeout=timeout,
             pred=lambda p: json.loads(p).get('id') == cmd_id)
         return json.loads(resp)
+
+    def command(self, cmd, timeout=30, **kwargs):
+        """Send a command frame, return the matching JSON response."""
+        return self.wait_response(self.send_command(cmd, **kwargs), timeout)
 
     def read_hello(self):
         _, payload = self.wait_frame(
@@ -1548,3 +1604,273 @@ def test_verify_perf_functional_check_uses_a_countable_event(tmp_path):
         assert 'not supported' in (resp.get('error') or '')
     finally:
         h.close()
+
+
+# ---------------------------------------------------------------------------
+# Probing: batched, cancellable, and not repeated for a new pid
+# ---------------------------------------------------------------------------
+
+def perf_invocations(h):
+    return [line for line in shim_lines(h)
+            if line.split(' ', 1)[0] in ('stat', 'record', 'script')]
+
+
+def test_probe_is_batched(harness, target_pid):
+    """One stat over every candidate, one record over every survivor, one
+    call-graph recording that also serves the -F check, and the pipe probe:
+    about seven perf runs where there were ~25 and 24 s of sleep."""
+    harness.read_hello()
+    resp = harness.command('start', args={'pid': target_pid, 'duration': 1},
+                           timeout=60)
+    assert resp['ok'] is True, resp
+    assert resp['events'] == ['cycles', 'instructions']
+    assert resp['callgraph'] == 'fp' and resp['mode'] == 'continuous'
+    runs = perf_invocations(harness)
+    probe = [r for r in runs if ' -o - ' not in r or ' sleep ' in r]
+    probe = [r for r in probe if 'perflens-data' not in r]
+    assert len(probe) <= 8, probe
+    assert sum(1 for r in probe if r.startswith('stat -x')) == 1, probe
+    assert harness.command('status')['capabilities']['stat_only_events'] == ['page-faults']
+    assert harness.command('stop')['ok'] is True
+
+
+def test_probe_falls_back_to_per_event_stat_on_an_old_perf(shim_dir, tmp_path,
+                                                            target_pid):
+    """A perf whose stat rejects `-x`, or aborts on one unknown name, is
+    asked about each event on its own -- and finds the same set."""
+    h = AgentHarness(shim_dir, tmp_path, env={'PERF_SHIM_NO_CSV': '1'})
+    try:
+        h.read_hello()
+        resp = h.command('start', args={'pid': target_pid, 'duration': 1},
+                         timeout=60)
+        assert resp['ok'] is True, resp
+        assert resp['events'] == ['cycles', 'instructions']
+        caps = h.command('status')['capabilities']
+        assert caps['stat_only_events'] == ['page-faults']
+        stats = [r for r in perf_invocations(h) if r.startswith('stat ')]
+        assert sum(1 for r in stats if '-x' not in r) >= 9, stats
+        assert h.command('stop')['ok'] is True
+    finally:
+        h.close()
+
+
+def test_commands_are_answered_during_a_probe(shim_dir, tmp_path, target_pid):
+    """start probes on the collection thread. Meanwhile ping and status
+    answer, status says so, and stop cancels the probe within a couple of
+    seconds -- it used to wait out every remaining probe step, and a
+    disconnect mid-probe left perf running against the target."""
+    h = AgentHarness(shim_dir, tmp_path, env={'PERF_SHIM_SLOW_PROBE': '3'})
+    try:
+        h.read_hello()
+        start_id = h.send_command('start', args={'pid': target_pid})
+        time.sleep(1.0)
+        t0 = time.monotonic()
+        assert h.command('ping', timeout=5)['ok'] is True
+        assert time.monotonic() - t0 < 1.0
+        assert h.command('status', timeout=5)['state'] == 'probing'
+
+        t0 = time.monotonic()
+        assert h.command('stop', timeout=15)['ok'] is True
+        assert time.monotonic() - t0 < 5.0, 'stop waited for the probe'
+        resp = h.wait_response(start_id, timeout=5)
+        assert resp['ok'] is False and 'cancelled' in resp['error']
+        assert h.command('status')['state'] == 'idle'
+
+        # The probe's perf child is gone, not left running against the target
+        pids = [int(re.search(r'pid=(\d+)', r).group(1))
+                for r in perf_invocations(h) if 'pid=' in r]
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and any(pid_alive(p) for p in pids):
+            time.sleep(0.1)
+        assert not [p for p in pids if pid_alive(p)]
+
+        # And a fresh start works afterwards
+        resp = h.command('start', args={'pid': target_pid, 'duration': 1},
+                         timeout=90)
+        assert resp['ok'] is True, resp
+        assert h.command('stop')['ok'] is True
+    finally:
+        h.close()
+
+
+def test_disconnect_during_a_probe_stops_the_probe(shim_dir, tmp_path,
+                                                   target_pid):
+    h = AgentHarness(shim_dir, tmp_path, env={'PERF_SHIM_SLOW_PROBE': '3'})
+    try:
+        h.read_hello()
+        h.send_command('start', args={'pid': target_pid})
+        time.sleep(1.0)
+        pids = [int(re.search(r'pid=(\d+)', r).group(1))
+                for r in perf_invocations(h) if 'pid=' in r]
+        assert pids
+        h.conn.close()
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline and any(pid_alive(p) for p in pids):
+            time.sleep(0.1)
+        assert not [p for p in pids if pid_alive(p)], 'probe outlived the session'
+        h.accept()     # --server mode reconnects
+        assert h.read_hello()['type'] == 'hello'
+    finally:
+        h.close()
+
+
+def test_switching_process_does_not_reprobe(harness, target_pid):
+    """Capabilities depend on the kernel, perf and permissions, not the
+    pid. A start on another pid re-checks that it can be recorded (one
+    short record) and keeps everything else."""
+    harness.read_hello()
+    other = subprocess.Popen(['sleep', '300'])
+    try:
+        resp = harness.command('start', args={'pid': target_pid, 'duration': 1},
+                               timeout=60)
+        assert resp['ok'] is True, resp
+        assert harness.command('stop')['ok'] is True
+        before = len(perf_invocations(harness))
+
+        resp = harness.command('start', args={'pid': other.pid, 'duration': 1},
+                               timeout=60)
+        assert resp['ok'] is True, resp
+        assert resp['events'] == ['cycles', 'instructions']
+        assert harness.command('status')['pid'] == other.pid
+        assert harness.command('stop')['ok'] is True
+        new = perf_invocations(harness)[before:]
+        probes = [r for r in new if 'perflens-probe' in r or r.startswith('stat -x')]
+        assert len(probes) == 1 and f'-p {other.pid} ' in probes[0], probes
+    finally:
+        other.kill()
+        other.wait()
+
+
+# ---------------------------------------------------------------------------
+# --listen: a silent peer no longer holds the slot
+# ---------------------------------------------------------------------------
+
+def test_listen_replaces_an_unauthenticated_peer(shim_dir, tmp_path):
+    """One connection that never authenticates used to hold the only slot
+    for the whole auth window -- a trivial denial of service from the LAN,
+    and what an operator saw after a server crashed without a FIN."""
+    h = AgentHarness(shim_dir, tmp_path, mode='listen')
+    try:
+        code = h.pairing_code()
+        h.read_hello()          # this peer stays silent
+        silent = h.conn
+        silent_frames = h.frames
+
+        h.dial()                # a second peer
+        assert h.read_hello()['type'] == 'hello'
+        assert h.authenticate(code)['ok'] is True
+        assert h.command('ping')['ok'] is True
+
+        flag, _ = silent_frames.get(timeout=10)
+        assert flag is None, 'the silent peer should have been dropped'
+        silent.close()
+    finally:
+        h.close()
+
+
+def test_silent_peer_is_dropped_within_the_auth_window(shim_dir, tmp_path):
+    h = AgentHarness(shim_dir, tmp_path, agent_args=['--token', 's3cret'])
+    try:
+        h.read_hello()
+        t0 = time.monotonic()
+        flag, _ = h.frames.get(timeout=20)
+        assert flag is None
+        assert 5 <= time.monotonic() - t0 <= 14
+    finally:
+        h.close()
+
+
+# ---------------------------------------------------------------------------
+# Rounds mode: no dead time; list_processes: one CPU% convention
+# ---------------------------------------------------------------------------
+
+def shim_time(line):
+    return float(re.search(r't=([\d.]+)', line).group(1))
+
+
+def test_rounds_overlap_recording_with_symbolization(shim_dir, tmp_path,
+                                                     target_pid):
+    """Round N+1's perf record starts before round N's perf script does.
+    Before, record, script, record, script ran strictly in sequence, so
+    nothing was sampled while perf script ran -- seconds to tens of seconds
+    per round on the single-core targets that get rounds mode."""
+    h = AgentHarness(shim_dir, tmp_path, env={'PERF_SHIM_NO_PIPE': '1',
+                                              'PERF_SHIM_SCRIPT_SLEEP': '0.3'})
+    try:
+        h.read_hello()
+        resp = h.command('start', args={'pid': target_pid, 'duration': 1},
+                         timeout=60)
+        assert resp['ok'] is True and resp['mode'] == 'rounds', resp
+        for _ in range(3):
+            h.wait_frame({FLAG_DATA_RAW, FLAG_DATA_ZSTD}, timeout=30)
+        assert h.command('stop')['ok'] is True
+
+        records = [shim_time(line) for line in shim_lines(h)
+                   if line.startswith('record ') and 'perflens-data' in line]
+        scripts = [shim_time(line) for line in shim_lines(h)
+                   if line.startswith('script ') and 'perflens-data' in line]
+        assert len(records) >= 3 and len(scripts) >= 2, (records, scripts)
+        # Record N+1 and script N start together. Sequential rounds started
+        # record N+1 only after script N had run -- 0.3 s later here.
+        assert abs(records[1] - scripts[0]) < 0.1, (records, scripts)
+        assert abs(records[2] - scripts[1]) < 0.1, (records, scripts)
+    finally:
+        h.close()
+
+
+def test_process_list_and_process_metrics_agree_on_cpu_percent(harness):
+    """CPU% is per core (100 = one busy core) in both places. The process
+    list used to divide by the ticks of every core, so one saturated core
+    on a 24-core host read 4.2 % there and 100 % in the health strip."""
+    harness.read_hello()
+    busy = subprocess.Popen([sys.executable, '-c',
+                             'while True: pass'])
+    try:
+        time.sleep(0.5)
+        resp = harness.command('list_processes', timeout=30)
+        assert resp['ok'] is True
+        mine = [p for p in resp['processes'] if p['pid'] == busy.pid]
+        assert mine, 'busy process missing from the list'
+        assert mine[0]['cpu'] >= 60, mine[0]
+        assert mine[0]['comm'].startswith('python')
+        assert 'while True' in mine[0]['cmdline']
+
+        resp = harness.command('start', args={'pid': busy.pid, 'duration': 1},
+                               timeout=60)
+        assert resp['ok'] is True, resp
+        # The second process frame carries a delta-based cpu_pct
+        seen = 0
+        while True:
+            _, payload = harness.wait_frame(
+                {FLAG_METRICS}, timeout=20,
+                pred=lambda p: json.loads(p).get('type') == 'process')
+            frame = json.loads(payload)
+            seen += 1
+            if frame.get('cpu_pct') is not None:
+                break
+            assert seen < 5
+        assert frame['pid'] == busy.pid
+        assert frame['cpu_pct'] >= 60, frame
+        assert harness.command('stop')['ok'] is True
+    finally:
+        busy.kill()
+        busy.wait()
+
+
+def test_system_metrics_cover_every_core(harness):
+    harness.read_hello()
+    _, payload = harness.wait_frame(
+        {FLAG_METRICS}, timeout=15,
+        pred=lambda p: json.loads(p).get('type') == 'system')
+    m = json.loads(payload)
+    # num_cores is the highest core id + 1: a cpuset with holes (a container
+    # limited to some of the host's CPUs) keeps the index meaningful.
+    with open('/proc/stat') as f:
+        ids = [int(re.match(r'cpu(\d+)', line).group(1)) for line in f
+               if re.match(r'cpu\d', line)]
+    assert m['cpu']['num_cores'] == max(ids) + 1
+    assert len(m['cpu']['per_core']) == m['cpu']['num_cores']
+    if 'freq_mhz' in m['cpu']:
+        assert len(m['cpu']['freq_mhz']) == m['cpu']['num_cores']
+    assert m['mem']['total_kb'] > 0
+    assert 0 <= m['mem']['used_pct'] <= 100
