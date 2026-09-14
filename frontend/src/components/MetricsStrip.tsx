@@ -1,9 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api/client';
 import type { MetricsFrame } from '../api/client';
 import { formatBytes, formatCount, formatKB, formatRate, formatUptime } from '../lib/format';
 import { useLive } from '../store/live';
-import { themeColor, useUi } from '../store/ui';
 
 // Loose agent frame shapes (vary by platform)
 interface SysFrame extends MetricsFrame {
@@ -94,8 +93,6 @@ function SparkPanel({ spec }: { spec: PanelSpec }) {
   const isReplayMode = useLive((s) => s.isReplayMode);
   const timeWindow = useLive((s) => s.timeWindow);
   const setTimeWindow = useLive((s) => s.setTimeWindow);
-  const theme = useUi((s) => s.theme);   // re-render sparkline colors on toggle
-  void theme;
 
   // Align values and timestamps, dropping nulls
   const vals: number[] = [];
@@ -114,7 +111,9 @@ function SparkPanel({ spec }: { spec: PanelSpec }) {
     const y = h - 2 - ((v - mn) / range) * (h - 4);
     return x.toFixed(1) + ',' + y.toFixed(1);
   });
-  const color = themeColor(spec.colorVar) || '#4ade80';
+  // CSS variables straight into the SVG attributes: the theme applies
+  // itself, and no getComputedStyle() per render every two seconds
+  const color = `var(${spec.colorVar})`;
 
   const idxAtX = (clientX: number, rect: DOMRect) => {
     const idx = Math.round(((clientX - rect.left) / rect.width) * (vals.length - 1));
@@ -178,9 +177,10 @@ function SparkPanel({ spec }: { spec: PanelSpec }) {
             const ty = h - 2 - ((t.value - mn) / range) * (h - 4);
             if (ty <= 0 || ty >= h) return null;
             return <rect key={i} x={0} y={0} width={w} height={ty}
-                         fill={themeColor(t.colorVar)} />;
+                         fill={`var(${t.colorVar})`} />;
           })}
-          <polygon points={`0,${h} ${pts.join(' ')} ${w},${h}`} fill={color + '15'} />
+          <polygon points={`0,${h} ${pts.join(' ')} ${w},${h}`} fill={color}
+                   fillOpacity={0.08} />
           <polyline points={pts.join(' ')} fill="none" stroke={color} strokeWidth={1.5} />
         </svg>
         {winOverlay && <div className="sp-select" style={winOverlay}></div>}
@@ -207,14 +207,22 @@ function MetricsSettingsPop({ onClose }: { onClose: () => void }) {
 
   useEffect(() => {
     // An argless configure_metrics reads current settings without changes
+    let cancelled = false;
     api.agentCommand('configure_metrics').then((data) => {
-      if (!data.ok) return;
+      if (cancelled) return;
+      if (!data.ok) {
+        setStatus({ text: data.error || 'No agent connected', cls: 'error' });
+        return;
+      }
       if (data.metrics_enabled !== undefined) setEnabled(!!data.metrics_enabled);
       if (data.network !== undefined) setNetwork(!!data.network);
       if (data.disk !== undefined) setDisk(!!data.disk);
       if (data.threads !== undefined) setThreads(!!data.threads);
       if (data.interval) setIntervalSec(String(data.interval));
-    }).catch(() => {});
+    }).catch((err) => {
+      if (!cancelled) setStatus({ text: String(err instanceof Error ? err.message : err), cls: 'error' });
+    });
+    return () => { cancelled = true; };
   }, []);
 
   useEffect(() => {
@@ -249,12 +257,13 @@ function MetricsSettingsPop({ onClose }: { onClose: () => void }) {
       } else {
         setStatus({ text: data.error || 'No agent connected', cls: 'error' });
       }
-    }).catch(() => setStatus({ text: 'No agent connected', cls: 'error' }));
+    }).catch((err) => setStatus({
+      text: String(err instanceof Error ? err.message : err), cls: 'error' }));
   };
 
   return (
-    <div id="metrics-settings-pop" className="metrics-settings-pop"
-         onClick={(e) => e.stopPropagation()}>
+    <div id="metrics-settings-pop" className="metrics-settings-pop" role="dialog"
+         aria-label="Metrics settings" onClick={(e) => e.stopPropagation()}>
       <div className="msp-title">Agent metrics collection</div>
       <label className="msp-row">
         <input type="checkbox" id="msp-enabled" checked={enabled}
@@ -304,7 +313,41 @@ export default function MetricsStrip() {
     arch?: string; kernel?: string; perf_version?: string;
   };
   const collapseLevel = useLive((s) => s.metricsCollapseLevel);
+  const isReplayMode = useLive((s) => s.isReplayMode);
   const [settingsOpen, setSettingsOpen] = useState(false);
+
+  // Rebuilt only when a frame lands, not on every render of the strip
+  const panels = useMemo<PanelSpec[]>(() => {
+    const sysTs = metricsSystem.map((s) => s.ts ?? null);
+    const procTs = metricsProcess.map((p) => p.ts ?? null);
+    const list: PanelSpec[] = [
+      { id: 'sp-cpu', label: 'CPU %', ts: sysTs,
+        data: metricsSystem.map((s) => s.cpu?.overall_pct ?? null),
+        colorVar: '--spark-cpu', min: 0, max: 100,
+        thresholds: [{ value: 80, colorVar: '--spark-warn-bg' },
+                     { value: 95, colorVar: '--spark-crit-bg' }] },
+      { id: 'sp-mem', label: 'Memory %', ts: sysTs,
+        data: metricsSystem.map((s) => s.mem?.used_pct ?? null),
+        colorVar: '--spark-mem', min: 0, max: 100,
+        thresholds: [{ value: 85, colorVar: '--spark-warn-bg' },
+                     { value: 95, colorVar: '--spark-crit-bg' }] },
+      { id: 'sp-temp', label: 'Temperature', ts: sysTs,
+        data: metricsSystem.map((s) => s.temp_c ?? null),
+        colorVar: '--spark-temp', min: 20, max: 110,
+        thresholds: [{ value: 80, colorVar: '--spark-warn-bg' },
+                     { value: 95, colorVar: '--spark-crit-bg' }] },
+    ];
+    if (metricsProcess.length > 1) {
+      list.push({ id: 'sp-proc-cpu', label: 'Process CPU %', ts: procTs,
+        data: metricsProcess.map((p) => p.cpu_pct ?? null),
+        colorVar: '--spark-proc-cpu', min: 0, max: 100,
+        thresholds: [{ value: 80, colorVar: '--spark-warn-bg' }] });
+      list.push({ id: 'sp-proc-rss', label: 'Process RSS (MB)', ts: procTs,
+        data: metricsProcess.map((p) => p.rss_kb != null ? p.rss_kb / 1024 : null),
+        colorVar: '--spark-proc-rss', min: 0, max: null });
+    }
+    return list;
+  }, [metricsSystem, metricsProcess]);
 
   if (!metricsVisible) return null;
 
@@ -313,35 +356,6 @@ export default function MetricsStrip() {
 
   const cpuPct = sys?.cpu?.overall_pct;
   const memPct = sys?.mem?.used_pct;
-  const sysTs = metricsSystem.map((s) => s.ts ?? null);
-  const procTs = metricsProcess.map((p) => p.ts ?? null);
-
-  const panels: PanelSpec[] = [
-    { id: 'sp-cpu', label: 'CPU %', ts: sysTs,
-      data: metricsSystem.map((s) => s.cpu?.overall_pct ?? 0),
-      colorVar: '--spark-cpu', min: 0, max: 100,
-      thresholds: [{ value: 80, colorVar: '--spark-warn-bg' },
-                   { value: 95, colorVar: '--spark-crit-bg' }] },
-    { id: 'sp-mem', label: 'Memory %', ts: sysTs,
-      data: metricsSystem.map((s) => s.mem?.used_pct ?? 0),
-      colorVar: '--spark-mem', min: 0, max: 100,
-      thresholds: [{ value: 85, colorVar: '--spark-warn-bg' },
-                   { value: 95, colorVar: '--spark-crit-bg' }] },
-    { id: 'sp-temp', label: 'Temperature', ts: sysTs,
-      data: metricsSystem.map((s) => s.temp_c ?? 0),
-      colorVar: '--spark-temp', min: 20, max: 110,
-      thresholds: [{ value: 80, colorVar: '--spark-warn-bg' },
-                   { value: 95, colorVar: '--spark-crit-bg' }] },
-  ];
-  if (metricsProcess.length > 1) {
-    panels.push({ id: 'sp-proc-cpu', label: 'Process CPU %', ts: procTs,
-      data: metricsProcess.map((p) => p.cpu_pct ?? 0),
-      colorVar: '--spark-proc-cpu', min: 0, max: 100,
-      thresholds: [{ value: 80, colorVar: '--spark-warn-bg' }] });
-    panels.push({ id: 'sp-proc-rss', label: 'Process RSS (MB)', ts: procTs,
-      data: metricsProcess.map((p) => (p.rss_kb ?? 0) / 1024),
-      colorVar: '--spark-proc-rss', min: 0, max: null });
-  }
 
   const platformText = [platform.arch, platform.kernel, platform.perf_version]
     .filter(Boolean).join(' │ ');
@@ -357,10 +371,14 @@ export default function MetricsStrip() {
         <span className="metrics-title">Device Health</span>
         <span className="metrics-platform" id="metrics-platform">{platformText}</span>
         <button id="metrics-settings-btn" className="metrics-collapse" title="Metrics settings"
+                aria-label="Metrics settings" aria-expanded={settingsOpen}
                 onClick={(e) => { e.stopPropagation(); setSettingsOpen(!settingsOpen); }}>
           &#9881;
         </button>
         <button id="metrics-collapse-btn" className="metrics-collapse"
+                aria-label={collapseLevel === 0 ? 'Collapse device health'
+                  : collapseLevel === 1 ? 'Minimize device health' : 'Expand device health'}
+                title={collapseLevel === 0 ? 'Compact' : collapseLevel === 1 ? 'Minimal' : 'Full'}
                 onClick={() => useLive.setState({
                   metricsCollapseLevel: (collapseLevel + 1) % 3 })}>
           {collapseLevel === 1 ? '▶' : collapseLevel === 2 ? '▲' : '▼'}
@@ -427,6 +445,11 @@ export default function MetricsStrip() {
       <div className="metrics-detail" id="metrics-detail">
         <div className="metrics-sparklines" id="metrics-sparklines">
           {showDetail && panels.map((p) => <SparkPanel key={p.id} spec={p} />)}
+          {showDetail && !isReplayMode && metricsSystem.length > 1 && (
+            <div className="sp-hint" id="sp-hint">
+              Drag across a chart to narrow the profile to that time window
+            </div>
+          )}
         </div>
         <div className="metrics-extras" id="metrics-extras">
           <div className="metrics-sys-detail" id="metrics-sys-detail">

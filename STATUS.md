@@ -94,7 +94,26 @@ the big-endian target, and a 0.12.0 release at the end.
       unbounded `limit`, equal ports and malformed map entries all
       answer honestly. Deferred: per-sample memory layout (5.13), pending
       the soak. **32 new tests.**
-- [ ] Phase 6 — UI.
+- [x] **Phase 6 — UI.** Fetch bookkeeping (in-flight event switches,
+      coalesced stamps, `generation` resets, bounded requests, surfaced
+      snapshot failures with the ambiguous-event fallback); SSE backoff
+      3 → 30 s with a distinct "server unreachable" state and no forced
+      exit from replay (the banner has the button); the StrictMode boot
+      bug; banners outside the hidden view with `role="alert"` and a sticky
+      variant; the swallowed-error sites routed to the banner; source view
+      keep-previous-data with cancellation and scroll only on file change;
+      replay no longer leaks live queries; control bar keeps the agent's
+      settings on a switch, shows `probing` with elapsed time, plain Stop
+      and Start beside Disconnect; wizard validation, poll cap and
+      cancellation, no advance on a rejected path, config restore,
+      connected reset; **A-15: one sampling event by default**; search
+      boxes keep spaces and report invalid patterns; delegated flame-graph
+      handlers and memoized rects; `var(--…)` sparklines; the six undefined
+      CSS tokens defined and the light tertiary contrast fixed; a11y
+      labels, focus and tab roles; delete confirmation, `?` button, drag
+      hint, live/recovered session tags. **49 vitest (was 24), 16
+      Playwright scenarios (was 10).** Deferred: component render tests
+      needing jsdom, the visual overhaul.
 - [ ] Phase 7 — docs, hardware pass, 0.12.0.
 
 **Not yet run on hardware.** Everything in Phase 1 is proven against the

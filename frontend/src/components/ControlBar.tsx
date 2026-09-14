@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../api/client';
 import type { AgentCommandResult } from '../api/client';
 import { useLive } from '../store/live';
-import { useUi } from '../store/ui';
+import { reportError, useUi } from '../store/ui';
 
 interface AgentStatus extends AgentCommandResult {
   state?: string;
@@ -21,6 +21,31 @@ interface AgentStatus extends AgentCommandResult {
 
 interface ProcEntry { pid: number; comm: string; cpu?: number; cmdline?: string }
 
+/** Close a popover on an outside click or Escape. */
+function useDismiss(onClose: () => void) {
+  useEffect(() => {
+    const close = () => onClose();
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('click', close);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('click', close);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [onClose]);
+}
+
+/** The `start` arguments that keep an agent's current settings. */
+function startArgs(agent: AgentStatus | null, pid: number): Record<string, unknown> {
+  const args: Record<string, unknown> = {
+    pid,
+    frequency: agent?.frequency || 99,
+    duration: agent?.duration || 8,
+  };
+  if (agent?.events?.length) args.events = agent.events;
+  return args;
+}
+
 function SettingsPop({ agent, onClose, onApplied }:
     { agent: AgentStatus | null; onClose: () => void; onApplied: () => void }) {
   const [freq, setFreq] = useState(String(agent?.frequency || 99));
@@ -35,21 +60,21 @@ function SettingsPop({ agent, onClose, onApplied }:
   const [perfStatus, setPerfStatus] =
     useState<{ text: string; cls: string }>({ text: '', cls: '' });
 
-  useEffect(() => {
-    const close = () => onClose();
-    document.addEventListener('click', close);
-    return () => document.removeEventListener('click', close);
-  }, [onClose]);
+  useDismiss(onClose);
 
   const apply = () => {
     const f = parseInt(freq);
     const d = parseInt(dur);
     if (!(f >= 1 && f <= 10000) || !(d >= 1 && d <= 300)) {
-      setStatus({ text: 'Invalid values', cls: 'err' });
+      setStatus({ text: 'Frequency must be 1–10000 Hz and the interval 1–300 s', cls: 'err' });
       return;
     }
-    const events = [...checked];
     const all = caps.record_events ?? [];
+    const events = all.filter((e) => checked.has(e));
+    if (all.length && events.length === 0) {
+      setStatus({ text: 'Pick at least one record event', cls: 'err' });
+      return;
+    }
     const current = active.length ? active : all;
     const eventsChanged = events.length > 0 && events.join(',') !== current.join(',');
     const freqChanged = agent != null && f !== agent.frequency;
@@ -63,20 +88,23 @@ function SettingsPop({ agent, onClose, onApplied }:
     };
 
     if (profiling && (eventsChanged || freqChanged)) {
-      // Frequency/event changes need a restart of collection
+      // Frequency/event changes need a restart of collection. The event
+      // list is always explicit (one sampling event by default), so the
+      // agent never has to guess what "all" means.
       const pid = agent!.pid;
+      setStatus({ text: 'Restarting collection (re-probing the process)...', cls: '' });
       api.agentCommand('stop')
         .then(() => {
           const args: Record<string, unknown> = { pid, frequency: f, duration: d };
-          if (eventsChanged || events.length < all.length) args.events = events;
+          if (events.length) args.events = events;
           return api.agentCommand('start', args, 120);
         })
         .then((data) => done(data.ok, data.error))
-        .catch((err) => done(false, String(err)));
+        .catch((err) => done(false, String(err instanceof Error ? err.message : err)));
     } else {
       api.agentCommand('configure', { frequency: f, duration: d })
         .then((data) => done(data.ok, data.error))
-        .catch((err) => done(false, String(err)));
+        .catch((err) => done(false, String(err instanceof Error ? err.message : err)));
     }
   };
 
@@ -97,9 +125,7 @@ function SettingsPop({ agent, onClose, onApplied }:
     let run: Promise<{ v: AgentCommandResult; s: AgentCommandResult | null }>;
     if (restart) {
       run = api.agentCommand('stop').then(verify).then((v) =>
-        api.agentCommand('start', {
-          pid: agent!.pid, frequency: agent!.frequency, duration: agent!.duration,
-        }, 180).then((s) => ({ v, s })));
+        api.agentCommand('start', startArgs(agent, agent!.pid!), 180).then((s) => ({ v, s })));
     } else {
       run = verify().then((v) => ({ v, s: null }));
     }
@@ -112,12 +138,13 @@ function SettingsPop({ agent, onClose, onApplied }:
         setPerfStatus({ text: 'Using ' + String(v.path || path), cls: 'ok' });
       }
       onApplied();
-    }).catch((err) => setPerfStatus({ text: String(err), cls: 'err' }));
+    }).catch((err) => setPerfStatus({
+      text: String(err instanceof Error ? err.message : err), cls: 'err' }));
   };
 
   return (
-    <div id="ctrl-settings-pop" className="metrics-settings-pop"
-         onClick={(e) => e.stopPropagation()}>
+    <div id="ctrl-settings-pop" className="metrics-settings-pop" role="dialog"
+         aria-label="Profiling settings" onClick={(e) => e.stopPropagation()}>
       <div className="msp-title">Profiling settings</div>
       <div id="csp-info" className="csp-info">
         <div className="csp-info-row">
@@ -165,6 +192,7 @@ function SettingsPop({ agent, onClose, onApplied }:
       </div>
       <div className="msp-hint">
         Frequency and event changes restart collection; the interval applies from the next chunk.
+        Each extra event multiplies the data the device sends.
       </div>
       <div className="msp-title">perf on the device</div>
       <label className="msp-row">Path
@@ -186,52 +214,59 @@ function SettingsPop({ agent, onClose, onApplied }:
   );
 }
 
-function SwitchPop({ onClose, onSwitched }:
-    { onClose: () => void; onSwitched: (pid: number, comm: string) => void }) {
+function SwitchPop({ agent, onClose, onSwitched }:
+    { agent: AgentStatus | null; onClose: () => void; onSwitched: () => void }) {
   const [procs, setProcs] = useState<ProcEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<{ text: string; cls: string }>({ text: '', cls: '' });
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   useEffect(() => {
+    let cancelled = false;
     api.agentCommand('list_processes', {}, 30).then((data) => {
+      if (cancelled) return;
       if (!data.ok) setError((data.error as string) || 'Failed');
       else setProcs(((data.processes as ProcEntry[]) ?? []).slice(0, 30));
-    }).catch((err) => setError(String(err)));
+    }).catch((err) => { if (!cancelled) setError(String(err instanceof Error ? err.message : err)); });
+    return () => { cancelled = true; clearTimeout(closeTimer.current); };
   }, []);
 
-  useEffect(() => {
-    const close = () => onClose();
-    document.addEventListener('click', close);
-    return () => document.removeEventListener('click', close);
-  }, [onClose]);
+  useDismiss(onClose);
 
-  const doSwitch = (pid: number, comm: string) => {
-    setStatus({ text: `Switching to PID ${pid} (re-probing, may take a moment)...`, cls: '' });
+  const doSwitch = (pid: number) => {
+    setStatus({ text: `Switching to PID ${pid} (checking the process)...`, cls: '' });
+    // Keep the frequency, interval and events the agent is running with;
+    // a switch used to reset them to the defaults.
     api.agentCommand('stop')
-      .then(() => api.agentCommand('start', { pid, frequency: 99, duration: 8 }, 180))
+      .then(() => api.agentCommand('start', startArgs(agent, pid), 180))
       .then((data) => {
         if (data.ok) {
           setStatus({ text: 'Now profiling PID ' + pid, cls: 'ok' });
-          onSwitched(pid, comm);
-          setTimeout(onClose, 1200);
+          onSwitched();
+          closeTimer.current = setTimeout(onClose, 1200);
         } else {
           setStatus({ text: (data.error as string) || 'Start failed', cls: 'err' });
+          onSwitched();
         }
       })
-      .catch((err) => setStatus({ text: String(err), cls: 'err' }));
+      .catch((err) => {
+        setStatus({ text: String(err instanceof Error ? err.message : err), cls: 'err' });
+        onSwitched();
+      });
   };
 
   return (
-    <div id="ctrl-switch-pop" className="metrics-settings-pop"
-         onClick={(e) => e.stopPropagation()}>
+    <div id="ctrl-switch-pop" className="metrics-settings-pop" role="dialog"
+         aria-label="Switch process" onClick={(e) => e.stopPropagation()}>
       <div className="msp-title">Switch process</div>
       <div id="swp-list" className="swp-list">
         {error && <span className="msp-hint">{error}</span>}
         {!error && !procs && <div className="wiz-spinner">Loading processes...</div>}
         {procs && procs.length === 0 && <span className="msp-hint">No processes</span>}
         {procs?.map((p) => (
-          <div className="swp-row" key={p.pid} data-pid={p.pid}
-               onClick={() => doSwitch(p.pid, p.comm)}>
+          <div className="swp-row" key={p.pid} data-pid={p.pid} role="button" tabIndex={0}
+               onClick={() => doSwitch(p.pid)}
+               onKeyDown={(e) => { if (e.key === 'Enter') doSwitch(p.pid); }}>
             <span className="swp-pid">{p.pid}</span>
             <span className="swp-comm">{p.comm}</span>
             <span className="swp-cpu">{(p.cpu || 0).toFixed(1)}%</span>
@@ -245,95 +280,144 @@ function SwitchPop({ onClose, onSwitched }:
   );
 }
 
+const STATE_LABEL: Record<string, string> = {
+  profiling: 'Profiling', paused: 'Paused', probing: 'Probing', idle: 'Stopped',
+};
+
 export default function ControlBar() {
   const managedAgent = useLive((s) => s.managedAgent);
   const connected = useLive((s) => s.connected);
+  const showError = useUi((s) => s.showError);
   const [agent, setAgent] = useState<AgentStatus | null>(null);
   const [visible, setVisible] = useState(false);
-  const [paused, setPaused] = useState(false);
-  const [stopped, setStopped] = useState(false);
+  // A start or switch this bar issued and is waiting on
+  const [busy, setBusy] = useState<string | null>(null);
   const [pop, setPop] = useState<'settings' | 'switch' | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+  const probingSince = useRef<number | null>(null);
 
   // Sync with the agent's actual state (page reload, or a --server agent
-  // already profiling when the UI attached)
+  // already profiling when the UI attached). The label always comes from
+  // the agent's own `status` answer rather than from local flags.
   const refresh = useCallback(() => {
     api.agentCommand('status', {}, 10).then((data: AgentStatus) => {
       if (!data.ok || !data.state) return;
       setAgent(data);
-      if (data.state === 'profiling' || data.state === 'paused') {
-        setVisible(true);
-        setStopped(false);
-        setPaused(data.state === 'paused');
-      } else {
-        setVisible(false);
-      }
-    }).catch(() => {});
+      setVisible(data.state !== 'idle' || data.pid != null);
+      if (data.state === 'probing') probingSince.current ??= Date.now();
+      else probingSince.current = null;
+    }).catch((err) => console.warn('agent status:', err));
   }, []);
 
-  // The profiling view -- and this bar with it -- stays mounted behind the
-  // wizard, and by the time the wizard starts collection both flags are
-  // already true from the connect. Re-sync whenever the view opens, or a
-  // wizard start never shows the bar until a reload.
+  // Re-sync whenever the view opens (this bar mounts with it) and the
+  // connection flags change; a wizard start otherwise never showed the
+  // bar until a reload.
   const view = useUi((s) => s.view);
   useEffect(() => {
     if (connected || managedAgent) refresh();
     else setVisible(false);
   }, [connected, managedAgent, view, refresh]);
 
+  // While the agent is probing a process (a start or a switch), poll so
+  // the elapsed time and the eventual state land without a reload.
+  const probing = agent?.state === 'probing' || busy !== null;
+  useEffect(() => {
+    if (!probing) return;
+    const t = setInterval(() => { setNow(Date.now()); refresh(); }, 1000);
+    return () => clearInterval(t);
+  }, [probing, refresh]);
+
   if (!visible) return null;
 
   const caps = agent?.capabilities ?? {};
-  const stateText = stopped ? 'Stopped' : paused ? 'Paused' : 'Profiling';
+  const state = agent?.state ?? 'idle';
+  const since = probingSince.current;
+  const stateText = busy ?? (state === 'probing' && since
+    ? `Probing… (${Math.max(0, Math.round((now - since) / 1000))}s)`
+    : STATE_LABEL[state] ?? state);
+  const canPause = state === 'profiling';
+  const canResume = state === 'paused';
+  const canStop = state === 'profiling' || state === 'paused';
+  const canStart = state === 'idle' && agent?.pid != null && busy === null;
+
+  const command = (cmd: string, label: string) => {
+    api.agentCommand(cmd).then((d) => {
+      if (!d.ok) showError(`${label} failed: ${d.error || 'agent refused'}`);
+      refresh();
+    }).catch((err) => reportError(`${label} failed`, err));
+  };
+
+  const start = () => {
+    if (agent?.pid == null) return;
+    setBusy('Starting…');
+    api.agentCommand('start', startArgs(agent, agent.pid), 180).then((d) => {
+      setBusy(null);
+      if (!d.ok) showError(`Start failed: ${d.error || 'agent refused'}`);
+      refresh();
+    }).catch((err) => { setBusy(null); reportError('Start failed', err); });
+  };
 
   return (
-    <div id="control-bar">
+    <div id="control-bar" data-state={state}>
       <div className="ctrl-group">
-        <button id="ctrl-pause" className={'ctrl-btn' + (paused ? ' hidden' : '')} title="Pause"
-                aria-label="Pause profiling"
-                onClick={() => {
-                  api.agentCommand('pause').then((d) => { if (d.ok) setPaused(true); })
-                    .catch(() => {});
-                }}>
+        <button id="ctrl-pause" className={'ctrl-btn' + (canPause ? '' : ' hidden')} title="Pause"
+                aria-label="Pause profiling" disabled={probing}
+                onClick={() => command('pause', 'Pause')}>
           &#9208;
         </button>
-        <button id="ctrl-resume" className={'ctrl-btn' + (paused ? '' : ' hidden')} title="Resume"
+        <button id="ctrl-resume" className={'ctrl-btn' + (canResume ? '' : ' hidden')} title="Resume"
                 aria-label="Resume profiling"
-                onClick={() => {
-                  api.agentCommand('resume').then((d) => { if (d.ok) setPaused(false); })
-                    .catch(() => {});
-                }}>
+                onClick={() => command('resume', 'Resume')}>
           &#9654;
         </button>
-        <button id="ctrl-stop" className="ctrl-btn ctrl-btn-danger" title="Stop"
-                aria-label="Stop profiling and disconnect"
+        <button id="ctrl-start" className={'ctrl-btn' + (canStart ? '' : ' hidden')}
+                title="Start profiling the same process again"
+                aria-label="Start profiling" onClick={start}>
+          &#9654;
+        </button>
+        <button id="ctrl-stop" className={'ctrl-btn' + (canStop ? '' : ' hidden')}
+                title="Stop collection (the agent stays connected)"
+                aria-label="Stop profiling" disabled={probing}
+                onClick={() => command('stop', 'Stop')}>
+          &#9632;
+        </button>
+        <button id="ctrl-disconnect" className="ctrl-btn ctrl-btn-danger"
+                title="Disconnect the agent and end this session"
+                aria-label="Disconnect agent"
                 onClick={() => {
                   api.disconnectAgent().then((d) => {
-                    if (d.stopped) {
-                      setStopped(true);
-                      useLive.setState({ managedAgent: false });
-                    }
-                  }).catch(() => {});
+                    if (d.stopped) useLive.setState({ managedAgent: false });
+                    else showError('Disconnect: ' + (d.reason || 'no agent connected'));
+                  }).catch((err) => reportError('Disconnect failed', err));
                 }}>
-          &#9632;
+          &#9167;
         </button>
       </div>
       <div className="ctrl-status">
-        <span id="ctrl-state" className={stopped || paused ? 'paused' : ''}>{stateText}</span>
+        <span id="ctrl-state"
+              className={state === 'paused' || state === 'idle' ? 'paused'
+                : state === 'probing' || busy ? 'probing' : ''}>
+          {stateText}
+        </span>
         <span id="ctrl-pid">
           {agent?.pid != null ? 'PID ' + agent.pid : ''}
         </span>
       </div>
       <div className="ctrl-group">
         <span id="ctrl-mode" className="ctrl-mode"
-              title={'Collection mode · sampling frequency' +
+              title={'Collection mode · sampling frequency · events' +
                 (agent?.agent_version ? ' · agent v' + agent.agent_version : '')}>
-          {(caps.pipe_mode ? 'continuous' : 'rounds') + ' · ' + (agent?.frequency || '?') + ' Hz'}
+          {(caps.pipe_mode ? 'continuous' : 'rounds') + ' · ' + (agent?.frequency || '?') + ' Hz'
+            + (agent?.events?.length ? ' · ' + agent.events.join(', ') : '')}
         </span>
         <button id="ctrl-switch" className="ctrl-btn" title="Switch process"
+                aria-label="Switch process" aria-expanded={pop === 'switch'}
+                disabled={probing}
                 onClick={(e) => { e.stopPropagation(); setPop(pop === 'switch' ? null : 'switch'); }}>
           &#8646;
         </button>
         <button id="ctrl-settings" className="ctrl-btn" title="Profiling settings"
+                aria-label="Profiling settings" aria-expanded={pop === 'settings'}
                 onClick={(e) => {
                   e.stopPropagation();
                   if (pop === 'settings') { setPop(null); return; }
@@ -347,8 +431,7 @@ export default function ControlBar() {
         <SettingsPop agent={agent} onClose={() => setPop(null)} onApplied={refresh} />
       )}
       {pop === 'switch' && (
-        <SwitchPop onClose={() => setPop(null)}
-                   onSwitched={() => { refresh(); }} />
+        <SwitchPop agent={agent} onClose={() => setPop(null)} onSwitched={refresh} />
       )}
     </div>
   );

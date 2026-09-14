@@ -131,9 +131,22 @@ resolution. See [STATUS.md](STATUS.md) for what is open.
 - Bidirectional interactive protocol: agent sends hello + data + metrics,
   server sends commands (start, stop, pause, resume, configure, etc.).
   `start` accepts an optional `events` subset of the probed record events;
-  the UI's control-bar popovers expose live profiling settings (frequency,
-  interval, events — restarting collection transparently when needed),
-  process switching, and metrics toggles.
+  the UI always sends one — **one sampling event by default** (`cycles`,
+  or the software clock on a target without a PMU; the rest are opt-in in
+  the wizard's Perf step), since each extra event multiplies the data the
+  device sends. The control-bar popovers expose live profiling settings
+  (frequency, interval, events — restarting collection transparently when
+  needed), process switching, and metrics toggles; a process switch keeps
+  the current settings. The bar's Stop sends `stop` (the agent stays
+  connected); Disconnect ends the session.
+- UI conventions worth knowing: the store keeps the browser's own link to
+  the server (`sseState`) apart from whether an agent is connected; an SSE
+  drop backs off 3 → 30 s and never leaves replay mode on its own (the
+  replay banner's button does). Version stamps are compared through
+  `lib/events.versionKey` (generation first). Every request is bounded
+  (`api/client.ts`). Errors go to the banner through `reportError`; a
+  transport failure is sticky. The thread overview, thread view and time
+  window read the live ring and are off in replay.
 - Two connection patterns: `--server` (agent connects out to server) and
   `--listen` (agent binds port, server/UI connects in via wizard).
 - Agent collects device health metrics (CPU, memory, temperature, load,

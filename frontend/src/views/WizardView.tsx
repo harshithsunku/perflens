@@ -1,9 +1,18 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../api/client';
 import type { AgentCommandResult } from '../api/client';
+import { defaultEvent } from '../lib/events';
 import { useLive } from '../store/live';
 import { useUi } from '../store/ui';
 import BrowseModal, { type BrowseRequest } from '../components/BrowseModal';
+
+/** Sampling frequency and interval the agent accepts (it validates the
+ * same ranges); the wizard used to send 99999 Hz and turn 0 into 99. */
+export const FREQ_MIN = 1, FREQ_MAX = 10000, DUR_MIN = 1, DUR_MAX = 300;
+
+export function errMsg(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
 
 interface WizStatus { text: string; cls: '' | 'info' | 'ok' | 'error' }
 
@@ -63,12 +72,19 @@ export default function WizardView() {
   // Options
   const [frequency, setFrequency] = useState('99');
   const [duration, setDuration] = useState('8');
+  const [optionsStatus, setOptionsStatus] = useState<WizStatus>({ text: '', cls: '' });
   const [startStatus, setStartStatus] = useState<WizStatus>({ text: '', cls: '' });
   const [starting, setStarting] = useState(false);
 
   const verifyRan = useRef(false);
+  // The index-status poll: cancelled on unmount and capped, so leaving the
+  // wizard no longer leaves a request firing every 500 ms for good
+  const pollTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const pollCount = useRef(0);
+  useEffect(() => () => clearTimeout(pollTimer.current), []);
 
-  // Restore persisted wizard state
+  // Restore persisted wizard state, and the server-side config the wizard
+  // applies but never used to read back (toolchain prefix, sysroot)
   useEffect(() => {
     api.wizardState().then((ws) => {
       if (ws.agent_host) setHost(ws.agent_host);
@@ -81,14 +97,45 @@ export default function WizardView() {
       if (ws.duration) setDuration(String(ws.duration));
       const evts = (ws as Record<string, unknown>).events;
       if (Array.isArray(evts) && evts.length) setEvents(evts as string[]);
-    }).catch(() => {});
+    }).catch((err) => console.warn('wizard state:', err));
+    api.config().then((c) => {
+      if (c.sysroot) setSysroot(c.sysroot);
+      if (c.binary) setBinary((b) => b || c.binary || '');
+      if (c.source_dir && c.source_dir !== '.') setSourceDir((d) => d || c.source_dir);
+      // A cross prefix shows as <dir>/<prefix>addr2line; the host's own
+      // addr2line has no prefix to restore
+      const a2l = c.addr2line || '';
+      const slash = a2l.lastIndexOf('/');
+      const base = a2l.slice(slash + 1);
+      if (base.endsWith('addr2line') && base !== 'addr2line') {
+        setToolchainPrefix(a2l.slice(0, a2l.length - 'addr2line'.length));
+      }
+    }).catch((err) => console.warn('config:', err));
   }, []);
+
+  // The wizard's own idea of "connected" follows the live store: an agent
+  // that drops after step 1 used to leave the wizard believing it was
+  // still there. Only a true -> false transition counts, so the SSE
+  // status frame that may lag the connect response cannot undo it.
+  const liveConnected = useLive((s) => s.connected);
+  const prevLive = useRef(liveConnected);
+  useEffect(() => {
+    if (prevLive.current && !liveConnected && connected) {
+      setConnected(false);
+      setConnectStatus({ text: 'Agent disconnected — connect again', cls: 'error' });
+    }
+    prevLive.current = liveConnected;
+  }, [liveConnected, connected]);
 
   const connect = () => {
     const h = host.trim();
-    const p = parseInt(port) || 9999;
+    const p = parseInt(port);
     if (!h) {
       setConnectStatus({ text: 'Enter host address', cls: 'error' });
+      return;
+    }
+    if (!(p >= 1 && p <= 65535)) {
+      setConnectStatus({ text: 'Port must be between 1 and 65535', cls: 'error' });
       return;
     }
     setConnecting(true);
@@ -104,8 +151,7 @@ export default function WizardView() {
       setConnectStatus({ text: 'Connected: ' + info, cls: 'ok' });
     }).catch((err) => {
       setConnecting(false);
-      const msg = err instanceof Error ? err.message : String(err);
-      setConnectStatus({ text: msg || 'Connection failed', cls: 'error' });
+      setConnectStatus({ text: errMsg(err) || 'Connection failed', cls: 'error' });
     });
   };
 
@@ -123,7 +169,7 @@ export default function WizardView() {
     }).catch((err) => {
       setProcsLoading(false);
       setProcs([]);
-      setPidStatus({ text: String(err), cls: 'error' });
+      setPidStatus({ text: errMsg(err), cls: 'error' });
     });
   };
 
@@ -139,7 +185,10 @@ export default function WizardView() {
       }
       const paranoid = data.perf_event_paranoid as number | undefined;
       if (data.available) {
-        if (path) api.saveWizardState({ perf_path: path }).catch(() => {});
+        if (path) {
+          api.saveWizardState({ perf_path: path })
+            .catch((err) => console.warn('wizard state:', err));
+        }
         setPerfResult({
           html: (
             <>
@@ -170,22 +219,35 @@ export default function WizardView() {
         });
       }
     }).catch((err) => {
-      setPerfResult({ html: <span className="wiz-err">Command failed: {String(err)}</span> });
+      setPerfResult({ html: <span className="wiz-err">Command failed: {errMsg(err)}</span> });
     });
   };
 
   const probeCapabilities = () => {
     setCapsLoading(true);
-    api.agentCommand('reprobe', { pid: parseInt(pid) || undefined }, 120).then((data) => {
+    const pidNum = parseInt(pid);
+    api.agentCommand('reprobe', pidNum > 0 ? { pid: pidNum } : {}, 120).then((data) => {
       setCapsLoading(false);
       if (!data.ok) {
         setCapsError((data.error as string) || 'Probe failed');
         return;
       }
-      setCaps(data as Capabilities);
+      const c = data as Capabilities;
+      setCaps(c);
+      // One sampling event by default: cycles (or the software clock on a
+      // target without a PMU). Every extra event multiplies the data the
+      // device sends, so the rest are opt-in. A remembered selection
+      // survives only where this device supports it.
+      const rec = c.record_events ?? [];
+      setEvents((prev) => {
+        const kept = (prev ?? []).filter((e) => rec.includes(e));
+        if (kept.length) return kept;
+        const d = defaultEvent(rec);
+        return d ? [d] : null;
+      });
     }).catch((err) => {
       setCapsLoading(false);
-      setCapsError('Probe failed: ' + String(err));
+      setCapsError('Probe failed: ' + errMsg(err));
     });
   };
 
@@ -199,31 +261,41 @@ export default function WizardView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step, connected]);
 
-  const pollIndexStatus = (done: () => void) => {
-    api.indexStatus().then((data) => {
-      if (data.indexing) {
-        setIndexStatus({
-          text: `Indexing: ${data.symbols_loaded || 0} symbols, ` +
-            `${data.source_files_found || 0} source files...`,
-          cls: 'info',
-        });
-        setTimeout(() => pollIndexStatus(done), 500);
-      } else {
-        setIndexStatus({
-          text: `Ready: ${data.symbols_loaded || 0} symbols, ` +
-            `${data.source_files_found || 0} source files from binary`,
-          cls: 'ok',
-        });
-        done();
-      }
-    }).catch(() => {
-      setIndexStatus(null);
-      done();
-    });
+  // Indexing runs in the background on the server; the wizard reports its
+  // progress (here and on the review step) without holding the operator on
+  // step 4 for it. Polls at most two minutes.
+  const pollIndexStatus = () => {
+    clearTimeout(pollTimer.current);
+    pollCount.current = 0;
+    const tick = () => {
+      api.indexStatus().then((data) => {
+        if (data.indexing && pollCount.current++ < 240) {
+          setIndexStatus({
+            text: `Indexing: ${data.symbols_loaded || 0} symbols, ` +
+              `${data.source_files_found || 0} source files...`,
+            cls: 'info',
+          });
+          pollTimer.current = setTimeout(tick, 500);
+        } else if (data.indexing) {
+          setIndexStatus({ text: 'Still indexing in the background', cls: 'info' });
+        } else {
+          setIndexStatus({
+            text: `Ready: ${data.symbols_loaded || 0} symbols, ` +
+              `${data.source_files_found || 0} source files from binary`,
+            cls: 'ok',
+          });
+        }
+      }).catch((err) => {
+        setIndexStatus({ text: 'Index status unavailable: ' + errMsg(err), cls: 'error' });
+      });
+    };
+    tick();
   };
 
   // Apply binary/source/toolchain config when leaving step 4 — one
-  // PATCH /api/config sets everything and rebuilds the mapper once.
+  // PATCH /api/config sets everything and rebuilds the mapper once. A
+  // rejected path (400 bad_path) keeps the wizard on this step with the
+  // message; it used to advance regardless.
   const applyStep4 = (done: () => void) => {
     setBinaryStatus({ text: 'Applying...', cls: 'info' });
 
@@ -241,15 +313,29 @@ export default function WizardView() {
       setBinaryStatus({ text: 'Applied', cls: 'ok' });
       if (binary.trim()) {
         setIndexStatus({ text: 'Indexing symbols and source files...', cls: 'info' });
-        pollIndexStatus(done);
-      } else {
-        done();
+        pollIndexStatus();
       }
-    }).catch((err) => {
-      const msg = err instanceof Error ? err.message : String(err);
-      setBinaryStatus({ text: msg, cls: 'error' });
       done();
+    }).catch((err) => {
+      setBinaryStatus({ text: errMsg(err), cls: 'error' });
     });
+  };
+
+  const optionsValid = (): boolean => {
+    const f = parseInt(frequency);
+    const d = parseInt(duration);
+    if (!(f >= FREQ_MIN && f <= FREQ_MAX)) {
+      setOptionsStatus({ text: `Sampling frequency must be ${FREQ_MIN}–${FREQ_MAX} Hz`,
+                         cls: 'error' });
+      return false;
+    }
+    if (!(d >= DUR_MIN && d <= DUR_MAX)) {
+      setOptionsStatus({ text: `Collection interval must be ${DUR_MIN}–${DUR_MAX} seconds`,
+                         cls: 'error' });
+      return false;
+    }
+    setOptionsStatus({ text: '', cls: '' });
+    return true;
   };
 
   const validateStep = (s: number): boolean => {
@@ -257,10 +343,11 @@ export default function WizardView() {
       setConnectStatus({ text: 'Connect to agent first', cls: 'error' });
       return false;
     }
-    if (s === 2 && !pid) {
+    if (s === 2 && !(parseInt(pid) > 0)) {
       setPidStatus({ text: 'Select or enter a PID', cls: 'error' });
       return false;
     }
+    if (s === 5 && !optionsValid()) return false;
     return true;
   };
 
@@ -274,22 +361,25 @@ export default function WizardView() {
   };
 
   const start = () => {
+    if (!optionsValid()) {
+      setStartStatus({ text: 'Fix the profiling options first', cls: 'error' });
+      return;
+    }
     setStarting(true);
-    setStartStatus({ text: 'Starting profiling...', cls: 'info' });
-    const args: Record<string, unknown> = {
-      pid: parseInt(pid),
-      frequency: parseInt(frequency) || 99,
-      duration: parseInt(duration) || 8,
-    };
+    setStartStatus({ text: 'Starting profiling (probing the process)...', cls: 'info' });
+    const f = parseInt(frequency);
+    const d = parseInt(duration);
+    const args: Record<string, unknown> = { pid: parseInt(pid), frequency: f, duration: d };
+    // Always an explicit list when the events are known: the agent never
+    // has to guess, and the default is one sampling event
     if (events?.length) args.events = events;
     api.agentCommand('start', args, 120).then((data) => {
       setStarting(false);
       if (data.ok) {
         setStartStatus({ text: 'Profiling started', cls: 'ok' });
         api.saveWizardState({
-          step: 6, pid: parseInt(pid), frequency: parseInt(frequency) || 99,
-          duration: parseInt(duration) || 8, events,
-        }).catch(() => {});
+          step: 6, pid: parseInt(pid), frequency: f, duration: d, events,
+        }).catch((err) => console.warn('wizard state:', err));
         useLive.setState({ managedAgent: true });
         showView('profiling');
       } else {
@@ -297,15 +387,17 @@ export default function WizardView() {
       }
     }).catch((err) => {
       setStarting(false);
-      setStartStatus({ text: 'Error: ' + String(err), cls: 'error' });
+      setStartStatus({ text: 'Error: ' + errMsg(err), cls: 'error' });
     });
   };
 
   const toggleEvent = (evt: string, on: boolean) => {
     const all = caps?.record_events ?? [];
     const current = events ?? all;
-    const sel = on ? [...new Set([...current, evt])] : current.filter((e) => e !== evt);
-    setEvents(sel.length === 0 || sel.length === all.length ? null : sel);
+    const sel = on ? all.filter((e) => e === evt || current.includes(e))
+      : current.filter((e) => e !== evt);
+    if (sel.length === 0) return;   // keep at least one sampling event
+    setEvents(sel);
   };
 
   const platform = agentHello?.platform;
@@ -331,17 +423,17 @@ export default function WizardView() {
             target device.</p>
           <div className="wiz-form">
             <div className="wiz-row">
-              <label>Host</label>
+              <label htmlFor="wiz-host">Host</label>
               <input type="text" id="wiz-host" placeholder="device hostname or IP"
                      value={host} onChange={(e) => setHost(e.target.value)} />
             </div>
             <div className="wiz-row">
-              <label>Port</label>
+              <label htmlFor="wiz-port">Port</label>
               <input type="number" id="wiz-port" value={port}
                      onChange={(e) => setPort(e.target.value)} />
             </div>
             <div className="wiz-row">
-              <label>Pairing code</label>
+              <label htmlFor="wiz-token">Pairing code</label>
               <input type="password" id="wiz-token" autoComplete="off"
                      placeholder="printed in the agent's log at startup"
                      value={token} onChange={(e) => setToken(e.target.value)} />
@@ -365,7 +457,7 @@ export default function WizardView() {
           <p>Choose the process to profile on the target device.</p>
           <div className="wiz-form">
             <div className="wiz-row">
-              <label>PID (or select from list)</label>
+              <label htmlFor="wiz-pid">PID (or select from list)</label>
               <div className="wiz-input-row">
                 <input type="number" id="wiz-pid" placeholder="PID" value={pid}
                        onChange={(e) => setPid(e.target.value)} />
@@ -418,7 +510,7 @@ export default function WizardView() {
             events.</p>
           <div className="wiz-form">
             <div className="wiz-row">
-              <label>perf on the device</label>
+              <label htmlFor="wiz-perf-path">perf on the device</label>
               <div className="wiz-input-row">
                 <input type="text" id="wiz-perf-path"
                        placeholder="perf (from the agent's PATH)"
@@ -458,6 +550,12 @@ export default function WizardView() {
                 <span className="wiz-err">No events detected</span>
               )}
             </div>
+            {caps && (caps.record_events ?? []).length > 1 && (
+              <p className="wiz-hint">
+                One sampling event is selected by default; each extra event multiplies
+                the data the device sends.
+              </p>
+            )}
             <div id="wiz-caps-callgraph" className="wiz-caps-callgraph">
               {caps && (caps.callgraph_method
                 ? <>Call-graph mode: <strong>{caps.callgraph_method}</strong></>
@@ -474,7 +572,7 @@ export default function WizardView() {
             directory for line-level annotation. Optional &mdash; skip if not needed.</p>
           <div className="wiz-form">
             <div className="wiz-row">
-              <label>Binary (debug symbols)</label>
+              <label htmlFor="wiz-binary">Binary (debug symbols)</label>
               <div className="wiz-input-row">
                 <input type="text" id="wiz-binary" placeholder="/path/to/binary"
                        value={binary} onChange={(e) => setBinary(e.target.value)} />
@@ -487,7 +585,7 @@ export default function WizardView() {
               </div>
             </div>
             <div className="wiz-row">
-              <label>Source directory</label>
+              <label htmlFor="wiz-source-dir">Source directory</label>
               <div className="wiz-input-row">
                 <input type="text" id="wiz-source-dir" placeholder="/path/to/src"
                        value={sourceDir} onChange={(e) => setSourceDir(e.target.value)} />
@@ -502,7 +600,7 @@ export default function WizardView() {
             <details className="wiz-advanced">
               <summary>Toolchain &amp; Cross-compilation</summary>
               <div className="wiz-row">
-                <label>Toolchain prefix</label>
+                <label htmlFor="wiz-toolchain-prefix">Toolchain prefix</label>
                 <div className="wiz-input-row">
                   <input type="text" id="wiz-toolchain-prefix"
                          placeholder="e.g. arm-linux-gnueabihf- or /opt/toolchain/bin/aarch64-linux-gnu-"
@@ -514,7 +612,7 @@ export default function WizardView() {
                 </div>
               </div>
               <div className="wiz-row">
-                <label>Sysroot</label>
+                <label htmlFor="wiz-sysroot">Sysroot</label>
                 <div className="wiz-input-row">
                   <input type="text" id="wiz-sysroot"
                          placeholder="/opt/sysroot or /path/to/target/rootfs"
@@ -543,15 +641,16 @@ export default function WizardView() {
           <p>Configure sampling parameters. Defaults work well for most cases.</p>
           <div className="wiz-form">
             <div className="wiz-row">
-              <label>Sampling frequency (Hz)</label>
-              <input type="number" id="wiz-frequency" min={1} max={10000}
+              <label htmlFor="wiz-frequency">Sampling frequency (Hz)</label>
+              <input type="number" id="wiz-frequency" min={FREQ_MIN} max={FREQ_MAX}
                      value={frequency} onChange={(e) => setFrequency(e.target.value)} />
             </div>
             <div className="wiz-row">
-              <label>Collection duration (seconds)</label>
-              <input type="number" id="wiz-duration" min={1} max={300}
+              <label htmlFor="wiz-duration">Collection duration (seconds)</label>
+              <input type="number" id="wiz-duration" min={DUR_MIN} max={DUR_MAX}
                      value={duration} onChange={(e) => setDuration(e.target.value)} />
             </div>
+            <Status id="wiz-options-status" s={optionsStatus} />
           </div>
         </div>
 
@@ -565,8 +664,9 @@ export default function WizardView() {
               ['Process', 'PID ' + (pid || '?') + (processName ? ` (${processName})` : '')],
               ['Frequency', frequency + ' Hz'],
               ['Duration', duration + 's per round'],
-              ['Events', events ? events.join(', ') : 'all supported'],
+              ['Events', events ? events.join(', ') : 'agent default'],
               ...(binary ? [['Binary', binary]] : []),
+              ...(indexStatus ? [['Symbols', indexStatus.text]] : []),
               ...(toolchainPrefix.trim() ? [['Toolchain', toolchainPrefix.trim()]] : []),
               ...(sysroot.trim() ? [['Sysroot', sysroot.trim()]] : []),
             ].map(([label, value]) => (

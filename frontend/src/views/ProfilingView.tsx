@@ -8,7 +8,7 @@ import { useLive } from '../store/live';
 import { useUi, type Tab } from '../store/ui';
 import ControlBar from '../components/ControlBar';
 import FlameGraph from '../components/FlameGraph';
-import FunctionTable from '../components/FunctionTable';
+import FunctionTable, { fnKey } from '../components/FunctionTable';
 import MetricsStrip from '../components/MetricsStrip';
 import SessionsTab from '../components/SessionsTab';
 import SourceView from '../components/SourceView';
@@ -40,27 +40,29 @@ function LastUpdate() {
 }
 
 /** Resolve what the Functions table + Flame Graph should show:
- * time-window fetch > thread-view fetch > live per-event snapshot. */
+ * time-window fetch > thread-view fetch > live per-event snapshot.
+ * The first two read the live ring, so they are off in replay. */
 function useCurrentViewData() {
   const selectedEvent = useLive((s) => s.selectedEvent);
   const selectedTid = useLive((s) => s.selectedTid);
   const timeWindow = useLive((s) => s.timeWindow);
   const isReplayMode = useLive((s) => s.isReplayMode);
   const chunkCount = useLive((s) => s.chunkCount);
+  const generation = useLive((s) => s.generation);
   const entry = useLive((s) => s.perEvent[s.selectedEvent]);
 
   const windowQuery = useQuery({
     queryKey: ['time-window', selectedEvent, timeWindow?.start, timeWindow?.end,
-               selectedTid, chunkCount],
+               selectedTid, generation, chunkCount],
     queryFn: () => api.timeWindow(selectedEvent, timeWindow!.start, timeWindow!.end,
                                   selectedTid),
     enabled: !!timeWindow && !isReplayMode,
   });
 
   const threadQuery = useQuery({
-    queryKey: ['thread-view', selectedEvent, selectedTid, chunkCount],
+    queryKey: ['thread-view', selectedEvent, selectedTid, generation, chunkCount],
     queryFn: () => api.threadView(selectedEvent, selectedTid!),
-    enabled: !timeWindow && selectedTid !== null,
+    enabled: !timeWindow && selectedTid !== null && !isReplayMode,
   });
 
   if (timeWindow && !isReplayMode) {
@@ -71,9 +73,10 @@ function useCurrentViewData() {
       totalSamples: d?.function_summary?.total_samples ?? 0,
       windowSamples: d?.window?.samples,
       allowZoom: false,
+      error: windowQuery.error,
     };
   }
-  if (selectedTid !== null) {
+  if (selectedTid !== null && !isReplayMode) {
     const d = threadQuery.data;
     return {
       functionSummary: (d?.function_summary ?? null) as FunctionSummary | null,
@@ -81,6 +84,7 @@ function useCurrentViewData() {
       totalSamples: d?.function_summary?.total_samples ?? 0,
       windowSamples: undefined,
       allowZoom: false,
+      error: threadQuery.error,
     };
   }
   return {
@@ -89,6 +93,7 @@ function useCurrentViewData() {
     totalSamples: entry?.function_summary?.total_samples ?? 0,
     windowSamples: undefined,
     allowZoom: true,
+    error: null,
   };
 }
 
@@ -108,6 +113,7 @@ export default function ProfilingView({ active }: { active: boolean }) {
   const diffEnabled = useLive((s) => s.diffEnabled);
   const isReplayMode = useLive((s) => s.isReplayMode);
   const replaySessionId = useLive((s) => s.replaySessionId);
+  const snapshotError = useLive((s) => s.snapshotError);
   const entry = useLive((s) => s.perEvent[s.selectedEvent]);
   const perEvent = useLive((s) => s.perEvent);
 
@@ -123,7 +129,7 @@ export default function ProfilingView({ active }: { active: boolean }) {
     if (!base?.function_summary) return null;
     const map = new Map<string, FunctionEntry>();
     for (const f of base.function_summary.functions ?? []) {
-      map.set(f.name + '\u0000' + (f.module || ''), f);
+      map.set(fnKey(f), f);
     }
     return map;
   }, [diffActive, baseline, selectedEvent]);
@@ -142,6 +148,9 @@ export default function ProfilingView({ active }: { active: boolean }) {
   });
   const sym = indexQuery.data?.symbolization;
   const symDegraded = sym?.mode === 'degraded' && !!sym?.detail;
+
+  const viewError = view.error instanceof Error ? view.error.message
+    : view.error ? String(view.error) : null;
 
   const showSourceForFunction = (funcName: string) => {
     const embedded = entry?.source as
@@ -178,16 +187,17 @@ export default function ProfilingView({ active }: { active: boolean }) {
       <MetricsStrip />
 
       <div id="event-selector">
-        <label>Event: </label>
+        <label htmlFor="event-select">Event: </label>
         <select id="event-select" value={selectedEvent}
                 onChange={(e) => selectEvent(e.target.value)}>
           {(eventTypes.length ? eventTypes : [selectedEvent]).map((evt) => (
             <option key={evt} value={evt}>{evt}</option>
           ))}
         </select>
-        {threads.length > 1 && (
+        {threads.length > 1 && !isReplayMode && (
           <>
-            <label id="thread-filter-label" className="thread-filter-label">Thread: </label>
+            <label id="thread-filter-label" className="thread-filter-label"
+                   htmlFor="thread-filter">Thread: </label>
             <select id="thread-filter" value={selectedTid != null ? String(selectedTid) : ''}
                     onChange={(e) => selectTid(e.target.value ? parseInt(e.target.value) : null)}>
               <option value="">All threads ({threads.length})</option>
@@ -248,6 +258,13 @@ export default function ProfilingView({ active }: { active: boolean }) {
         )}
       </div>
 
+      {(snapshotError && !isReplayMode) || viewError ? (
+        <div id="view-error" className="view-error" role="status" data-testid="view-error">
+          {viewError ? 'This view could not be loaded: ' + viewError
+            : 'The profile snapshot could not be loaded: ' + snapshotError}
+        </div>
+      ) : null}
+
       <div id="source-banner" className={entry && !hasSource ? 'visible' : ''}>
         Source view unavailable &mdash; start server with <code>--binary</code> to enable
       </div>
@@ -259,8 +276,10 @@ export default function ProfilingView({ active }: { active: boolean }) {
 
       <div id="tabs" role="tablist" aria-label="Profile views">
         {TABS.map((t, i) => (
-          <button key={t.id} className={'tab' + (activeTab === t.id ? ' active' : '')}
+          <button key={t.id} id={'tab-btn-' + t.id}
+                  className={'tab' + (activeTab === t.id ? ' active' : '')}
                   data-tab={t.id} role="tab" aria-selected={activeTab === t.id}
+                  aria-controls={'tab-' + t.id}
                   title={`${t.label} (${i + 1})`}
                   onClick={() => switchTab(t.id)}>
             {t.label}
@@ -268,17 +287,18 @@ export default function ProfilingView({ active }: { active: boolean }) {
         ))}
       </div>
 
-      <div id="tab-functions"
+      <div id="tab-functions" role="tabpanel" aria-labelledby="tab-btn-functions"
            className={'tab-content' + (activeTab === 'functions' ? ' active' : '')}>
         <FunctionTable data={view.functionSummary} baselineMap={baselineMap}
                        onSelectFunction={showSourceForFunction} />
       </div>
 
-      <div id="tab-source" className={'tab-content' + (activeTab === 'source' ? ' active' : '')}>
+      <div id="tab-source" role="tabpanel" aria-labelledby="tab-btn-source"
+           className={'tab-content' + (activeTab === 'source' ? ' active' : '')}>
         {activeTab === 'source' && <SourceView />}
       </div>
 
-      <div id="tab-flamegraph"
+      <div id="tab-flamegraph" role="tabpanel" aria-labelledby="tab-btn-flamegraph"
            className={'tab-content' + (activeTab === 'flamegraph' ? ' active' : '')}>
         {activeTab === 'flamegraph' && (
           <FlameGraph tree={view.flamegraph} totalSamples={view.totalSamples}
@@ -286,12 +306,12 @@ export default function ProfilingView({ active }: { active: boolean }) {
         )}
       </div>
 
-      <div id="tab-threads"
+      <div id="tab-threads" role="tabpanel" aria-labelledby="tab-btn-threads"
            className={'tab-content' + (activeTab === 'threads' ? ' active' : '')}>
         {activeTab === 'threads' && <ThreadsTab active={active && activeTab === 'threads'} />}
       </div>
 
-      <div id="tab-sessions"
+      <div id="tab-sessions" role="tabpanel" aria-labelledby="tab-btn-sessions"
            className={'tab-content' + (activeTab === 'sessions' ? ' active' : '')}>
         {activeTab === 'sessions' && <SessionsTab />}
       </div>

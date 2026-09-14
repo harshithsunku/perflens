@@ -14,6 +14,9 @@ before. What changed is how the agent runs `perf`, what it does when
 something does not exit, and what a peer can make it do before it has
 authenticated. The server side of the socket got the same treatment: what
 one bad frame, one dead device or one full disk could do to a session.
+The UI's turn was stability first, then the rough edges: errors that were
+swallowed, a reconnect that threw the operator out of a saved session, a
+source view that reset itself every chunk.
 
 ### Security
 
@@ -137,6 +140,72 @@ one bad frame, one dead device or one full disk could do to a session.
   exported frames as if they were the live capture's.
 - `verify_perf` mutated the hello dict other threads were serializing; it
   now replaces it.
+- **UI: an event switch during a fetch was dropped.** The snapshot fetch's
+  in-flight guard sat above the `force` check, so choosing another event
+  while a chunk was loading left the previous event on screen until the
+  next chunk. The switch is remembered and issued when the fetch lands;
+  stamps that arrive meanwhile coalesce into one catch-up fetch. Every
+  request is bounded (30 s, agent commands the server's own timeout plus
+  headroom), so a half-open connection can no longer latch the
+  bookkeeping in "fetching" for good, and a failed snapshot is reported
+  — a hybrid CPU's `400 ambiguous_event` used to be swallowed, leaving
+  the table showing skeleton rows forever; the UI now picks the concrete
+  PMU event the server names.
+- **UI: a reconnecting server read as a disconnected agent, and threw the
+  operator out of replay.** Any SSE drop marked the agent disconnected and
+  retried every 3 s forever; the `status` frame on reconnect (and, since
+  the server now sends one on every connection, on *every* reconnect)
+  called `exitReplay`. The header now distinguishes "server unreachable,
+  reconnecting" from the agent state, the retry backs off from 3 s to
+  30 s, and leaving replay is the operator's action: the replay banner
+  has a button for it.
+- **UI: development builds had no live updates.** The boot effect's
+  StrictMode guard returned no cleanup on the second pass, so `npm run
+  dev` ran with no SSE connection and no keyboard shortcuts. Only the
+  one-shot boot actions are guarded now.
+- **UI: errors nobody could see.** The error banner rendered inside the
+  hidden profiling view, so a failed deep link or a wizard error on the
+  landing page was invisible; it now sits above every view with
+  `role="alert"`, and transport failures stay until dismissed. Fourteen
+  `.catch(() => {})` sites — pause, resume, stop, disconnect, every 502 —
+  now reach the banner with the server's message; the sessions, threads
+  and thread-detail tables render a failure instead of "Loading…" forever
+  on a dead server; an export that fails (a 400 or 404) reports instead
+  of opening a tab of raw JSON, and downloads through a blob rather than
+  a popup.
+- **UI: the source view reset itself on every chunk** and scrolled back
+  to the hottest line out from under the reader; a slow response could
+  paint file A under file B's header. It now keeps the previous lines
+  while the next chunk's annotation loads, scrolls only when the file
+  changes, and cancels a superseded fetch (the thread drill-down too).
+- **UI: replay leaked live queries.** The thread overview, the thread
+  view and the time window read the raw sample ring, which a saved
+  session does not carry; in replay they queried the live server anyway
+  (and showed another session's threads). They are off in replay, the
+  thread filter is hidden there, and the Threads tab says why.
+- **UI: switching process reset the sampling settings** to 99 Hz / 8 s
+  and the default events; it now keeps the agent's current frequency,
+  interval and event list. The control bar shows the agent's `probing`
+  state with elapsed seconds while a start or switch is in flight, keeps
+  pause and stop disabled meanwhile, derives its label from the agent's
+  own `status` rather than local flags, and closes its popovers on
+  Escape (a pending close timer no longer fires after unmount).
+- **UI: the wizard** advanced to the options step after a rejected binary
+  path; polled the index status every 500 ms with no cap and no
+  cancellation after leaving the wizard; sent 99999 Hz and turned 0 into
+  99 silently (frequency 1–10000, interval 1–300 and port 1–65535 are
+  validated with a message); never reset "connected" when the agent
+  dropped; and applied a toolchain prefix and sysroot it never restored
+  (both are read back from `/api/config`).
+- **UI: search boxes trimmed on every keystroke**, so a space could never
+  be typed; an invalid regex in the function filter was ignored while the
+  flame graph reported it. Both keep what was typed, filter on a deferred
+  value so a table of thousands stays responsive, and both report
+  "invalid regex".
+- **UI: six CSS custom properties were used but never defined** (the
+  thread filter had no border, the core bars no track, the cached memory
+  segment no colour); light-theme tertiary text was 2.5:1 on white and is
+  4.8:1 now; two dead tokens are gone.
 - **`perflens push-agent --help` prints usage.** It handed `--help` to ssh as
   the host and failed with `ssh failed: unknown option -- -`. `-h`/`--help`
   now print the usage and exit 0, and any other argument starting with `-` is
@@ -379,6 +448,36 @@ one bad frame, one dead device or one full disk could do to a session.
   changes.
 - `ProfilingState.get_snapshot` (no callers) and `models.SourceLine`
   (unreferenced, and the wrong shape) are gone.
+- **UI: one sampling event by default.** The wizard's Perf step selects
+  `cycles` (or the software clock on a target with no PMU) and the rest
+  are opt-in; every `start` the UI sends carries an explicit event list.
+  Each extra event multiplies the data the device sends, and a six-event
+  default was the usual reason a slow target fell behind.
+- **UI: "Stop" now means stop.** The header's Stop and the control bar's
+  ■ both *disconnected* the agent — which a `--server` agent answers by
+  dialling back in within seconds. The header button is "Disconnect", the
+  control bar has a plain Stop (the `stop` command; the agent stays
+  connected, a ▶ starts the same process again) beside a separate
+  Disconnect, and the bar shows the events being recorded.
+- UI: the header, banners and app shell subscribe to the store fields
+  they render rather than the whole store, so a 2 s metrics frame no
+  longer re-renders the entire tree; the profiling view is mounted only
+  while shown (its 1 s ticker, index-status query and health strip ran
+  on the landing page); the flame graph handles clicks with one delegated
+  handler on the `<svg>` instead of four closures per frame, memoizes the
+  rect colours and labels, clears its click timer on unmount and clamps
+  the context menu to the viewport; the thread flame graph is sized to
+  its container rather than 900 px; the sparklines use `var(--…)` instead
+  of ~15 `getComputedStyle` calls per render every two seconds, and their
+  panel arrays are memoized; tables keep their previous rows while the
+  next chunk's data loads.
+- UI: deleting a session asks first; a `?` button in the header opens the
+  shortcut help; a hint under the sparklines says that dragging selects a
+  time window; a session still receiving (or never finalized) is tagged
+  `live` in the list and a rebuilt one `recovered`; icon-only buttons have
+  `aria-label`s, wizard labels are bound to their inputs, clickable
+  rows/cards/menu items take keyboard focus and Enter, the tab strip has
+  `aria-controls`/`tabpanel`; `parseHash` validates `tab`.
 
 ### Tests
 
@@ -427,6 +526,15 @@ one bad frame, one dead device or one full disk could do to a session.
   envelope; a refused delete; view memoization across chunks and resets;
   the previous mapper closed on `PATCH /api/config`; equal ports refused;
   malformed map entries reported.
+- UI: vitest units for the live store (stamp coalescing, an event switch
+  during a fetch, a generation reset, the ambiguous-event fallback, a
+  failed fetch releasing the in-flight guard, PMU-qualified event
+  selection), the event helpers, `unwrap`, the error banner's sticky and
+  auto-hide modes, the reconnect backoff and hash validation (49 tests,
+  was 24); Playwright scenarios for the error banner on a bad deep link,
+  the Threads tab in replay, the replay exit button, the delete
+  confirmation, a search term with a space and an invalid pattern, and
+  the header's Disconnect/shortcuts buttons (16 scenarios, was 10).
 
 ## [0.11.0] — 2026-09-13
 
