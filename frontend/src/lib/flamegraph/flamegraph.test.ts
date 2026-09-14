@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { layoutFlamegraph } from './layout';
+import { layoutFlamegraph, matchedCoverage } from './layout';
 import { pathToNode, walkBaseline, walkZoomNames } from './zoom';
 import { fgDiffColor, fgModuleColor } from './colors';
 import type { FlameNode } from './types';
@@ -119,5 +119,31 @@ describe('colors', () => {
   it('is deterministic per name', () => {
     expect(fgModuleColor('foo', '/usr/bin/app', false, true))
       .toBe(fgModuleColor('foo', '/usr/bin/app', false, true));
+  });
+});
+
+describe('matchedCoverage', () => {
+  const nested: FlameNode = {
+    name: 'root', value: 100,
+    children: [
+      { name: '__GI_clone', value: 90, children: [
+        { name: 'start', value: 90, children: [
+          { name: '__GI_inner', value: 40, children: [] },
+        ] },
+      ] },
+      { name: '__GI_other', value: 10, children: [] },
+    ],
+  };
+
+  it('counts a match nested in another match once', () => {
+    const { rects } = layoutFlamegraph(nested, { width: 1000, totalSamples: 100 });
+    const cov = matchedCoverage(rects, /__GI/);
+    expect(cov.count).toBe(3);
+    expect(cov.samples).toBe(100);   // 90 + 10, not 90 + 40 + 10
+  });
+
+  it('sums sibling matches', () => {
+    const { rects } = layoutFlamegraph(tree, { width: 1000, totalSamples: 100 });
+    expect(matchedCoverage(rects, /^(hot|cold)$/)).toEqual({ count: 2, samples: 90 });
   });
 });

@@ -228,6 +228,9 @@ source view that reset itself every chunk.
   health strip drew it on a 0–100 scale: a process using five cores read
   `501.2%` in red and its sparkline sat clipped at the top. The card's
   severity and the chart now scale with the core count.
+- **UI: the flame graph's search readout could exceed 100%.** It summed
+  every matching frame, so a match nested inside another match was counted
+  twice ("4 / 266 frames (100.2%)"). Each stack is now counted once.
 - **A banner said symbolization had failed when one frame in 2.4 million
   was unnamed.** A profile is reported degraded only when at least 1% of
   userspace frames stay unnamed; a stray JIT or vdso frame no longer
@@ -562,8 +565,8 @@ source view that reset itself every chunk.
   during a fetch, a generation reset, the ambiguous-event fallback, a
   failed fetch releasing the in-flight guard, PMU-qualified event
   selection), the event helpers, `unwrap`, the error banner's sticky and
-  auto-hide modes, the reconnect backoff, hash validation and stat value
-  scaling (51 tests, was 24); Playwright scenarios for the error banner on a bad deep link,
+  auto-hide modes, the reconnect backoff, hash validation, stat value
+  scaling and search coverage (53 tests, was 24); Playwright scenarios for the error banner on a bad deep link,
   the Threads tab in replay, the replay exit button, the delete
   confirmation, a search term with a space and an invalid pattern, and
   the header's Disconnect/shortcuts buttons (16 scenarios, was 10).

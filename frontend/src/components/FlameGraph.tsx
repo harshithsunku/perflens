@@ -1,5 +1,5 @@
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
-import { CHAR_WIDTH, FONT_SIZE, ROW_HEIGHT, layoutFlamegraph } from '../lib/flamegraph/layout';
+import { CHAR_WIDTH, FONT_SIZE, ROW_HEIGHT, layoutFlamegraph, matchedCoverage } from '../lib/flamegraph/layout';
 import type { FlameNode, FlameRect } from '../lib/flamegraph/types';
 import { fgDiffColor, fgModuleColor } from '../lib/flamegraph/colors';
 import { pathToNode, walkBaseline, walkZoomNames } from '../lib/flamegraph/zoom';
@@ -103,11 +103,7 @@ export default function FlameGraph({ tree, totalSamples, allowZoom, onShowSource
 
   const searchStats = useMemo(() => {
     if (!searchRe || !layout) return null;
-    let count = 0;
-    let samples = 0;
-    for (const r of layout.rects) {
-      if (searchRe.test(r.name)) { count++; samples += r.value; }
-    }
+    const { count, samples } = matchedCoverage(layout.rects, searchRe);
     const rootValue = layout.rects.length ? layout.rects[0].value : 0;
     const pct = rootValue > 0 ? ((samples / rootValue) * 100).toFixed(1) : '0.0';
     return `${count} / ${layout.rects.length} frames (${pct}%)`;
