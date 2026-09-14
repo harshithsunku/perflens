@@ -165,8 +165,7 @@ static int collect_system_metrics(metrics_collector_t *mc, char *buf, size_t buf
     }
     if (!has_freq && !mc->warned_freq) {
         mc->warned_freq = 1;
-        fprintf(stderr, "[perflens-agent] WARNING: Metrics: cpufreq not available "
-                "(will not warn again)\n");
+        agent_warn("Metrics: cpufreq not available (will not warn again)");
     }
 
     /* Memory */
@@ -201,8 +200,7 @@ static int collect_system_metrics(metrics_collector_t *mc, char *buf, size_t buf
     int temp_c = has_temp ? (int)(temp_raw / 1000) : 0;
     if (!has_temp && !mc->warned_temp) {
         mc->warned_temp = 1;
-        fprintf(stderr, "[perflens-agent] WARNING: Metrics: thermal_zone0 not found "
-                "(will not warn again)\n");
+        agent_warn("Metrics: thermal_zone0 not found (will not warn again)");
     }
 
     /* Uptime */
@@ -355,8 +353,7 @@ static int collect_process_metrics(metrics_collector_t *mc, char *buf, size_t bu
         closedir(d);
     } else if (!mc->warned_proc_fd) {
         mc->warned_proc_fd = 1;
-        fprintf(stderr, "[perflens-agent] WARNING: Metrics: cannot read /proc/%d/fd "
-                "(will not warn again)\n", mc->pid);
+        agent_warn("Metrics: cannot read /proc/%d/fd (will not warn again)", mc->pid);
     }
 
     /* OOM score */

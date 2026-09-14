@@ -20,6 +20,11 @@ volatile int g_agent_sock_fd = -1;   /* mirror of agent sock_fd for signal handl
  * Fixed slots claimed/released with CAS so track/untrack/kill are safe from
  * the collection thread, the command thread, and the signal handler
  * concurrently — no mutex (the signal handler can't take one).
+ *
+ * Every child is the leader of its own process group (see child_setup), so
+ * a signal to -pid reaches the workload perf itself spawned (`perf record
+ * -- sleep N`) as well. Killing perf alone with SIGKILL used to leave one
+ * orphaned sleep per round.
  * -------------------------------------------------------------------------- */
 
 void track_child(pid_t pid)
@@ -39,13 +44,22 @@ void untrack_child(pid_t pid)
     }
 }
 
+void kill_child_group(pid_t pid, int sig)
+{
+    if (pid <= 0) return;
+    /* The group first (perf and its workload), then the pid itself in case
+     * the child has not reached setpgid() yet. */
+    kill(-pid, sig);
+    kill(pid, sig);
+}
+
 /* Async-signal-safe: only volatile reads + kill(2). */
 void kill_tracked_children(void)
 {
     for (int i = 0; i < MAX_TRACKED_CHILDREN; i++) {
         pid_t p = g_child_pids[i];
         if (p > 0)
-            kill(p, SIGTERM);
+            kill_child_group(p, SIGTERM);
     }
 }
 
@@ -88,14 +102,127 @@ void block_signals_in_thread(void)
     pthread_sigmask(SIG_BLOCK, &mask, NULL);
 }
 
-/* Forked children inherit the forking thread's blocked-signal mask, and
- * execvp preserves it — a perf child forked from a worker thread would
- * never see our SIGTERM. Reset the mask before exec. */
-void unblock_signals_in_child(void)
+/* --------------------------------------------------------------------------
+ * The child side of every fork
+ *
+ * Runs between fork() and exec(), so only async-signal-safe calls plus
+ * setenv/unsetenv (which glibc and musl implement without locks the parent's
+ * other threads could be holding, given the environment is never mutated
+ * elsewhere in the agent).
+ *
+ *   - Its own process group, so stop/pause/teardown can signal perf and the
+ *     `sleep` workload perf started together.
+ *   - LC_ALL=C: perf stat prints big numbers with the locale's thousands
+ *     grouping (`--big-num` is the default), and the server's parser only
+ *     strips ','. A de_DE or fr_FR device printed 1.234.567 or 1 234 567.
+ *   - stdin from /dev/null rather than closed, so the first file perf opens
+ *     does not land on fd 0.
+ *   - Signals unblocked: forked children inherit the forking thread's mask,
+ *     and execvp preserves it — a perf child forked from a worker thread
+ *     would never see our SIGTERM.
+ *   - Optionally nice 5: perf script is the CPU-heavy symbolizer, and it
+ *     must yield to the workload it is measuring.
+ * -------------------------------------------------------------------------- */
+
+static void child_setup(int flags)
 {
+    setpgid(0, 0);
+    setenv("LC_ALL", "C", 1);
+    unsetenv("LANGUAGE");
+
+    if (!(flags & CHILD_KEEP_STDIN)) {
+        int devnull = open("/dev/null", O_RDONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDIN_FILENO);
+            if (devnull != STDIN_FILENO) close(devnull);
+        } else {
+            close(STDIN_FILENO);
+        }
+    }
+
+    if (flags & CHILD_NICE) {
+        if (nice(5) < 0) { /* best effort */ }
+    }
+
     sigset_t empty;
     sigemptyset(&empty);
     sigprocmask(SIG_SETMASK, &empty, NULL);
+}
+
+/* fork() with the agent's signal handlers kept out of the child.
+ *
+ * Until it execs, a child shares the parent's handlers -- and the SIGTERM
+ * handler calls shutdown() on the session socket, which the child still
+ * holds a copy of. A stop that signalled a child forked from the command
+ * thread a moment earlier therefore tore down the parent's own connection:
+ * both ends saw EOF in the same millisecond. So: block SIGTERM and SIGINT
+ * across the fork, and in the child restore the default dispositions before
+ * child_setup() unblocks anything. SIGPIPE goes back to default too -- perf
+ * is meant to die when the reader of its pipe goes away. */
+static pid_t do_fork(void)
+{
+    sigset_t block, old;
+    sigemptyset(&block);
+    sigaddset(&block, SIGTERM);
+    sigaddset(&block, SIGINT);
+    pthread_sigmask(SIG_BLOCK, &block, &old);
+    pid_t pid = fork();
+    if (pid == 0) {
+        signal(SIGTERM, SIG_DFL);
+        signal(SIGINT, SIG_DFL);
+        signal(SIGPIPE, SIG_DFL);
+        return 0;
+    }
+    pthread_sigmask(SIG_SETMASK, &old, NULL);
+    return pid;
+}
+
+/* Parent side: claim the group too, so kill(-pid) cannot race the child's
+ * own setpgid(). EACCES after the exec is expected and harmless. */
+static void parent_after_fork(pid_t pid)
+{
+    setpgid(pid, pid);
+    track_child(pid);
+}
+
+static int make_pipe(int fds[2])
+{
+    if (pipe2(fds, O_CLOEXEC) < 0) {
+        agent_warn("pipe() failed: %s", strerror(errno));
+        fds[0] = fds[1] = -1;
+        return -1;
+    }
+    return 0;
+}
+
+static void close_pipe_pair(int p[2])
+{
+    if (p[0] >= 0) close(p[0]);
+    if (p[1] >= 0) close(p[1]);
+}
+
+/* --------------------------------------------------------------------------
+ * Reaping with a grace period
+ * -------------------------------------------------------------------------- */
+
+int reap_child(pid_t pid, int grace_ms)
+{
+    int status = 0;
+    struct timespec tick = {0, 50000000L};  /* 50 ms */
+    int waited = 0;
+    while (waited <= grace_ms) {
+        pid_t r = waitpid(pid, &status, WNOHANG);
+        if (r == pid) return status;
+        if (r < 0 && errno != EINTR) return status;
+        if (waited == grace_ms) break;
+        nanosleep(&tick, NULL);
+        waited += 50;
+        if (waited > grace_ms) waited = grace_ms;
+    }
+    kill_child_group(pid, SIGKILL);
+    pid_t r;
+    do { r = waitpid(pid, &status, 0); } while (r < 0 && errno == EINTR);
+    return status;
 }
 
 /* --------------------------------------------------------------------------
@@ -115,32 +242,25 @@ int run_cmd(char *const argv[], struct buf *out, struct buf *err,
     if (out) { out->len = 0; }
     if (err) { err->len = 0; }
 
-    if (pipe(stdout_pipe) < 0 || pipe(stderr_pipe) < 0) {
-        agent_warn("pipe() failed: %s", strerror(errno));
+    if (make_pipe(stdout_pipe) < 0 || make_pipe(stderr_pipe) < 0) {
+        close_pipe_pair(stdout_pipe);
+        close_pipe_pair(stderr_pipe);
         return -1;
     }
 
-    pid_t pid = fork();
+    pid_t pid = do_fork();
     if (pid < 0) {
         agent_warn("fork() failed: %s", strerror(errno));
-        close(stdout_pipe[0]); close(stdout_pipe[1]);
-        close(stderr_pipe[0]); close(stderr_pipe[1]);
+        close_pipe_pair(stdout_pipe);
+        close_pipe_pair(stderr_pipe);
         return -1;
     }
 
     if (pid == 0) {
-        /* Child */
-        close(stdout_pipe[0]);
-        close(stderr_pipe[0]);
+        /* Child: dup2 clears O_CLOEXEC on the target descriptors */
         dup2(stdout_pipe[1], STDOUT_FILENO);
         dup2(stderr_pipe[1], STDERR_FILENO);
-        close(stdout_pipe[1]);
-        close(stderr_pipe[1]);
-
-        /* Close stdin to prevent perf from reading terminal */
-        close(STDIN_FILENO);
-
-        unblock_signals_in_child();
+        child_setup(0);
         execvp(argv[0], argv);
         _exit(127);
     }
@@ -148,12 +268,13 @@ int run_cmd(char *const argv[], struct buf *out, struct buf *err,
     /* Parent */
     close(stdout_pipe[1]);
     close(stderr_pipe[1]);
-    track_child(pid);
+    parent_after_fork(pid);
 
     struct pollfd fds[2];
     fds[0].fd = stdout_pipe[0]; fds[0].events = POLLIN;
     fds[1].fd = stderr_pipe[0]; fds[1].events = POLLIN;
     int open_fds = 2;
+    int killed = 0;
 
     struct timespec start;
     clock_gettime(CLOCK_MONOTONIC, &start);
@@ -166,7 +287,8 @@ int run_cmd(char *const argv[], struct buf *out, struct buf *err,
         int remaining_ms = timeout_sec * 1000 - elapsed_ms;
         if (remaining_ms <= 0) {
             agent_warn("Command timed out after %ds, killing", timeout_sec);
-            kill(pid, SIGKILL);
+            kill_child_group(pid, SIGKILL);
+            killed = 1;
             break;
         }
 
@@ -189,7 +311,7 @@ int run_cmd(char *const argv[], struct buf *out, struct buf *err,
                 continue;
             }
 
-            if (buf_ensure(target, target->len + 4096) < 0) {
+            if (buf_ensure_small(target, target->len + 4096, SMALL_BUF_SIZE) < 0) {
                 close(fds[i].fd); fds[i].fd = -1; open_fds--;
                 continue;
             }
@@ -207,12 +329,7 @@ int run_cmd(char *const argv[], struct buf *out, struct buf *err,
     if (fds[0].fd >= 0) close(fds[0].fd);
     if (fds[1].fd >= 0) close(fds[1].fd);
 
-    int status = 0;
-    int rc;
-    do {
-        rc = waitpid(pid, &status, 0);
-    } while (rc < 0 && errno == EINTR);
-
+    int status = reap_child(pid, killed ? 0 : CHILD_GRACE_MS);
     untrack_child(pid);
 
     if (WIFEXITED(status))
@@ -227,35 +344,29 @@ int run_cmd(char *const argv[], struct buf *out, struct buf *err,
  * stdout and stderr read-end fds to poll.  Returns -1 on error.
  * -------------------------------------------------------------------------- */
 
-pid_t fork_cmd(char *const argv[], int *out_fd_p, int *err_fd_p)
+pid_t fork_cmd(char *const argv[], int *out_fd_p, int *err_fd_p, int flags)
 {
     int stdout_pipe[2] = {-1, -1};
     int stderr_pipe[2] = {-1, -1};
 
-    if (pipe(stdout_pipe) < 0 || pipe(stderr_pipe) < 0) {
-        agent_warn("pipe() failed: %s", strerror(errno));
-        if (stdout_pipe[0] >= 0) { close(stdout_pipe[0]); close(stdout_pipe[1]); }
+    if (make_pipe(stdout_pipe) < 0 || make_pipe(stderr_pipe) < 0) {
+        close_pipe_pair(stdout_pipe);
+        close_pipe_pair(stderr_pipe);
         return -1;
     }
 
-    pid_t pid = fork();
+    pid_t pid = do_fork();
     if (pid < 0) {
         agent_warn("fork() failed: %s", strerror(errno));
-        close(stdout_pipe[0]); close(stdout_pipe[1]);
-        close(stderr_pipe[0]); close(stderr_pipe[1]);
+        close_pipe_pair(stdout_pipe);
+        close_pipe_pair(stderr_pipe);
         return -1;
     }
 
     if (pid == 0) {
-        /* Child */
-        close(stdout_pipe[0]);
-        close(stderr_pipe[0]);
         dup2(stdout_pipe[1], STDOUT_FILENO);
         dup2(stderr_pipe[1], STDERR_FILENO);
-        close(stdout_pipe[1]);
-        close(stderr_pipe[1]);
-        close(STDIN_FILENO);
-        unblock_signals_in_child();
+        child_setup(flags);
         execvp(argv[0], argv);
         _exit(127);
     }
@@ -263,7 +374,7 @@ pid_t fork_cmd(char *const argv[], int *out_fd_p, int *err_fd_p)
     /* Parent */
     close(stdout_pipe[1]);
     close(stderr_pipe[1]);
-    track_child(pid);
+    parent_after_fork(pid);
 
     *out_fd_p = stdout_pipe[0];
     *err_fd_p = stderr_pipe[0];
@@ -277,12 +388,6 @@ pid_t fork_cmd(char *const argv[], int *out_fd_p, int *err_fd_p)
  * Both children are tracked so stop/pause/signal handling reaches them.
  * -------------------------------------------------------------------------- */
 
-static void close_pipe_pair(int p[2])
-{
-    if (p[0] >= 0) close(p[0]);
-    if (p[1] >= 0) close(p[1]);
-}
-
 /* Fork a's stdout into b's stdin. On success returns 0 and gives the
  * parent read fds for a's stderr, b's stdout, and b's stderr. */
 int fork_pipeline(char *const argv_a[], char *const argv_b[],
@@ -292,15 +397,14 @@ int fork_pipeline(char *const argv_a[], char *const argv_b[],
     int link_p[2] = {-1, -1}, aerr[2] = {-1, -1};
     int bout[2] = {-1, -1}, berr[2] = {-1, -1};
 
-    if (pipe(link_p) < 0 || pipe(aerr) < 0 ||
-        pipe(bout) < 0 || pipe(berr) < 0) {
-        agent_warn("pipe() failed: %s", strerror(errno));
+    if (make_pipe(link_p) < 0 || make_pipe(aerr) < 0 ||
+        make_pipe(bout) < 0 || make_pipe(berr) < 0) {
         close_pipe_pair(link_p); close_pipe_pair(aerr);
         close_pipe_pair(bout); close_pipe_pair(berr);
         return -1;
     }
 
-    pid_t pa = fork();
+    pid_t pa = do_fork();
     if (pa < 0) {
         agent_warn("fork() failed: %s", strerror(errno));
         close_pipe_pair(link_p); close_pipe_pair(aerr);
@@ -310,20 +414,18 @@ int fork_pipeline(char *const argv_a[], char *const argv_b[],
     if (pa == 0) {
         dup2(link_p[1], STDOUT_FILENO);
         dup2(aerr[1], STDERR_FILENO);
-        close_pipe_pair(link_p); close_pipe_pair(aerr);
-        close_pipe_pair(bout); close_pipe_pair(berr);
-        close(STDIN_FILENO);
-        unblock_signals_in_child();
+        child_setup(0);
         execvp(argv_a[0], argv_a);
         _exit(127);
     }
+    parent_after_fork(pa);
 
-    pid_t pb = fork();
+    pid_t pb = do_fork();
     if (pb < 0) {
         agent_warn("fork() failed: %s", strerror(errno));
-        kill(pa, SIGKILL);
-        int ws;
-        do { } while (waitpid(pa, &ws, 0) < 0 && errno == EINTR);
+        kill_child_group(pa, SIGKILL);
+        reap_child(pa, 0);
+        untrack_child(pa);
         close_pipe_pair(link_p); close_pipe_pair(aerr);
         close_pipe_pair(bout); close_pipe_pair(berr);
         return -1;
@@ -332,21 +434,17 @@ int fork_pipeline(char *const argv_a[], char *const argv_b[],
         dup2(link_p[0], STDIN_FILENO);
         dup2(bout[1], STDOUT_FILENO);
         dup2(berr[1], STDERR_FILENO);
-        close_pipe_pair(link_p); close_pipe_pair(aerr);
-        close_pipe_pair(bout); close_pipe_pair(berr);
         /* Stage b is the CPU-heavy symbolizer — yield to the profiled
          * workload so the profiler doesn't skew what it measures. */
-        if (nice(5) < 0) { /* best effort */ }
-        unblock_signals_in_child();
+        child_setup(CHILD_NICE | CHILD_KEEP_STDIN);
         execvp(argv_b[0], argv_b);
         _exit(127);
     }
+    parent_after_fork(pb);
 
     /* Parent keeps only the read ends it polls */
     close_pipe_pair(link_p);
     close(aerr[1]); close(bout[1]); close(berr[1]);
-    track_child(pa);
-    track_child(pb);
 
     *pid_a_p = pa; *pid_b_p = pb;
     *a_err_p = aerr[0]; *b_out_p = bout[0]; *b_err_p = berr[0];
@@ -372,6 +470,7 @@ int run_pipeline_once(char *const argv_a[], char *const argv_b[],
     fds[1].fd = b_err_fd; fds[1].events = POLLIN;
     fds[2].fd = a_err_fd; fds[2].events = POLLIN;
     int open_fds = 3;
+    int killed = 0;
 
     struct timespec start;
     clock_gettime(CLOCK_MONOTONIC, &start);
@@ -383,8 +482,9 @@ int run_pipeline_once(char *const argv_a[], char *const argv_b[],
                                (now.tv_nsec - start.tv_nsec) / 1000000);
         int remaining_ms = timeout_sec * 1000 - elapsed_ms;
         if (remaining_ms <= 0) {
-            kill(pid_a, SIGKILL);
-            kill(pid_b, SIGKILL);
+            kill_child_group(pid_a, SIGKILL);
+            kill_child_group(pid_b, SIGKILL);
+            killed = 1;
             break;
         }
 
@@ -421,15 +521,13 @@ int run_pipeline_once(char *const argv_a[], char *const argv_b[],
     for (int i = 0; i < 3; i++)
         if (fds[i].fd >= 0) close(fds[i].fd);
 
-    int status_a = 0, status_b = 0;
-    int rc;
-    do { rc = waitpid(pid_a, &status_a, 0); } while (rc < 0 && errno == EINTR);
+    int grace = killed ? 0 : CHILD_GRACE_MS;
+    reap_child(pid_a, grace);
     untrack_child(pid_a);
-    do { rc = waitpid(pid_b, &status_b, 0); } while (rc < 0 && errno == EINTR);
+    int status_b = reap_child(pid_b, grace);
     untrack_child(pid_b);
 
     if (WIFEXITED(status_b))
         return WEXITSTATUS(status_b);
     return -1;
 }
-

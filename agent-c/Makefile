@@ -12,7 +12,7 @@
 
 CC      = $(CROSS)gcc
 VERSION := $(shell cat ../VERSION 2>/dev/null || echo dev)
-CFLAGS  = -std=c99 -O2 -Wall -Wextra -Wno-unused-parameter \
+CFLAGS  = -std=c11 -O2 -Wall -Wextra -Wno-unused-parameter \
           -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE \
           -DAGENT_VERSION=\"$(VERSION)\" -I. $(ARCHFLAGS)
 LDFLAGS = -static -lpthread -lm

@@ -293,3 +293,45 @@ def test_frame_strings_are_shared_across_samples():
     assert len(funcs) == 1
     assert len(modules) == 1
     assert len(comms) == 1
+
+
+# ---------------------------------------------------------------------------
+# perf stat digit grouping: the device's locale, not ours
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize('line,name,value', [
+    ('     9,310,933,573      cycles:u    #  3.155 GHz', 'cycles', 9310933573),
+    ('     9.310.933.573      cycles      #  3.155 GHz', 'cycles', 9310933573),
+    ("     9'310'933'573      cycles", 'cycles', 9310933573),
+    ('     9 310 933 573      cycles', 'cycles', 9310933573),
+    ('     9\u202f310\u202f933\u202f573      cycles', 'cycles', 9310933573),
+    ('               12      page-faults', 'page-faults', 12),
+    ('          2,950.76 msec task-clock  #  0.983 CPUs utilized', 'task-clock', 2950.76),
+    ('          2.950,76 msec task-clock  #  0.983 CPUs utilized', 'task-clock', 2950.76),
+    ('             12.50 msec task-clock', 'task-clock', 12.5),
+    ('          2 950,76 msec task-clock', 'task-clock', 2950.76),
+], ids=['c-locale', 'de_DE', 'de_CH', 'fr_FR-space', 'fr_FR-nnbsp',
+        'small-int', 'msec-c', 'msec-de', 'msec-plain', 'msec-fr'])
+def test_perf_stat_accepts_every_thousands_separator(line, name, value):
+    """perf stat prints big numbers with the locale's grouping, and only ','
+    used to be stripped: a de_DE device's 9.310.933.573 became 9.31."""
+    from perflens.parser import parse_perf_stat
+    stats = parse_perf_stat(line)
+    assert stats[name]['value'] == value
+
+
+def test_perf_stat_skips_what_it_cannot_read():
+    """Runs on the receive thread: a malformed line must never raise."""
+    from perflens.parser import parse_perf_stat
+    text = (
+        "         1,234,567      cycles\n"
+        "         1,23,45        instructions\n"     # not grouped by threes
+        "         garbage        cache-misses\n"
+        "       1.2.3 seconds time elapsed\n"          # the float() that used to raise
+        "              2.00 msec task-clock\n"
+    )
+    stats = parse_perf_stat(text)
+    assert stats['cycles']['value'] == 1234567
+    assert stats['task-clock']['value'] == 2.0
+    assert 'instructions' not in stats
+    assert 'time_elapsed' not in stats

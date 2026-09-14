@@ -106,9 +106,12 @@ resolution. See [STATUS.md](STATUS.md) for what is open.
 - Collection prefers continuous pipe mode (`perf record -o - | perf script
   -i -`, probed at startup): one long-lived pipeline with no sampling dead
   time, symbol tables parsed once, output cut into chunks every `duration`
-  seconds at sample boundaries and streamed through in-process zstd. Falls
-  back to discrete record/script rounds when pipe mode is unavailable.
-  `perf script` runs at `nice 5` so the profiler yields to the workload.
+  seconds — or at 16 MB of raw text, whichever comes first — at sample
+  boundaries and streamed through in-process zstd. Falls back to discrete
+  record/script rounds when pipe mode is unavailable. Every `perf script`
+  runs at `nice 5` so the profiler yields to the workload, every perf child
+  runs with `LC_ALL=C` in its own process group, and `perf stat` rounds run
+  back to back so every interval is counted.
 - Single agent implementation: a static C binary (~2 MB, vendored zstd,
   zero deps) that cross-compiles for five architectures, installs with one
   curl command (install-agent.sh), and self-updates with --update.
@@ -141,15 +144,17 @@ resolution. See [STATUS.md](STATUS.md) for what is open.
 perflens/
 ├── install-agent.sh              # curl-able agent installer (no sudo)
 ├── agent-c/
-│   ├── src/                      # C agent modules (agent.h + 10 .c files)
+│   ├── src/                      # C agent modules (agent.h + 12 .c files)
 │   │   ├── agent.h               # shared types, constants, cross-module API
 │   │   ├── main.c                # agent state, session loop, run modes, CLI
 │   │   ├── collect.c             # round + continuous collection loops
 │   │   ├── commands.c            # command handlers + dispatch
+│   │   ├── perfcmd.c             # the perf command lines (record/script/stat)
 │   │   ├── metrics.c             # device health metrics
 │   │   ├── probe.c               # platform + perf capability probing
 │   │   ├── subproc.c             # signals, child tracking, fork/exec helpers
 │   │   ├── wire.c                # TCP framing + streaming zstd sink
+│   │   ├── auth.c                # pairing-code generation + comparison
 │   │   └── util.c, procs.c, update.c
 │   ├── Makefile                  # native + cross-compile targets
 │   └── vendor/zstd/              # zstd single-file amalgamation
@@ -323,6 +328,11 @@ Options:
 --version             Print version and exit
 ```
 
+Environment: `PERFLENS_LOG=debug` logs every chunk and round (otherwise a
+summary on the first and every hundredth); `TMPDIR` relocates the perf.data
+temp files; `PERFLENS_SEND_TIMEOUT_MS` overrides the 60 s send bound (the
+protocol tests shorten it).
+
 ---
 
 ## Development rules
@@ -355,6 +365,18 @@ Options:
   `PATH` (a candidate must print `perf version`, and is refused
   mid-collection). `status` gained `platform.perf_path`; the hello
   deliberately did not, because it goes out before authentication.
+
+  **The sixth, on 2026-09-14**, did not change the wire protocol either. It
+  was the stabilization pass toward 0.12.0, taken on the agent review in
+  the (gitignored) `AGENT_FINDINGS.md`: size-based chunk flushing, back-to-
+  back `perf stat` rounds, the call-graph probe on the probed event with a
+  call-chain check, `nice 5` for every `perf script`, monotonic deadlines,
+  `LC_ALL=C` for perf children, process groups and SIGTERM→SIGKILL reaping,
+  send timeouts, close-on-exec, the 64 KB command-frame cap, escaped and
+  validated ids and arguments, one `writev()` per frame, and `perfcmd.c` as
+  the single place a perf command line is assembled. Frame types, commands
+  and hello fields are exactly 0.11.0's; `status.state` may additionally
+  read `probing` and old servers pass it through as text.
 
   **The third unfreeze, in
   0.10.0, did** — pairing-code authentication. Before it, `--listen` bound

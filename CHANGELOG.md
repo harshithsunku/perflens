@@ -25,6 +25,154 @@ releases may break APIs between minor versions when needed.
   `perflens-tools-linux-{x86_64,aarch64}.tar.gz` row, which rendered as plain
   text.
 
+## [Unreleased]
+
+The sixth agent unfreeze, decided 2026-09-14 for a stabilization pass over
+the whole project. The wire protocol is unchanged: every frame type, command
+and hello field is as in 0.11.0, and a 0.11.0 server drives this agent as
+before. What changed is how the agent runs `perf`, what it does when
+something does not exit, and what a peer can make it do before it has
+authenticated.
+
+### Fixed
+
+- **Long intervals lost every chunk, silently.** Continuous mode capped a
+  chunk at 64 MB of `perf script` text, and past the cap the sink's sticky
+  error made the flush skip the send and log nothing. Measured at ~3.4 MB/s
+  on an 8-core target, the cap arrived after ~19 s, so any interval longer
+  than that — the UI offers up to 300 s — shipped nothing at all and looked
+  like an idle target. Chunks now flush at 16 MB of raw text as well as at
+  the interval, cut at a sample boundary like a deadline flush; a chunk the
+  sink still refuses is counted and logged.
+- **`perf stat` counted only every other interval, one chunk late.** A stat
+  round started only after the previous result had been attached to a
+  chunk, so with rounds as long as the interval, half the wall time went
+  uncounted and the totals were about half the truth. Rounds now run back
+  to back and every completed round rides the next chunk.
+- **The call-graph probe recorded `cycles` unconditionally and accepted any
+  output.** On a target without a PMU it only ever worked because some
+  perfs fall back to cpu-clock themselves; and "perf script printed
+  something" is the same trap the pipe-mode probe had already closed. It
+  now records the first event the target can record, requires call-chain
+  frames in the output, and is skipped when nothing can be recorded at all
+  (that case used to spend up to ninety seconds timing out).
+- **Rounds-mode `perf script` ran at normal priority.** Continuous mode
+  niced the symbolizer; the rounds fallback — chosen on exactly the
+  single-core targets where it matters — did not. Every `perf script` the
+  agent runs is now at nice 5.
+- **Deadlines used the wall clock.** The command queue waited on
+  `CLOCK_REALTIME` and the pairing deadline was `time(NULL)`, so an NTP step
+  — routine on boards that boot in 1970 and jump when the network comes up —
+  dropped a legitimate server with "no valid pairing code within 30s", or
+  held the loop until the clock caught up. Both are monotonic now.
+- **`perf stat` numbers depended on the device's locale.** perf groups
+  digits with the locale's separator and the parser stripped only `,`, so a
+  device set to `de_DE` printed `9.310.933.573` and the counter parsed as
+  `9.31`. The agent runs every perf child with `LC_ALL=C`; the server's
+  parser additionally accepts `.`, `'`, a space and a narrow no-break space
+  as grouping, for agents that predate this, and no longer raises on a
+  malformed `seconds time elapsed` line (that exception ended the session).
+- **A perf child that would not exit hung `stop`, and teardown with it.**
+  Teardown sent SIGTERM and then blocked in `waitpid()`; a perf stuck
+  flushing a small RAM-backed `/tmp` never came back, `stop` joins that
+  thread, so the command loop froze. Children are now reaped with a
+  three-second grace before SIGKILL, and each runs in its own process group
+  so the kill reaches the `sleep` workload perf spawned — the SIGKILL paths
+  used to leave one orphaned `sleep` per killed round. Rounds mode also
+  stops waiting on a stuck child the moment `stop` arrives instead of
+  sitting out the round's timeout.
+- **A signal landing on a just-forked child tore down the session.** Until
+  it execs, a child shares the agent's signal handlers, and the SIGTERM
+  handler shuts down the session socket the child still held a copy of. A
+  `stop` racing a child forked from the command thread ended the connection
+  at both ends in the same millisecond. Signals are blocked across `fork()`
+  and reset to their defaults in the child before anything else.
+- **Sends had no time bound during a session.** Keepalive only probes an
+  idle connection; with a chunk in flight Linux retransmits for about
+  fifteen minutes before `send()` fails, and a server that is alive but not
+  reading never fails it at all. The agent held `sock_lock` through the
+  blocked send, so metrics and every command response froze with it and
+  `--server` mode never reconnected. Session sockets now carry
+  `TCP_USER_TIMEOUT` and `SO_SNDTIMEO` (60 s; `PERFLENS_SEND_TIMEOUT_MS`
+  overrides).
+- **perf children inherited every descriptor.** A child that inherited the
+  listening socket kept the port bound after the agent was SIGKILLed, so a
+  restart failed with `EADDRINUSE` until the last perf exited; one that
+  inherited the session socket hid the disconnect from the server. Pipes
+  and sockets are close-on-exec.
+- **Before authenticating, a peer could make the agent allocate 64 MB per
+  frame, without limit.** Server → agent frames are JSON commands of a few
+  hundred bytes; they are capped at 64 KB, and the command queue at 64
+  entries — beyond either the connection is dropped.
+- **Command ids were echoed unescaped**, so an id containing `"` or `\`
+  produced invalid JSON — before authentication as well. Ids are accepted
+  only as `[A-Za-z0-9_.:-]{1,63}` and escaped on the way out, as is every
+  error message. `start` now validates `frequency` (1 to the kernel's
+  `perf_event_max_sample_rate`) and `duration` (1–300 s) as `configure`
+  does — `duration: 0` spun rounds mode through record and script back to
+  back. Argument lookups are scoped to the `args` object, so a `pid` in a
+  later sibling no longer stands in for a missing one, an `args` object
+  containing a `cmd` key cannot shadow the command, and a string value that
+  equals a key name is not a key. Responses are built with a bounded
+  writer that answers an error instead of sending a truncated document.
+- **Three `send()` calls per frame.** Length, flag and payload went out
+  separately, so Nagle held the later segments for the peer's delayed ACK
+  (40 ms on Linux) and every small response paid it. One `writev()` per
+  frame, and `TCP_NODELAY`.
+- **`verify_perf` reported a perf functional when nothing could be
+  sampled.** Its check counted `cycles`, which on a PMU-less target exits 0
+  with `<not supported>`. It counts the first event the target is known to
+  record, or `cpu-clock`, and reads the output.
+- **The listen banner guessed the address from the route to 8.8.8.8**, and
+  printed `127.0.0.1` on any network without a default route. It lists
+  every non-loopback IPv4 address from the interfaces.
+- Pausing continuous collection logged "Pipeline ended unexpectedly" and
+  slept a second, because the pause kills the pipeline and its EOF arrived
+  before the loop noticed the new state.
+- Cross-thread flags (`authed`, `collect_stop`, `session_done`) were
+  `volatile int`, which is not thread-safe; they are `_Atomic`, and
+  `frequency`/`duration` are read under the state lock. The agent builds as
+  C11.
+
+### Changed
+
+- **Agent log lines carry an ISO-8601 timestamp and go out in one
+  `write(2)` each**, so lines from the collection, metrics and command
+  threads no longer interleave and a field log can be matched against the
+  server's. The per-chunk and per-round lines — one every eight seconds,
+  about a megabyte a day into a RAM-backed `/tmp` — are logged only with
+  `PERFLENS_LOG=debug`; a summary line goes out on the first chunk and
+  every hundredth.
+- **Temp files honour `TMPDIR`**, and `perflens-*` files of the agent's own
+  uid older than an hour — what a SIGKILLed agent leaves behind — are
+  removed at startup.
+- A profiled process is identified by pid *and* start time, so a pid the
+  kernel recycles while a session runs is reported as exited rather than
+  profiled.
+- The perf command lines every probe and both collection loops run are
+  assembled in one place (`perfcmd.c`); the drift that had the call-graph
+  probe on a different event than everything else cannot recur.
+- Small buffers (stderr captures, stat output) no longer start at 256 KB,
+  continuous mode reads straight into its carry buffer, and one zstd
+  context serves a whole pipeline instead of one per chunk.
+- `tests/test_parser_compat.py` is gone: its two tests had no assertions
+  and duplicated `test_parser.py`'s parametrized cases. The `core` fixture
+  is defined once, in `conftest.py`.
+
+### Tests
+
+- The perf shim used by the protocol tests now records how each invocation
+  was run (nice level, locale, inherited descriptors, pid) and can be made
+  slow, stuck, chatty or PMU-less, which is what the fourteen new tests
+  need: size-based flushing, stat coverage, priority in both modes,
+  `LC_ALL=C`, no inherited sockets, `TMPDIR` and the stale-file sweep,
+  timestamps, a child that ignores SIGTERM, a server that stops reading,
+  the pre-auth frame cap, id and argument handling, `start` validation,
+  the Nagle round trip, and the `verify_perf` functional check. The
+  chains-dropped pipe-mode case now models perf 4.4 exactly — chains
+  through a file, none through a pipe — since the call-graph probe no
+  longer accepts chainless output.
+
 ## [0.11.0] — 2026-09-13
 
 First hands-on validation on **big-endian** hardware — a big-endian ARMv7

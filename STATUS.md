@@ -4,7 +4,49 @@ Cross-session working state. Update at the start and end of every working
 session. Release history lives in [CHANGELOG.md](CHANGELOG.md); this file
 is what is *currently true* and what is *left to do*.
 
-## Current phase — 0.11.0 released
+## Current phase — the stabilization pass toward 0.12.0
+
+Started 2026-09-14 on branch `stabilize-0.12.0`, from the plan at
+`~/.claude/plans/understand-this-project-and-deep-fox.md` and the agent review
+in the gitignored `AGENT_FINDINGS.md` (38 findings, A-01..A-38, all
+re-verified against the code before any of them was touched). Order of work:
+agent → transport → server → UI → docs, hardware, release. No new features;
+the four findings that need a wire change (A-18, A-25, A-28, A-31) are
+deferred. Decisions taken with the user: one sampling event by default
+(UI-side), musl for every release asset, both SSH beds plus a checklist for
+the big-endian target, and a 0.12.0 release at the end.
+
+- [x] **Phase 0 — baseline.** master fast-forwarded to PR #4's merge; the
+      gate was green (361 pytest, 24 vitest, 10 Playwright, typecheck, ruff,
+      mypy, version, OpenAPI drift, three cross builds with `soft-float ABI,
+      BE8` on armeb). `tests/test_parser_compat.py` — two tests with no
+      assertion, hidden by a warning filter naming a deleted file — removed;
+      the `core` fixture is defined once.
+- [x] **Phase 1 — agent correctness (sixth unfreeze, no wire change).**
+      A-01 (size flush), A-02 (stat coverage), A-03 (call-graph probe), A-04
+      (nice in rounds), A-05 (monotonic), A-06 (LC_ALL=C + parser), A-08
+      (bounded reaping, process groups), A-09 (send timeouts), A-10
+      (close-on-exec), A-11 (frame cap, bounded queue), A-13 (atomics), A-14
+      (ids, validation, scoped args, bounded writer), A-26 (writev,
+      TCP_NODELAY), A-37 (send helpers), A-38 (leftovers), plus A-21's
+      logging and A-22's buffers because the files were open. Found and
+      fixed on the way, not in the findings: a child forked from the command
+      thread ran the agent's SIGTERM handler before exec and shut down the
+      session socket — the protocol suite caught it as "agent disconnected"
+      right after `stop`. **58 protocol tests** (was 43 collected), 385
+      pytest in all. Cross builds green on all three local toolchains.
+- [ ] Phase 2 — agent responsiveness (A-07, A-12, A-16, A-19, A-20, A-23,
+      A-24, A-36).
+- [ ] Phase 3 — build, update, CI hardening (A-30, A-32, A-33, A-34).
+- [ ] Phase 4 — transport (server side of the socket).
+- [ ] Phase 5 — server.
+- [ ] Phase 6 — UI.
+- [ ] Phase 7 — docs, hardware pass, 0.12.0.
+
+**Not yet run on hardware.** Everything in Phase 1 is proven against the
+shim only; the hardware pass is Phase 7.
+
+## Previous phase — 0.11.0 released
 
 **0.11.0 is released** (2026-09-13): tag `v0.11.0`, a GitHub release with all 21
 assets, and PyPI. It carries the big-endian pass, server-side naming of frames

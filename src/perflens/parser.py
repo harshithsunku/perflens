@@ -429,10 +429,58 @@ def build_flamegraph_data(samples):
     return truncate_flamegraph_depth(root)
 
 
+# Thousands separators perf stat may print. The agent runs perf with
+# LC_ALL=C, but older agents did not, and `--big-num` groups digits with
+# whatever the device's locale uses: ',' (C), '.' (de_DE), a space or a
+# narrow no-break space (fr_FR), an apostrophe (de_CH).
+_GROUPING = ",.'\u202f\u00a0 "
+
+# An integer counter with grouping: digit groups of three after the first.
+_GROUPED_INT_RE = re.compile(r'^\d{1,3}(?:[,.\'\u202f\u00a0 ]\d{3})*$')
+# A decimal with grouping: the last '.' or ',' is the decimal point when it
+# is not followed by exactly three digits and another separator.
+_GROUPED_FLOAT_RE = re.compile(
+    r'^\d{1,3}(?:[,.\'\u202f\u00a0 ]\d{3})*(?:[.,]\d+)?$')
+
+
+def _parse_grouped_number(token, want_float):
+    """'9,310,933,573' -> 9310933573; '1.234.567' -> 1234567;
+    '2,950.76' -> 2950.76; '2.950,76' -> 2950.76. Raises ValueError when the
+    token is not a number under any grouping convention."""
+    if want_float:
+        if not _GROUPED_FLOAT_RE.match(token):
+            raise ValueError(token)
+        # The decimal point is a trailing '.' or ',' group that is not a
+        # thousands group: fewer or more than three digits, or the only
+        # separator kind when groups are ambiguous ('2,950.76' -> '.').
+        last_sep = max(token.rfind('.'), token.rfind(','))
+        if last_sep > 0 and len(token) - last_sep - 1 != 3:
+            integer, frac = token[:last_sep], token[last_sep + 1:]
+        elif last_sep > 0 and (token[last_sep] == '.' and ',' in token
+                               or token[last_sep] == ',' and '.' in token):
+            integer, frac = token[:last_sep], token[last_sep + 1:]
+        else:
+            integer, frac = token, ''
+        digits = ''.join(ch for ch in integer if ch.isdigit())
+        return float(digits + ('.' + frac if frac else ''))
+    if not _GROUPED_INT_RE.match(token):
+        raise ValueError(token)
+    return int(''.join(ch for ch in token if ch.isdigit()))
+
+
+_STAT_MSEC_RE = re.compile(r'^\s*([\d,.\'\u202f\u00a0 ]*\d)\s+msec\s+(\S+)')
+_STAT_COUNT_RE = re.compile(r'^\s*([\d,.\'\u202f\u00a0 ]*\d)\s+(\S+)')
+_STAT_ELAPSED_RE = re.compile(r'^\s*([\d,.]+)\s+seconds\s+time\s+elapsed')
+
+
 def parse_perf_stat(text):
     """Parse perf stat output into structured metrics.
 
     Returns dict: {'metric_name': {'value': int|float, 'comment': str}}
+
+    Forgiving about digit grouping (see _GROUPING) and about anything it
+    cannot read: a malformed line is skipped, never raised, because this
+    runs on the agent's receive thread where an exception ends the session.
     """
     metrics = {}
     for line in text.strip().split('\n'):
@@ -445,23 +493,10 @@ def parse_perf_stat(text):
 
         # Float with msec unit (task-clock on some systems):
         #   "2,950.76 msec task-clock  # 0.983 CPUs utilized"
-        m = re.match(r'^\s*([\d,.]+)\s+msec\s+(\S+)', line)
+        m = _STAT_MSEC_RE.match(line)
         if m:
             try:
-                value = float(m.group(1).replace(',', ''))
-                name = m.group(2).split(':')[0]
-                comment = _extract_stat_comment(line)
-                _accumulate_stat(metrics, name, value, comment)
-            except ValueError:
-                pass
-            continue
-
-        # Integer counter:
-        #   "9,310,933,573      cycles:u  # 3.155 GHz  (85.56%)"
-        m = re.match(r'^\s*([\d,]+)\s+(\S+)', line)
-        if m:
-            try:
-                value = int(m.group(1).replace(',', ''))
+                value = _parse_grouped_number(m.group(1).strip(), True)
                 name = m.group(2).split(':')[0]
                 comment = _extract_stat_comment(line)
                 _accumulate_stat(metrics, name, value, comment)
@@ -470,10 +505,27 @@ def parse_perf_stat(text):
             continue
 
         # Time elapsed: "3.002210655 seconds time elapsed"
-        m = re.match(r'^\s*([\d.]+)\s+seconds\s+time\s+elapsed', line)
+        m = _STAT_ELAPSED_RE.match(line)
         if m:
-            _accumulate_stat(metrics, 'time_elapsed',
-                             float(m.group(1)), 'seconds')
+            try:
+                _accumulate_stat(metrics, 'time_elapsed',
+                                 float(m.group(1).replace(',', '.')), 'seconds')
+            except ValueError:
+                pass
+            continue
+
+        # Integer counter:
+        #   "9,310,933,573      cycles:u  # 3.155 GHz  (85.56%)"
+        m = _STAT_COUNT_RE.match(line)
+        if m:
+            try:
+                value = _parse_grouped_number(m.group(1).strip(), False)
+                name = m.group(2).split(':')[0]
+                comment = _extract_stat_comment(line)
+                _accumulate_stat(metrics, name, value, comment)
+            except ValueError:
+                pass
+            continue
 
     _compute_derived_stats(metrics)
     return metrics

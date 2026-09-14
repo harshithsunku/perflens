@@ -20,3 +20,5 @@ src/perflens/ui/
 frontend/test-results/
 frontend/playwright-report/
 *.tsbuildinfo
+# Local review notes, not for the repo
+/AGENT_FINDINGS.md

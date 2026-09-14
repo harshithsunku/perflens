@@ -6,18 +6,30 @@
 
 /* --------------------------------------------------------------------------
  * Command queue (thread-safe, condition variable based)
+ *
+ * Waits are on CLOCK_MONOTONIC. A condition variable initialised with
+ * default attributes times out against CLOCK_REALTIME, so an NTP step --
+ * routine on boards that boot in 1970 and jump when the network comes up --
+ * either fired the auth deadline at once or held the loop until the wall
+ * clock caught up.
  * -------------------------------------------------------------------------- */
 
 static void cmdq_init(struct cmd_queue *q)
 {
     q->head = NULL;
     q->tail = NULL;
+    q->len = 0;
     pthread_mutex_init(&q->lock, NULL);
-    pthread_cond_init(&q->cond, NULL);
+    pthread_condattr_t attr;
+    pthread_condattr_init(&attr);
+    pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+    pthread_cond_init(&q->cond, &attr);
+    pthread_condattr_destroy(&attr);
 }
 
-static void cmdq_destroy(struct cmd_queue *q)
+static void cmdq_drain(struct cmd_queue *q)
 {
+    pthread_mutex_lock(&q->lock);
     struct cmd_entry *e = q->head;
     while (e) {
         struct cmd_entry *next = e->next;
@@ -25,27 +37,43 @@ static void cmdq_destroy(struct cmd_queue *q)
         free(e);
         e = next;
     }
+    q->head = NULL;
+    q->tail = NULL;
+    q->len = 0;
+    pthread_mutex_unlock(&q->lock);
+}
+
+static void cmdq_destroy(struct cmd_queue *q)
+{
+    cmdq_drain(q);
     pthread_mutex_destroy(&q->lock);
     pthread_cond_destroy(&q->cond);
 }
 
-void cmdq_push(struct cmd_queue *q, const char *json)
+int cmdq_push(struct cmd_queue *q, char *json)
 {
     struct cmd_entry *e = malloc(sizeof(*e));
-    if (!e) return;
-    e->json = strdup(json);
-    if (!e->json) { free(e); return; }
+    if (!e) { free(json); return -1; }
+    e->json = json;
     e->next = NULL;
 
     pthread_mutex_lock(&q->lock);
+    if (q->len >= MAX_CMD_QUEUE) {
+        pthread_mutex_unlock(&q->lock);
+        free(json);
+        free(e);
+        return -1;
+    }
     if (q->tail) {
         q->tail->next = e;
     } else {
         q->head = e;
     }
     q->tail = e;
+    q->len++;
     pthread_cond_signal(&q->cond);
     pthread_mutex_unlock(&q->lock);
+    return 0;
 }
 
 /* Pop with timeout (ms). Returns JSON string (caller frees) or NULL. */
@@ -55,7 +83,7 @@ static char *cmdq_pop(struct cmd_queue *q, int timeout_ms)
 
     while (!q->head) {
         struct timespec ts;
-        clock_gettime(CLOCK_REALTIME, &ts);
+        clock_gettime(CLOCK_MONOTONIC, &ts);
         ts.tv_sec += timeout_ms / 1000;
         ts.tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
         if (ts.tv_nsec >= 1000000000L) {
@@ -73,27 +101,13 @@ static char *cmdq_pop(struct cmd_queue *q, int timeout_ms)
     struct cmd_entry *e = q->head;
     q->head = e->next;
     if (!q->head) q->tail = NULL;
+    q->len--;
 
     pthread_mutex_unlock(&q->lock);
 
     char *json = e->json;
     free(e);
     return json;
-}
-
-static void cmdq_drain(struct cmd_queue *q)
-{
-    pthread_mutex_lock(&q->lock);
-    struct cmd_entry *e = q->head;
-    while (e) {
-        struct cmd_entry *next = e->next;
-        free(e->json);
-        free(e);
-        e = next;
-    }
-    q->head = NULL;
-    q->tail = NULL;
-    pthread_mutex_unlock(&q->lock);
 }
 
 /* --------------------------------------------------------------------------
@@ -107,6 +121,7 @@ static void agent_state_init(struct agent_state *a)
     a->state = AGENT_IDLE;
     pthread_mutex_init(&a->state_lock, NULL);
     a->pid = -1;
+    a->pid_start = 0;
     a->frequency = DEFAULT_FREQ;
     a->duration = DEFAULT_DURATION;
     a->token = NULL;
@@ -147,12 +162,6 @@ int agent_send_response(struct agent_state *a, const char *json)
     return agent_send_frame(a, json, strlen(json), FLAG_CMD_RESPONSE);
 }
 
-int agent_send_data(struct agent_state *a, const void *data,
-                           size_t len, uint8_t flag)
-{
-    return agent_send_frame(a, data, len, flag);
-}
-
 int agent_send_metrics(struct agent_state *a, const char *json,
                        size_t len)
 {
@@ -186,12 +195,18 @@ static void *recv_thread_fn(void *arg)
         }
 
         if (flag == FLAG_CMD_REQUEST) {
-            cmdq_push(&a->cmdq, payload);
+            /* The queue owns the payload now. A peer that fills it faster
+             * than commands are answered is not a server; drop it. */
+            if (cmdq_push(&a->cmdq, payload) < 0) {
+                agent_warn("Command queue full (%d pending) — dropping connection",
+                           MAX_CMD_QUEUE);
+                a->session_done = 1;
+                break;
+            }
         } else {
             agent_log("Unexpected flag %d from server", flag);
+            free(payload);
         }
-
-        free(payload);
     }
 
     return NULL;
@@ -214,6 +229,13 @@ void start_metrics_thread(struct agent_state *a)
         return;
     if (pthread_create(&a->metrics_thread, NULL, metrics_thread_fn, a) == 0)
         a->metrics_thread_active = 1;
+}
+
+static double monotonic_now(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
 }
 
 /* Returns 1 if the session authenticated, 0 otherwise. run_connect uses this
@@ -239,8 +261,10 @@ static int run_interactive(struct agent_state *a)
      * The hello deliberately carries no token. It goes to whoever completed
      * the TCP handshake, before that peer has proved anything, so anything in
      * it is public. The secret travels the other way, in the auth command. */
-    char esc_pv[256];
+    char esc_pv[256], esc_arch[256], esc_kernel[256];
     json_escape(esc_pv, sizeof(esc_pv), a->platform.perf_version);
+    json_escape(esc_arch, sizeof(esc_arch), a->platform.arch);
+    json_escape(esc_kernel, sizeof(esc_kernel), a->platform.kernel);
 
     char hello[1536];
     snprintf(hello, sizeof(hello),
@@ -248,8 +272,7 @@ static int run_interactive(struct agent_state *a)
         "\"agent_version\":\"%s\",\"auth\":\"token\","
         "\"platform\":{\"arch\":\"%s\",\"kernel\":\"%s\","
         "\"perf_version\":\"%s\",\"perf_event_paranoid\":%d}}",
-        AGENT_VERSION,
-        a->platform.arch, a->platform.kernel,
+        AGENT_VERSION, esc_arch, esc_kernel,
         esc_pv, a->platform.perf_event_paranoid);
 
     if (agent_send_response(a, hello) < 0) {
@@ -279,10 +302,10 @@ static int run_interactive(struct agent_state *a)
      * introducing a blocking socket read, so no socket timeout has to change.
      * Without it an unauthenticated peer could hold the single --listen slot
      * open indefinitely. */
-    time_t auth_deadline = a->authed ? 0 : time(NULL) + AUTH_TIMEOUT_SECS;
+    double auth_deadline = a->authed ? 0.0 : monotonic_now() + AUTH_TIMEOUT_SECS;
 
     while (!g_shutdown && !a->session_done) {
-        if (auth_deadline && !a->authed && time(NULL) > auth_deadline) {
+        if (auth_deadline > 0.0 && !a->authed && monotonic_now() > auth_deadline) {
             agent_log("No valid pairing code within %ds — closing session.",
                       AUTH_TIMEOUT_SECS);
             agent_log("  (A server older than 0.10.0 cannot authenticate; "
@@ -340,32 +363,36 @@ static int run_interactive(struct agent_state *a)
 }
 
 /* --------------------------------------------------------------------------
- * Local IP helper (for listen mode display)
+ * Local addresses (for the listen-mode banner)
+ *
+ * Every non-loopback IPv4 address, from the interfaces themselves. The
+ * previous guess -- the source address of a UDP socket aimed at 8.8.8.8 --
+ * printed 127.0.0.1 on any network without a default route, which is
+ * exactly the lab bench this runs on.
  * -------------------------------------------------------------------------- */
 
-static void get_local_ip(char *buf, size_t buflen)
+static void log_connect_hints(int port)
 {
-    int s = socket(AF_INET, SOCK_DGRAM, 0);
-    if (s < 0) { snprintf(buf, buflen, "127.0.0.1"); return; }
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(80);
-    inet_pton(AF_INET, "8.8.8.8", &addr.sin_addr);
-
-    if (connect(s, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        close(s);
-        snprintf(buf, buflen, "127.0.0.1");
+    struct ifaddrs *ifa = NULL;
+    if (getifaddrs(&ifa) != 0) {
+        agent_log("  Connect from server: <this device's address>:%d", port);
         return;
     }
-
-    struct sockaddr_in local;
-    socklen_t len = sizeof(local);
-    getsockname(s, (struct sockaddr *)&local, &len);
-    close(s);
-
-    inet_ntop(AF_INET, &local.sin_addr, buf, (socklen_t)buflen);
+    int found = 0;
+    for (struct ifaddrs *p = ifa; p; p = p->ifa_next) {
+        if (!p->ifa_addr || p->ifa_addr->sa_family != AF_INET) continue;
+        struct sockaddr_in *sin = (struct sockaddr_in *)p->ifa_addr;
+        if (ntohl(sin->sin_addr.s_addr) >> 24 == 127) continue;
+        char ip[INET_ADDRSTRLEN];
+        if (!inet_ntop(AF_INET, &sin->sin_addr, ip, sizeof(ip))) continue;
+        agent_log("  Connect from server: %s:%d (%s)", ip, port,
+                  p->ifa_name ? p->ifa_name : "?");
+        found++;
+    }
+    freeifaddrs(ifa);
+    if (!found)
+        agent_log("  Connect from server: <this device's address>:%d "
+                  "(no non-loopback IPv4 address found)", port);
 }
 
 /* --------------------------------------------------------------------------
@@ -388,7 +415,10 @@ static void run_listen(struct agent_state *a, const char *bind_addr, int port)
         return;
     }
 
-    int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    /* Close-on-exec everywhere: a perf child that inherited this socket kept
+     * the port bound after the agent was killed, so a restart failed with
+     * EADDRINUSE until the last perf exited. */
+    int listen_fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (listen_fd < 0) {
         agent_log("socket() failed: %s", strerror(errno));
         return;
@@ -413,14 +443,11 @@ static void run_listen(struct agent_state *a, const char *bind_addr, int port)
     agent_log("Waiting for server connection...");
 
     /* When bound to a specific address, that address is the answer. Only
-     * guess via an outbound route when listening on every interface. */
-    if (strcmp(bind_addr, "0.0.0.0") == 0) {
-        char local_ip[INET_ADDRSTRLEN];
-        get_local_ip(local_ip, sizeof(local_ip));
-        agent_log("  Connect from server: %s:%d", local_ip, port);
-    } else {
+     * list the interfaces when listening on every one of them. */
+    if (strcmp(bind_addr, "0.0.0.0") == 0)
+        log_connect_hints(port);
+    else
         agent_log("  Connect from server: %s:%d", bind_addr, port);
-    }
 
     if (a->token_is_generated) {
         agent_log("  Pairing code: %s", a->token);
@@ -442,8 +469,8 @@ static void run_listen(struct agent_state *a, const char *bind_addr, int port)
 
         struct sockaddr_in client_addr;
         socklen_t client_len = sizeof(client_addr);
-        int conn_fd = accept(listen_fd, (struct sockaddr *)&client_addr,
-                             &client_len);
+        int conn_fd = accept4(listen_fd, (struct sockaddr *)&client_addr,
+                              &client_len, SOCK_CLOEXEC);
         if (conn_fd < 0) {
             if (errno == EINTR) continue;
             agent_warn("accept() failed: %s", strerror(errno));
@@ -456,7 +483,7 @@ static void run_listen(struct agent_state *a, const char *bind_addr, int port)
         agent_log("Server connected from %s:%d",
                   client_ip, ntohs(client_addr.sin_port));
 
-        tcp_enable_keepalive(conn_fd);
+        tcp_session_opts(conn_fd);
         a->sock_fd = conn_fd;
         g_agent_sock_fd = conn_fd;
         run_interactive(a);
@@ -503,7 +530,7 @@ static void run_connect(struct agent_state *a, const char *host, int port)
                 agent_log("Cannot resolve %s (%s), retrying in %.0fs...",
                           host, gai_strerror(gai), delay);
             } else {
-                sock = socket(res->ai_family, res->ai_socktype,
+                sock = socket(res->ai_family, res->ai_socktype | SOCK_CLOEXEC,
                               res->ai_protocol);
                 if (sock < 0) {
                     /* Transient (fd exhaustion etc.) — retry, don't exit */
@@ -549,13 +576,8 @@ static void run_connect(struct agent_state *a, const char *host, int port)
 
         if (sock < 0) continue;
 
-        /* Clear connect timeout for recv/send during session */
-        struct timeval no_tv;
-        no_tv.tv_sec = 0;
-        no_tv.tv_usec = 0;
-        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &no_tv, sizeof(no_tv));
-
-        tcp_enable_keepalive(sock);
+        /* Session bounds replace the connect timeout */
+        tcp_session_opts(sock);
         a->sock_fd = sock;
         g_agent_sock_fd = sock;
 
@@ -624,7 +646,10 @@ static void print_usage(const char *prog)
         "  --update          Self-update from the latest GitHub release and exit\n"
         "                    (override base URL with PERFLENS_UPDATE_URL)\n"
         "  --version         Print version and exit\n"
-        "  --help            Show this help message\n",
+        "  --help            Show this help message\n"
+        "\n"
+        "Environment: PERFLENS_LOG=debug logs every chunk and round;\n"
+        "             TMPDIR relocates the perf.data temp files.\n",
         prog, prog, prog, AGENT_VERSION,
         DEFAULT_PORT, DEFAULT_FREQ, DEFAULT_DURATION);
 }
@@ -693,6 +718,9 @@ int main(int argc, char *argv[])
     }
 
     if (rounds < 1) rounds = 1;
+    if (frequency < 1) frequency = DEFAULT_FREQ;
+    if (duration < 1) duration = DEFAULT_DURATION;
+    if (duration > MAX_DURATION) duration = MAX_DURATION;
 
     install_signal_handlers();
 
@@ -713,6 +741,8 @@ int main(int argc, char *argv[])
             return 1;
         }
     }
+
+    sweep_stale_tmpfiles();
 
     /* --- Headless mode: --output --- */
     if (output) {
@@ -767,7 +797,7 @@ int main(int argc, char *argv[])
             uint8_t flag = FLAG_DATA_RAW;
             char *data = collect_one_round(&caps, NULL, pid, frequency,
                                            duration, 0,
-                                           &out_len, &raw_len, &flag);
+                                           &out_len, &raw_len, &flag, NULL);
             if (data && out_len > 0) {
                 fwrite(data, 1, out_len, f);
                 fflush(f);

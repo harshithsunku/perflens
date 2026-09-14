@@ -140,15 +140,21 @@ void detect_platform(struct platform_info *info)
  * Capability probing
  * -------------------------------------------------------------------------- */
 
+/* A perf.data path in the agent's temp dir, or -1. */
+static int make_probe_file(char *tmpl, size_t cap)
+{
+    snprintf(tmpl, cap, "%s/perflens-probe-XXXXXX", agent_tmpdir());
+    int fd = mkstemp(tmpl);
+    if (fd < 0) return -1;
+    close(fd);
+    return 0;
+}
+
 static int event_works(const char *event, int pid)
 {
-    char pid_str[16], *argv[10];
+    char pid_str[16], *argv[MAX_CMD_ARGS];
     snprintf(pid_str, sizeof(pid_str), "%d", pid);
-
-    int i = 0;
-    argv[i++] = g_perf; argv[i++] = "stat"; argv[i++] = "-e"; argv[i++] = (char *)event;
-    argv[i++] = "-p"; argv[i++] = pid_str; argv[i++] = "--"; argv[i++] = "sleep";
-    argv[i++] = "1";  argv[i++] = NULL;
+    build_stat_argv(argv, MAX_CMD_ARGS, event, pid_str, "1");
 
     struct buf dummy, err_buf;
     buf_init(&dummy); buf_init(&err_buf);
@@ -167,96 +173,6 @@ static int event_works(const char *event, int pid)
     return 1;
 }
 
-static int callgraph_works(const char *method, int pid)
-{
-    char tmpfile[] = "/tmp/perflens-probe-XXXXXX.data";
-    /* mkstemp needs the template to end with XXXXXX, so fix up */
-    char tmpl[] = "/tmp/perflens-probe-XXXXXX";
-    int fd = mkstemp(tmpl);
-    if (fd < 0) return 0;
-    close(fd);
-    /* Rename with .data suffix for perf */
-    snprintf(tmpfile, sizeof(tmpfile), "%s", tmpl);
-
-    char pid_str[16], freq_str[8];
-    snprintf(pid_str, sizeof(pid_str), "%d", pid);
-    snprintf(freq_str, sizeof(freq_str), "99");
-
-    /* perf record */
-    char *argv_rec[] = {
-        g_perf, "record", "-e", "cycles", "-p", pid_str,
-        "--call-graph", (char *)method, "-F", freq_str, "-o", tmpfile,
-        "--", "sleep", "2", NULL
-    };
-    int rc = run_cmd(argv_rec, NULL, NULL, 15);
-    if (rc != 0) { unlink(tmpfile); return 0; }
-
-    /* perf script */
-    char *argv_script[] = { g_perf, "script", "-i", tmpfile, NULL };
-    struct buf out;
-    buf_init(&out);
-    rc = run_cmd(argv_script, &out, NULL, 15);
-    int result = (rc == 0 && out.len > 0);
-    buf_free(&out);
-    unlink(tmpfile);
-    return result;
-}
-
-/* Can this event actually drive `perf record`?
- *
- * event_works() probes with `perf stat`, and stat accepting an event does not
- * mean record will take it — that inference is what the hardcoded
- * STAT_ONLY_EVENTS list was papering over. Ask record directly, so the
- * advertised record set is measured rather than assumed. Costs one short
- * record per candidate that stat already accepted, and only for events not
- * already known to be stat-only. */
-static int event_records(const char *event, int pid)
-{
-    char tmpl[] = "/tmp/perflens-probe-XXXXXX";
-    int fd = mkstemp(tmpl);
-    if (fd < 0) return 0;
-    close(fd);
-
-    char pid_str[16];
-    snprintf(pid_str, sizeof(pid_str), "%d", pid);
-    char *argv[] = {
-        g_perf, "record", "-e", (char *)event, "-p", pid_str,
-        "-F", "99", "-o", tmpl, "--", "sleep", "1", NULL
-    };
-    int rc = run_cmd(argv, NULL, NULL, 15);
-    unlink(tmpl);
-    return rc == 0;
-}
-
-static int script_fields_work(int pid, const char *event)
-{
-    char tmpl[] = "/tmp/perflens-probe-XXXXXX";
-    int fd = mkstemp(tmpl);
-    if (fd < 0) return 0;
-    close(fd);
-
-    char pid_str[16];
-    snprintf(pid_str, sizeof(pid_str), "%d", pid);
-
-    char *argv_rec[] = {
-        g_perf, "record", "-e", (char *)event, "-p", pid_str,
-        "-F", "99", "-o", tmpl, "--", "sleep", "1", NULL
-    };
-    int rc = run_cmd(argv_rec, NULL, NULL, 15);
-    if (rc != 0) { unlink(tmpl); return 0; }
-
-    char *argv_script[] = {
-        g_perf, "script", "-F", SCRIPT_FIELDS, "-i", tmpl, NULL
-    };
-    struct buf out;
-    buf_init(&out);
-    rc = run_cmd(argv_script, &out, NULL, 15);
-    int result = (rc == 0 && out.len > 0);
-    buf_free(&out);
-    unlink(tmpl);
-    return result;
-}
-
 /* Does this perf script output actually carry call chains?
  *
  * Pipe mode can emit samples while silently dropping their stacks. Measured
@@ -273,8 +189,11 @@ static int script_fields_work(int pid, const char *event)
  * field list and the default output format -- and, unlike matching
  * "<event>:", for the PMU-qualified names a hybrid CPU prints
  * ("cpu_core/cycles/:"), which never contain "cycles:" and so turned
- * continuous mode off on every hybrid x86 machine. */
-static int callchains_present(const struct buf *out)
+ * continuous mode off on every hybrid x86 machine.
+ *
+ * The same test now decides the call-graph probe, which used to accept any
+ * non-empty output -- the trap this function was written to close. */
+int callchains_present(const struct buf *out)
 {
     if (!out->data) return 0;
 
@@ -293,37 +212,86 @@ static int callchains_present(const struct buf *out)
     return samples > 0 && frames > 0;
 }
 
+/* Record two seconds of `event` with `method`, then check that perf script
+ * prints stacks under the samples. Uses the first event the target can
+ * record -- it was `cycles` unconditionally, which on a PMU-less target
+ * only worked because that perf happened to fall back to cpu-clock itself. */
+static int callgraph_works(const char *method, const char *event, int pid)
+{
+    char tmpfile[PATH_MAX];
+    if (make_probe_file(tmpfile, sizeof(tmpfile)) < 0) return 0;
+
+    char pid_str[16], *argv_rec[MAX_CMD_ARGS], *argv_script[MAX_CMD_ARGS];
+    snprintf(pid_str, sizeof(pid_str), "%d", pid);
+    build_record_argv(argv_rec, MAX_CMD_ARGS, event, pid_str, "99",
+                      tmpfile, method, "2");
+    int rc = run_cmd(argv_rec, NULL, NULL, 15);
+    if (rc != 0) { unlink(tmpfile); return 0; }
+
+    build_script_argv(argv_script, MAX_CMD_ARGS, NULL, tmpfile);
+    struct buf out;
+    buf_init(&out);
+    rc = run_cmd(argv_script, &out, NULL, 15);
+    int result = (rc == 0 && callchains_present(&out));
+    buf_free(&out);
+    unlink(tmpfile);
+    return result;
+}
+
+/* Can this event actually drive `perf record`?
+ *
+ * event_works() probes with `perf stat`, and stat accepting an event does not
+ * mean record will take it — that inference is what the hardcoded
+ * STAT_ONLY_EVENTS list was papering over. Ask record directly, so the
+ * advertised record set is measured rather than assumed. Costs one short
+ * record per candidate that stat already accepted, and only for events not
+ * already known to be stat-only. */
+static int event_records(const char *event, int pid)
+{
+    char tmpl[PATH_MAX];
+    if (make_probe_file(tmpl, sizeof(tmpl)) < 0) return 0;
+
+    char pid_str[16], *argv[MAX_CMD_ARGS];
+    snprintf(pid_str, sizeof(pid_str), "%d", pid);
+    build_record_argv(argv, MAX_CMD_ARGS, event, pid_str, "99", tmpl,
+                      NULL, "1");
+    int rc = run_cmd(argv, NULL, NULL, 15);
+    unlink(tmpl);
+    return rc == 0;
+}
+
+static int script_fields_work(int pid, const char *event)
+{
+    char tmpl[PATH_MAX];
+    if (make_probe_file(tmpl, sizeof(tmpl)) < 0) return 0;
+
+    char pid_str[16], *argv_rec[MAX_CMD_ARGS], *argv_script[MAX_CMD_ARGS];
+    snprintf(pid_str, sizeof(pid_str), "%d", pid);
+    build_record_argv(argv_rec, MAX_CMD_ARGS, event, pid_str, "99", tmpl,
+                      NULL, "1");
+    int rc = run_cmd(argv_rec, NULL, NULL, 15);
+    if (rc != 0) { unlink(tmpl); return 0; }
+
+    build_script_argv(argv_script, MAX_CMD_ARGS, SCRIPT_FIELDS, tmpl);
+    struct buf out;
+    buf_init(&out);
+    rc = run_cmd(argv_script, &out, NULL, 15);
+    int result = (rc == 0 && out.len > 0);
+    buf_free(&out);
+    unlink(tmpl);
+    return result;
+}
+
 /* Probe continuous pipe mode with the exact argv shapes collection will
  * use. Pipe mode is old but the least uniform corner of perf across the
  * kernel range we support — it must be probed, never assumed. */
 static int pipe_mode_works(const struct capabilities *caps, int pid)
 {
-    char pid_str[16];
+    char pid_str[16], *argv_rec[MAX_CMD_ARGS], *argv_script[MAX_CMD_ARGS];
     snprintf(pid_str, sizeof(pid_str), "%d", pid);
-
-    char *argv_rec[16];
-    int ri = 0;
-    argv_rec[ri++] = g_perf; argv_rec[ri++] = "record";
-    argv_rec[ri++] = "-e"; argv_rec[ri++] = caps->record_events[0];
-    argv_rec[ri++] = "-p"; argv_rec[ri++] = pid_str;
-    argv_rec[ri++] = "-F"; argv_rec[ri++] = "99";
-    argv_rec[ri++] = "-o"; argv_rec[ri++] = "-";
-    if (caps->callgraph[0]) {
-        argv_rec[ri++] = "--call-graph";
-        argv_rec[ri++] = (char *)caps->callgraph;
-    }
-    argv_rec[ri++] = "--"; argv_rec[ri++] = "sleep"; argv_rec[ri++] = "2";
-    argv_rec[ri] = NULL;
-
-    char *argv_script[8];
-    int sci = 0;
-    argv_script[sci++] = g_perf; argv_script[sci++] = "script";
-    if (caps->script_fields[0]) {
-        argv_script[sci++] = "-F";
-        argv_script[sci++] = (char *)caps->script_fields;
-    }
-    argv_script[sci++] = "-i"; argv_script[sci++] = "-";
-    argv_script[sci] = NULL;
+    build_record_argv(argv_rec, MAX_CMD_ARGS, caps->record_events[0], pid_str,
+                      "99", "-", caps->callgraph, "2");
+    build_script_argv(argv_script, MAX_CMD_ARGS, caps->script_fields, "-");
 
     struct buf out;
     buf_init(&out);
@@ -390,8 +358,12 @@ void probe_capabilities(int pid, struct capabilities *caps)
     for (int i = 0; i < caps->stat_only_event_count; i++)
         caps->all_events[caps->all_event_count++] = caps->stat_only_events[i];
 
-    if (caps->record_event_count == 0)
+    if (caps->record_event_count == 0) {
         agent_warn("No record events available. Profiling may not produce useful data.");
+        /* Nothing can be recorded, so there is nothing to probe a call-graph
+         * method or pipe mode with: each attempt would just time out. */
+        return;
+    }
 
     /* Probe call-graph methods */
     agent_log("Probing call-graph methods...");
@@ -399,7 +371,7 @@ void probe_capabilities(int pid, struct capabilities *caps)
     for (int i = 0; CALLGRAPH_METHODS[i]; i++) {
         if (g_shutdown) return;
         agent_log("  Trying --call-graph %s...", CALLGRAPH_METHODS[i]);
-        if (callgraph_works(CALLGRAPH_METHODS[i], pid)) {
+        if (callgraph_works(CALLGRAPH_METHODS[i], caps->record_events[0], pid)) {
             snprintf(caps->callgraph, sizeof(caps->callgraph), "%s",
                      CALLGRAPH_METHODS[i]);
             agent_log("  Using call-graph method: %s", caps->callgraph);
@@ -413,20 +385,18 @@ void probe_capabilities(int pid, struct capabilities *caps)
 
     /* Probe perf script -F support */
     caps->script_fields[0] = '\0';
-    if (caps->record_event_count > 0) {
-        agent_log("Probing perf script -F support...");
-        if (script_fields_work(pid, caps->record_events[0])) {
-            snprintf(caps->script_fields, sizeof(caps->script_fields),
-                     "%s", SCRIPT_FIELDS);
-            agent_log("  perf script -F supported, using: %s", caps->script_fields);
-        } else {
-            agent_log("  perf script -F not supported, using default output format");
-        }
+    agent_log("Probing perf script -F support...");
+    if (script_fields_work(pid, caps->record_events[0])) {
+        snprintf(caps->script_fields, sizeof(caps->script_fields),
+                 "%s", SCRIPT_FIELDS);
+        agent_log("  perf script -F supported, using: %s", caps->script_fields);
+    } else {
+        agent_log("  perf script -F not supported, using default output format");
     }
 
     /* Probe continuous pipe mode (record -o - | script -i -) */
     caps->pipe_mode = 0;
-    if (caps->record_event_count > 0 && !g_shutdown) {
+    if (!g_shutdown) {
         agent_log("Probing pipe mode (continuous collection)...");
         if (pipe_mode_works(caps, pid)) {
             caps->pipe_mode = 1;
@@ -437,27 +407,17 @@ void probe_capabilities(int pid, struct capabilities *caps)
     }
 
     /* Log summary */
-    char rec_list[512] = "(none)";
-    if (caps->record_event_count > 0) {
-        rec_list[0] = '\0';
-        for (int i = 0; i < caps->record_event_count; i++) {
-            if (i > 0) strncat(rec_list, ",", sizeof(rec_list) - strlen(rec_list) - 1);
-            strncat(rec_list, caps->record_events[i],
-                    sizeof(rec_list) - strlen(rec_list) - 1);
-        }
-    }
-    agent_log("Record events: %s", rec_list);
-
-    char stat_list[512] = "(none)";
-    if (caps->stat_only_event_count > 0) {
-        stat_list[0] = '\0';
-        for (int i = 0; i < caps->stat_only_event_count; i++) {
-            if (i > 0) strncat(stat_list, ",", sizeof(stat_list) - strlen(stat_list) - 1);
-            strncat(stat_list, caps->stat_only_events[i],
-                    sizeof(stat_list) - strlen(stat_list) - 1);
-        }
-    }
-    agent_log("Stat-only events: %s", stat_list);
+    char list[512];
+    agent_log("Record events: %s",
+              caps->record_event_count
+                  ? join_events(list, sizeof(list), caps->record_events,
+                                caps->record_event_count, NULL)
+                  : "(none)");
+    agent_log("Stat-only events: %s",
+              caps->stat_only_event_count
+                  ? join_events(list, sizeof(list), caps->stat_only_events,
+                                caps->stat_only_event_count, NULL)
+                  : "(none)");
 }
 
 void free_capabilities(struct capabilities *caps)
@@ -468,4 +428,3 @@ void free_capabilities(struct capabilities *caps)
         free(caps->stat_only_events[i]);
     /* all_events are aliases — don't double-free */
 }
-
