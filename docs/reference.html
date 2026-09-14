@@ -97,7 +97,7 @@
                 <tr><td><code>--pid PID</code></td><td>&mdash;</td><td>Process to profile (required for <code>--output</code>; set via UI wizard in daemon modes).</td></tr>
                 <tr><td><code>--port PORT</code></td><td><code>9999</code></td><td>TCP port (listen or connect).</td></tr>
                 <tr><td><code>--frequency HZ</code></td><td><code>99</code></td><td><code>perf record -F</code> sampling frequency.</td></tr>
-                <tr><td><code>--duration SECS</code></td><td><code>8</code></td><td>Length of each collection round.</td></tr>
+                <tr><td><code>--duration SECS</code></td><td><code>8</code></td><td>Chunk interval: how often collected data is sent in continuous mode, or the length of each round in the fallback round mode and <code>--output</code>.</td></tr>
                 <tr><td><code>--rounds N</code></td><td><code>1</code></td><td>Number of rounds (<code>--output</code> mode).</td></tr>
                 <tr><td><code>--bind ADDR</code></td><td><code>0.0.0.0</code></td><td>Address to listen on in <code>--listen</code> mode.</td></tr>
                 <tr><td><code>--token SECRET</code></td><td>&mdash;</td><td>Pairing code the server must present before any command runs (or <code>PERFLENS_TOKEN</code>). Generated and written to the agent log in <code>--listen</code> mode when not supplied. Never sent over the wire.</td></tr>
@@ -297,7 +297,7 @@ claude mcp add perflens -- perflens mcp</code></pre>
         </p>
 
         <h3 id="slow-start">Call-graph probing hangs / slow startup</h3>
-        <p>Capability probing tests <code>fp</code>, <code>dwarf</code>, then <code>lbr</code> in sequence &mdash; this adds ~10&ndash;20 s on a typical target (longer on slow or hybrid-CPU hardware) on first connection. One-time cost; subsequent rounds skip probing.</p>
+        <p>Capability probing checks events in one batched <code>perf stat</code> and one <code>perf record</code>, then tries <code>fp</code>, <code>dwarf</code> and <code>lbr</code> call graphs and the pipe mode &mdash; about 11&ndash;13&nbsp;s on the devices measured for 0.12.0, longer on slow single-core targets. It runs once per connection, and the agent answers <code>status</code> (reporting <code>probing</code>) and <code>stop</code> while it runs; the agent log ends it with <code>Probe finished in N s</code>. Switching process only re-checks the new pid.</p>
 
         <h2 id="layout">Project layout</h2>
 <pre><code>perflens/

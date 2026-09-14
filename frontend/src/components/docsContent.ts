@@ -95,7 +95,7 @@ perflens serve --source-dir /path/to/src --binary /path/to/binary</code></pre>
       <tr><td><code>--pid PID</code></td><td>&mdash;</td><td>PID to profile (required for <code>--output</code>; set via wizard in daemon modes)</td></tr>
       <tr><td><code>--port PORT</code></td><td>9999</td><td>TCP port (listen or connect)</td></tr>
       <tr><td><code>--frequency HZ</code></td><td>99</td><td>perf record sampling frequency</td></tr>
-      <tr><td><code>--duration SECS</code></td><td>8</td><td>Length of each collection round</td></tr>
+      <tr><td><code>--duration SECS</code></td><td>8</td><td>Chunk interval in continuous mode; the round length in the fallback round mode and --output</td></tr>
       <tr><td><code>--rounds N</code></td><td>1</td><td>Number of rounds (<code>--output</code> mode only)</td></tr>
       <tr><td><code>--bind ADDR</code></td><td><code>0.0.0.0</code></td><td>Listen address for <code>--listen</code> mode</td></tr>
       <tr><td><code>--token SECRET</code></td><td>&mdash;</td><td>Pairing code the server must present. Generated and logged in <code>--listen</code> mode if not given; never sent over the wire</td></tr>
@@ -235,8 +235,8 @@ perflens serve --addr2line /opt/toolchain/bin/arm-linux-gnueabihf-addr2line \\
     <p>Some containers strip perf capabilities. System-wide <code>perf record -a</code> usually works as a fallback.</p>
   </div>
   <div class="docs-trouble">
-    <h4>Slow startup (6&ndash;12s)</h4>
-    <p>Call-graph probing tests <code>fp</code>, <code>dwarf</code>, then <code>lbr</code> sequentially. Normal on first connection.</p>
+    <h4>Slow startup</h4>
+    <p>The capability probe runs once per connection: one batched <code>perf stat</code>, one <code>perf record</code>, the call-graph modes and the pipe mode. It took about 11&ndash;13&nbsp;s on the devices measured for 0.12.0, longer on slow single-core targets. The agent answers <code>status</code> and <code>stop</code> meanwhile, and the control bar shows <em>Probing</em> with a counter. Switching process only re-checks the new pid.</p>
   </div>
   <div class="docs-trouble">
     <h4>Cross-compiled binary: wrong symbols</h4>
@@ -272,7 +272,7 @@ perflens serve --addr2line /opt/toolchain/bin/arm-linux-gnueabihf-addr2line \\
       <tr><td>PAYLOAD</td><td>LEN bytes</td><td>Perf script text, JSON, or compressed data</td></tr>
     </tbody>
   </table>
-  <p>Zstd compression ratio: typically <strong>20&ndash;40&times;</strong> on real perf script output.</p>
+  <p>Zstd compression ratio: typically <strong>about 20&times;</strong> on real perf script output.</p>
 </section>
 <section class="docs-section">
   <h3>HTTP API</h3>

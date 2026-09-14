@@ -102,7 +102,7 @@
       <rect x="0" y="-16" width="4" height="20" rx="2" fill="#3fb950"/>
       <text x="16" y="0" fill="#3fb950">bytes 5 … N+4</text>
       <text x="140" y="0" fill="#c9d1d9">payload body</text>
-      <text x="16" y="18" fill="#6e7681">flags 0/1: perf script output (+ optional `### PERF_STAT ###` section) · typical ratio 20-40x with zstd</text>
+      <text x="16" y="18" fill="#6e7681">flags 0/1: perf script output (+ optional `### PERF_STAT ###` section) · about 20x with zstd on device captures</text>
       <text x="16" y="36" fill="#6e7681">flags 2-4: UTF-8 JSON</text>
     </g>
   </g>

@@ -57,7 +57,7 @@ resolution. See [STATUS.md](STATUS.md) for what is open.
   `### PERF_STAT ###` section.
 - Agent compresses with in-process zstd (vendored). Server decompresses
   in-process via the `zstandard` package (external `zstd` binary as
-  fallback). Typical ratio 20–40×.
+  fallback). About 20× on device captures.
 
 ### Key design decisions
 - The agent is a zero-dependency static C binary. The server is a normal
@@ -123,7 +123,7 @@ resolution. See [STATUS.md](STATUS.md) for what is open.
   runs at `nice 5` so the profiler yields to the workload, every perf child
   runs with `LC_ALL=C` in its own process group, and `perf stat` rounds run
   back to back so every interval is counted.
-- Single agent implementation: a static musl C binary (~0.7 MB, vendored
+- Single agent implementation: a static musl C binary (~0.6 MB, vendored
   zstd, zero deps) that cross-compiles for five architectures from the
   toolchains on the repo's `toolchains` GitHub release, installs with one
   curl command (install-agent.sh), and self-updates with --update after
