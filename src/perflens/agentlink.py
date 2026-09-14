@@ -9,7 +9,6 @@ All socket work runs on plain threads with blocking I/O; the HTTP layer
 talks to it only through AppContext.
 """
 
-import hmac
 import json
 import os
 import socket
@@ -17,6 +16,8 @@ import struct
 import subprocess
 import sys
 import threading
+import time
+import traceback
 import uuid
 from datetime import datetime
 
@@ -29,10 +30,19 @@ FLAG_CMD_REQUEST = 2
 FLAG_CMD_RESPONSE = 3
 FLAG_METRICS = 4
 
-# Cap on a single wire frame. The agent bounds its own payloads at 64 MB;
-# anything larger is a corrupt stream or a stray client, and allocating it
-# blindly (a garbage header can claim 4 GB) is a trivial DoS.
-MAX_FRAME_SIZE = 128 * 1024 * 1024
+# Cap on a single wire frame. The agent bounds its own payloads at 64 MB of
+# raw text (and a compressed chunk is far smaller); anything larger is a
+# corrupt stream or a stray client, and allocating it blindly (a garbage
+# header can claim 4 GB) is a trivial DoS.
+MAX_FRAME_SIZE = 80 * 1024 * 1024
+# The handshake frames (hello, the auth reply) are a few hundred bytes, and
+# they are read before the peer has proved anything.
+MAX_HANDSHAKE_FRAME = 64 * 1024
+# What one frame may decompress to. The agent's own cap is 64 MB.
+MAX_DECOMPRESSED = 256 * 1024 * 1024
+# A blocked send to a dead or stalled device must not hold the command lock
+# (and the threadpool behind it) for the ~15 minutes TCP retransmits.
+SEND_TIMEOUT_SECS = 30
 
 # In-process zstd (the zstandard wheel ships with the package); the
 # external `zstd` binary remains as a fallback for source checkouts run
@@ -66,7 +76,7 @@ def decompress_payload(cfg, payload, comp_flag):
             try:
                 # Agent frames are single-shot zstd streams
                 raw = _zstd.ZstdDecompressor().decompress(
-                    payload, max_output_size=1 << 30)
+                    payload, max_output_size=MAX_DECOMPRESSED)
                 return raw.decode('utf-8', errors='replace')
             except _zstd.ZstdError as e:
                 print(f"[server] zstd decompress error: {e}", file=sys.stderr)
@@ -96,43 +106,20 @@ def decompress_payload(cfg, payload, comp_flag):
     return None
 
 
-def check_agent_token(cfg, hello):
-    """Validate a legacy hello token against cfg.token (if configured).
-
-    Pre-0.10.0 agents put their shared secret directly in the hello frame.
-    That is why it was replaced: in --listen mode the hello goes to whoever
-    completes the TCP handshake, so the agent handed its secret to any port
-    scanner. Modern agents send no token and prove the server's knowledge of
-    the pairing code instead (see authenticate_agent).
-
-    This remains only as the compatibility path for agents that predate that
-    change. The fail-open when cfg.token is unset is deliberate, not an
-    oversight: it is what makes authentication opt-in for existing tokenless
-    deployments.
-
-    Returns None when accepted, or an error string when rejected.
-    """
-    if not cfg or not cfg.token:
-        return None
-    presented = hello.get('token') or ''
-    if not hmac.compare_digest(str(presented), cfg.token):
-        return 'agent token mismatch'
-    return None
-
-
 def send_frame(sock, payload, flag):
     """Write one framed message: 4-byte BE length + 1-byte flag + payload."""
     sock.sendall(struct.pack('!IB', len(payload), flag) + payload)
 
 
 def read_json_frame(sock, expect_flag=FLAG_CMD_RESPONSE,
-                    skip_flags=(FLAG_METRICS,)):
+                    skip_flags=(FLAG_METRICS,), max_len=MAX_HANDSHAKE_FRAME):
     """Read one JSON frame, skipping frames of the types in skip_flags.
 
     The skip matters during the handshake: an agent that predates the auth
     gate starts streaming metrics the moment it connects, so a flag-4 frame
     can arrive before the response we are waiting for. Raises RuntimeError on
-    disconnect, a wrong flag, or malformed JSON.
+    disconnect, a wrong flag, malformed JSON, or a frame over max_len — this
+    runs before the peer has authenticated.
     """
     while True:
         header = recv_exactly(sock, 5)
@@ -140,7 +127,7 @@ def read_json_frame(sock, expect_flag=FLAG_CMD_RESPONSE,
             raise RuntimeError('agent disconnected')
 
         length, flag = struct.unpack('!IB', header)
-        if length > MAX_FRAME_SIZE:
+        if length > max_len:
             raise RuntimeError(f'oversized frame ({length} bytes)')
 
         payload = recv_exactly(sock, length) if length else b''
@@ -153,9 +140,12 @@ def read_json_frame(sock, expect_flag=FLAG_CMD_RESPONSE,
             raise RuntimeError(f'expected flag {expect_flag}, got flag {flag}')
 
         try:
-            return json.loads(payload.decode('utf-8', errors='replace'))
+            doc = json.loads(payload.decode('utf-8', errors='replace'))
         except ValueError as e:
             raise RuntimeError(f'invalid JSON in frame: {e}') from e
+        if not isinstance(doc, dict):
+            raise RuntimeError('frame is not a JSON object')
+        return doc
 
 
 def read_hello(sock):
@@ -201,22 +191,44 @@ def authenticate_agent(cfg, sock, hello, addr_str, token=None):
 
     error = str(resp.get('error') or 'auth failed')
 
-    # An agent from before the pairing handshake answers with the dispatcher's
-    # unknown-command reply rather than failing to respond, which is precisely
-    # what makes it distinguishable. Fall back to the old hello token.
+    # An agent from before the pairing handshake answers with the
+    # dispatcher's unknown-command reply. Such an agent put its secret in the
+    # hello, where any port scanner could read it, so until 0.11.0 the server
+    # fell back to comparing that. It no longer does: a peer that cannot
+    # prove knowledge of the code is not paired, whatever its hello says.
+    hello.pop('token', None)
     if 'unknown command' in error:
-        legacy_err = check_agent_token(cfg, hello)
-        hello.pop('token', None)
-        if legacy_err:
-            return legacy_err
-        print(f"[server] WARNING: agent {addr_str} "
-              f"(v{hello.get('agent_version', '?')}) predates pairing-code "
-              f"authentication and was accepted on its hello token. That "
-              f"token crossed the wire in the clear — upgrade the agent.",
-              file=sys.stderr)
-        return None
+        return (f'agent {addr_str} (v{hello.get("agent_version", "?")}) '
+                f'predates pairing-code authentication and cannot be paired '
+                f'with a server that has a code configured; upgrade it '
+                f'(perflens push-agent, or perflens-agent --update on the '
+                f'device)')
 
     return f'agent rejected the pairing code: {error}'
+
+
+def session_socket_opts(sock):
+    """Bounds for a session socket, for the life of the connection.
+
+    Keepalive finds a peer that vanished while idle; TCP_USER_TIMEOUT and
+    SO_SNDTIMEO bound a send to one that stopped reading. Without them a
+    dead device left `send_command` blocked in sendall() with the session's
+    lock held, every later command queued behind it, and the threadpool
+    filling up with them.
+    """
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        for opt, val in (('TCP_KEEPIDLE', 60), ('TCP_KEEPINTVL', 10),
+                         ('TCP_KEEPCNT', 6),
+                         ('TCP_USER_TIMEOUT', SEND_TIMEOUT_SECS * 1000)):
+            if hasattr(socket, opt):
+                sock.setsockopt(socket.IPPROTO_TCP, getattr(socket, opt), val)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        # struct timeval: two longs on Linux
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDTIMEO,
+                        struct.pack('ll', SEND_TIMEOUT_SECS, 0))
+    except OSError as e:
+        print(f"[server] socket options: {e}", file=sys.stderr)
 
 
 class AgentSlot:
@@ -253,36 +265,97 @@ class AgentSession:
         self._pending = {}        # cmd_id -> threading.Event
         self._responses = {}      # cmd_id -> response dict
         self._recv_thread = None
+        self._save_thread = None
 
         # Session persistence for profiling data. Chunks are spooled to
         # disk as they arrive (compressed payloads are written as-received)
-        # — nothing is held in RAM for the life of the session.
+        # — nothing is held in RAM for the life of the session. Metadata is
+        # written when the directory is created and refreshed with every
+        # chunk, so a server that dies mid-session leaves a session that
+        # still lists and replays, rather than an orphan directory.
         self._session_id = None
         self._session_dir = None
         self._chunk_index = 0
+        self._samples_total = 0     # parsed samples, the session's count
+        self._started = None
 
     def start(self):
         """Start the receiver thread. Call after reading the hello message."""
         self._recv_thread = threading.Thread(target=self._recv_loop, daemon=True)
         self._recv_thread.start()
 
+    def join(self, timeout=10):
+        """Wait for the receiver to finish and the session to be saved.
+        Used when replacing the session and at shutdown."""
+        t = self._recv_thread
+        if t is not None and t is not threading.current_thread():
+            t.join(timeout)
+        s = self._save_thread
+        if s is not None:
+            s.join(timeout)
+
+    # -- persistence -----------------------------------------------------
+
+    def _open_session_dir(self):
+        """Create the session directory and its provisional metadata. Never
+        raises: an unwritable --sessions-dir disables spooling for this
+        session and says so, rather than killing the receiver before it
+        reads a byte (which left the UI showing a connected agent forever)."""
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        self._session_id = f'{ts}_{self.addr}'
+        self._started = datetime.now()
+        session_dir = os.path.join(self.ctx.config.sessions_dir, self._session_id)
+        try:
+            os.makedirs(session_dir, exist_ok=True)
+        except OSError as e:
+            print(f"[server] Cannot create session directory {session_dir}: "
+                  f"{e} — this session will not be saved", file=sys.stderr)
+            self._session_dir = None
+            return
+        self._session_dir = session_dir
+        self._write_metadata(live=True)
+
+    def _write_metadata(self, live):
+        if not self._session_dir:
+            return
+        from perflens.sessions import provisional_metadata, write_metadata
+        state = self.ctx.state
+        with state.lock:
+            event_types = list(state.event_types)
+            perf_stat = dict(state.perf_stat)
+        write_metadata(self._session_dir, provisional_metadata(
+            self._session_id, self.addr, self._chunk_index,
+            self._samples_total, event_types, perf_stat, self.hello,
+            self._started, live=live))
+
     def _spool_chunk(self, payload, flag):
         """Write one received data payload straight to the session dir.
 
-        Compressed payloads (flag 1) are stored as-received (.zst);
-        raw payloads (flag 0) as text (.txt). Keeping chunks on disk
-        instead of in RAM bounds server memory for long sessions.
+        Compressed payloads (flag 1) are stored as-received (.zst); raw
+        payloads (flag 0) as text (.txt). Written to a temp name and
+        renamed, so a partial write (ENOSPC) never leaves a truncated chunk
+        under a real name; and the index advances either way, so a failed
+        chunk is a gap rather than the next chunk's overwrite target.
         """
+        if not self._session_dir:
+            return
+        ext = 'zst' if flag == FLAG_DATA_ZSTD else 'txt'
+        fname = f'chunk_{self._chunk_index:05d}.{ext}'
+        self._chunk_index += 1
+        final = os.path.join(self._session_dir, fname)
+        tmp = final + '.tmp'
         try:
-            if flag == FLAG_DATA_ZSTD:
-                fname = f'chunk_{self._chunk_index:05d}.zst'
-            else:
-                fname = f'chunk_{self._chunk_index:05d}.txt'
-            with open(os.path.join(self._session_dir, fname), 'wb') as f:
+            with open(tmp, 'wb') as f:
                 f.write(payload)
-            self._chunk_index += 1
+            os.replace(tmp, final)
         except OSError as e:
-            print(f"[server] Failed to spool chunk: {e}", file=sys.stderr)
+            print(f"[server] Failed to spool chunk {fname}: {e}", file=sys.stderr)
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+    # -- commands --------------------------------------------------------
 
     def send_command(self, cmd, args=None, timeout=60):
         """Send a command and wait for the response. Thread-safe.
@@ -320,17 +393,79 @@ class AgentSession:
             return {'ok': False, 'error': 'command timed out'}
         return {'ok': False, 'error': 'no response'}
 
+    # -- receive ---------------------------------------------------------
+
+    def _handle_frame(self, flag, payload):
+        """One frame. Anything this raises is logged and the frame dropped;
+        the session goes on. A malformed metrics frame or one odd stat line
+        used to end the whole capture."""
+        ctx = self.ctx
+        state = ctx.state
+
+        if flag == FLAG_CMD_RESPONSE:
+            resp = json.loads(payload.decode('utf-8', errors='replace'))
+            cmd_id = resp.get('id', '') if isinstance(resp, dict) else ''
+            with self._cmd_lock:
+                event = self._pending.get(cmd_id)
+                if event is not None:
+                    self._responses[cmd_id] = resp
+                    event.set()
+                # else: unsolicited (e.g. hello) — ignore
+
+        elif flag in (FLAG_DATA_RAW, FLAG_DATA_ZSTD):
+            text = decompress_payload(ctx.config, payload, flag)
+            if text is None:
+                return
+
+            self._spool_chunk(payload, flag)
+            script_text, stat_text = split_perf_data(text)
+            samples = parse_perf_script(script_text)
+            perf_stat = parse_perf_stat(stat_text) if stat_text else {}
+
+            if samples:
+                # add_samples sets dirty flag and signals rebuild worker
+                total_count, _ = state.add_samples(samples, perf_stat)
+                self._samples_total += len(samples)
+                print(f"[server] Managed agent chunk: "
+                      f"{len(samples)} new, {total_count} in the ring",
+                      file=sys.stderr)
+            elif perf_stat:
+                # The first chunk or two after start carry only PERF_STAT
+                # while perf record fills its ring buffer. Those counters
+                # used to be dropped with the samples they did not have.
+                state.add_perf_stat(perf_stat)
+
+            self._write_metadata(live=True)
+
+            # Lightweight SSE: stat pushed immediately; event types
+            # ride the data_version stamp from the rebuild worker.
+            if perf_stat:
+                # Broadcast the accumulated stat, not this round's
+                with state.lock:
+                    merged_stat = dict(state.perf_stat)
+                ctx.broadcast('perf_stat', merged_stat)
+
+        elif flag == FLAG_METRICS:
+            metrics = json.loads(payload.decode('utf-8', errors='replace'))
+            if not isinstance(metrics, dict):
+                raise TypeError('metrics frame is not a JSON object')
+            mtype = metrics.get('type', '')
+            ctx.metrics.add(mtype, metrics)
+            # One 'metrics' event; the payload's own 'type' field
+            # discriminates system/process/network/...
+            ctx.broadcast('metrics', metrics)
+
+        else:
+            print(f"[server] Unknown flag {flag} from managed agent",
+                  file=sys.stderr)
+
     def _recv_loop(self):
         """Read messages from agent, dispatch by flag type."""
         ctx = self.ctx
         state = ctx.state
 
-        # Setup session for saving profiling data
-        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-        self._session_id = f'{ts}_{self.addr}'
-        self._session_dir = os.path.join(ctx.config.sessions_dir,
-                                         self._session_id)
-        os.makedirs(self._session_dir, exist_ok=True)
+        self._open_session_dir()
+        bad_frames = 0
 
         while self.connected:
             try:
@@ -354,83 +489,29 @@ class AgentSession:
                     print(f"[server] Managed agent {self.addr} disconnected mid-msg",
                           file=sys.stderr)
                     break
-
-                if flag == FLAG_CMD_RESPONSE:
-                    # Command response. Never let a malformed response kill
-                    # the connection — log and keep receiving.
-                    try:
-                        resp = json.loads(payload.decode('utf-8', errors='replace'))
-                        cmd_id = resp.get('id', '') if isinstance(resp, dict) else ''
-                        with self._cmd_lock:
-                            event = self._pending.get(cmd_id)
-                            if event is not None:
-                                self._responses[cmd_id] = resp
-                                event.set()
-                            # else: unsolicited (e.g. hello) — ignore
-                    except (ValueError, TypeError, AttributeError) as e:
-                        # Malformed JSON, or valid JSON of the wrong
-                        # shape. Log and keep the session alive: one bad
-                        # frame should not drop a live capture.
-                        print(f"[server] Bad agent response: {e}",
-                              file=sys.stderr)
-
-                elif flag in (FLAG_DATA_RAW, FLAG_DATA_ZSTD):
-                    # Profiling data
-                    text = decompress_payload(ctx.config, payload, flag)
-                    if text is None:
-                        continue
-
-                    self._spool_chunk(payload, flag)
-                    script_text, stat_text = split_perf_data(text)
-                    samples = parse_perf_script(script_text)
-                    perf_stat = parse_perf_stat(stat_text) if stat_text else {}
-
-                    if not samples:
-                        continue
-
-                    # add_samples sets dirty flag and signals rebuild worker
-                    total_count, _ = state.add_samples(samples, perf_stat)
-
-                    print(f"[server] Managed agent chunk: "
-                          f"{len(samples)} new, {total_count} total",
-                          file=sys.stderr)
-
-                    # Lightweight SSE: stat pushed immediately; event types
-                    # ride the data_version stamp from the rebuild worker.
-                    if perf_stat:
-                        # Broadcast the accumulated stat, not this round's
-                        with state.lock:
-                            merged_stat = dict(state.perf_stat)
-                        ctx.broadcast('perf_stat', merged_stat)
-
-                elif flag == FLAG_METRICS:
-                    # Health metrics snapshot
-                    try:
-                        metrics = json.loads(payload.decode('utf-8',
-                                                            errors='replace'))
-                        mtype = metrics.get('type', '')
-                        ctx.metrics.add(mtype, metrics)
-                        # One 'metrics' event; the payload's own 'type'
-                        # field discriminates system/process/network/...
-                        ctx.broadcast('metrics', metrics)
-                    except (ValueError, KeyError):
-                        pass
-
-                else:
-                    print(f"[server] Unknown flag {flag} from managed agent",
-                          file=sys.stderr)
-
             except (ConnectionResetError, BrokenPipeError, OSError) as e:
                 print(f"[server] Managed agent recv error: {e}", file=sys.stderr)
                 break
+
+            try:
+                self._handle_frame(flag, payload)
             except Exception as e:
-                import traceback
-                print(f"[server] Managed agent recv unexpected error: {e}",
-                      file=sys.stderr)
-                traceback.print_exc(file=sys.stderr)
-                break
+                # Broad on purpose: one bad frame must not drop a live
+                # capture. The first few are logged with their trace, the
+                # rest counted, so a stream of garbage cannot fill the log.
+                bad_frames += 1
+                if bad_frames <= 3:
+                    print(f"[server] Bad frame (flag {flag}, {length} bytes) "
+                          f"from managed agent: {e}", file=sys.stderr)
+                    traceback.print_exc(file=sys.stderr)
+                elif bad_frames == 4:
+                    print("[server] Further bad frames from this agent are "
+                          "counted, not logged", file=sys.stderr)
 
         self.connected = False
+        if bad_frames:
+            print(f"[server] {bad_frames} bad frame(s) dropped during this "
+                  f"session", file=sys.stderr)
         # Fail fast any in-flight commands instead of letting them time out
         with self._cmd_lock:
             for cmd_id, event in self._pending.items():
@@ -438,6 +519,7 @@ class AgentSession:
                     cmd_id, {'ok': False, 'error': 'agent disconnected'})
                 event.set()
             self._pending.clear()
+            self._responses.clear()
         with state.lock:
             # Only tear down live state if this session still owns it — a
             # replacement agent may already have been installed, in which
@@ -457,17 +539,22 @@ class AgentSession:
         # Save session metadata (chunks are already spooled to disk)
         m_snap = ctx.metrics.snapshot_for_save()
         m_summary = ctx.metrics.get_summary()
-        if self._chunk_index or any(m_snap.values()):
+        if self._session_dir and (self._chunk_index or any(m_snap.values())):
             from perflens.sessions import save_session
             t = threading.Thread(
                 target=save_session,
                 args=(self._session_dir, self._session_id,
                       self.addr, self._chunk_index,
                       all_samples, perf_stat_final, self.hello,
-                      m_snap, m_summary),
+                      m_snap, m_summary, self._samples_total, self._started),
                 daemon=True,
             )
+            self._save_thread = t
             t.start()
+        elif self._session_dir:
+            # Nothing arrived: drop the provisional metadata and the dir
+            from perflens.sessions import discard_empty_session
+            discard_empty_session(self._session_dir)
 
     def close(self):
         """Disconnect from agent."""
@@ -487,9 +574,16 @@ def install_agent_session(ctx, session):
     existing one), reset profiling state, and start its receiver."""
     slot = ctx.agent
     with slot.lock:
-        if slot.session and slot.session.connected:
-            print("[server] Replacing existing agent session", file=sys.stderr)
-            slot.session.close()
+        old = slot.session
+        if old is not None:
+            if old.connected:
+                print("[server] Replacing existing agent session", file=sys.stderr)
+                old.close()
+            # Let the old receiver finish: its teardown snapshots the
+            # metrics and starts the save. Resetting underneath it used to
+            # land the dying agent's last chunk in the new session and save
+            # the old session with the new agent's (empty) metrics.
+            old.join(timeout=10)
 
         ctx.state.reset()
         with ctx.state.lock:
@@ -528,6 +622,16 @@ def stop_agent(ctx):
     return {'stopped': False, 'reason': 'no agent connected'}
 
 
+def shutdown_agent(ctx, timeout=10):
+    """At server shutdown: end the session and wait for it to be saved.
+    Daemon threads die with the process, and the session's final metadata
+    used to die with them."""
+    session = ctx.agent.current()
+    stop_agent(ctx)
+    if session is not None:
+        session.join(timeout=timeout)
+
+
 def connect_to_agent(ctx, host, port, timeout=10, token=None):
     """Connect to a listen-mode agent. Returns AgentSession or raises.
 
@@ -560,12 +664,16 @@ def connect_to_agent(ctx, host, port, timeout=10, token=None):
         sock.close()
         raise RuntimeError(auth_err)
 
-    # Clear connection timeout — recv loop must block indefinitely
-    sock.settimeout(None)
-
-    session = AgentSession(ctx, sock, addr_str)
-    session.hello = hello
-    install_agent_session(ctx, session)
+    try:
+        # Clear connection timeout — recv loop must block indefinitely
+        sock.settimeout(None)
+        session_socket_opts(sock)
+        session = AgentSession(ctx, sock, addr_str)
+        session.hello = hello
+        install_agent_session(ctx, session)
+    except Exception:
+        sock.close()
+        raise
 
     print(f"[server] Connected to managed agent at {addr_str}: "
           f"platform={hello.get('platform', {}).get('arch', '?')}",
@@ -605,12 +713,16 @@ def handle_inbound_agent(ctx, conn, addr):
         reject(auth_err)
         return
 
-    # Clear connection timeout — recv loop must block indefinitely
-    conn.settimeout(None)
-
-    session = AgentSession(ctx, conn, addr_str)
-    session.hello = hello
-    install_agent_session(ctx, session)
+    try:
+        # Clear connection timeout — recv loop must block indefinitely
+        conn.settimeout(None)
+        session_socket_opts(conn)
+        session = AgentSession(ctx, conn, addr_str)
+        session.hello = hello
+        install_agent_session(ctx, session)
+    except Exception as e:
+        reject(f'could not install session: {e}')
+        return
 
     print(f"[server] Inbound agent {addr_str} ready: "
           f"platform={hello.get('platform', {}).get('arch', '?')}",
@@ -618,7 +730,13 @@ def handle_inbound_agent(ctx, conn, addr):
 
 
 def run_tcp_server(ctx):
-    """Run the TCP server that accepts agent connections."""
+    """Run the TCP server that accepts agent connections.
+
+    One failed accept() -- ECONNABORTED, EMFILE under fd pressure -- used to
+    end this thread and close the listening socket for good, with nothing
+    in the API saying so. It now logs, backs off a second, and keeps
+    listening.
+    """
     port = ctx.config.tcp_port
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -628,7 +746,13 @@ def run_tcp_server(ctx):
 
     try:
         while True:
-            conn, addr = sock.accept()
+            try:
+                conn, addr = sock.accept()
+            except OSError as e:
+                print(f"[server] accept() failed: {e}; retrying in 1s",
+                      file=sys.stderr)
+                time.sleep(1)
+                continue
             t = threading.Thread(target=handle_inbound_agent,
                                  args=(ctx, conn, addr), daemon=True)
             t.start()

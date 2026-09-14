@@ -52,6 +52,12 @@ FRAME_BARE_RE = re.compile(
     r'^\s+([0-9a-f]+)\s+(\S+)\s*$'
 )
 
+# A line longer than this is not perf output (a symbol name of a few
+# hundred bytes is the realistic maximum, C++ templates included). The
+# header regexes backtrack quadratically on a long non-matching line, so
+# one is skipped rather than matched.
+MAX_LINE_LEN = 16384
+
 
 # perf stat stderr always ends with "N.NN seconds time elapsed"; in a
 # multi-round file (agent --output --rounds N) that line is the boundary
@@ -208,6 +214,18 @@ def parse_perf_script(text):
         if not line.strip():
             continue
         total_lines += 1
+        if len(line) > MAX_LINE_LEN:
+            unrecognized += 1
+            continue
+
+        # A call-chain frame starts with a tab, and only frames do (perf
+        # pads comm with spaces). Most lines are frames, and trying both
+        # header regexes on each of them first was most of the parse time.
+        if line[0] == '\t' and current_sample is not None:
+            frame = _parse_frame(line)
+            if frame is not None:
+                current_sample['frames'].append(frame)
+                continue
 
         m = HEADER_RE.match(line)
         if m:
@@ -429,10 +447,65 @@ def build_flamegraph_data(samples):
     return truncate_flamegraph_depth(root)
 
 
+# Thousands separators perf stat may print. The agent runs perf with
+# LC_ALL=C, but older agents did not, and `--big-num` groups digits with
+# whatever the device's locale uses: ',' (C), '.' (de_DE), a space or a
+# narrow no-break space (fr_FR), an apostrophe (de_CH).
+_GROUPING = ",.'\u202f\u00a0 "
+
+# An integer counter: plain digits (the C locale, which is what the agent
+# runs perf under since 0.12.0, groups nothing), or digit groups of three
+# after the first. The plain form is listed first because a 12-digit
+# `cycles` count without separators used to match neither branch and was
+# dropped -- found on the first hardware run after the LC_ALL=C change,
+# where every counter but the two-digit page-faults vanished.
+_GROUPED_INT_RE = re.compile(
+    r'^(?:\d+|\d{1,3}(?:[,.\'\u202f\u00a0 ]\d{3})*)$')
+# A decimal, plain or grouped: the last '.' or ',' is the decimal point when
+# it is not followed by exactly three digits and another separator.
+_GROUPED_FLOAT_RE = re.compile(
+    r'^(?:\d+|\d{1,3}(?:[,.\'\u202f\u00a0 ]\d{3})*)(?:[.,]\d+)?$')
+
+
+def _parse_grouped_number(token, want_float):
+    """'9,310,933,573' -> 9310933573; '1.234.567' -> 1234567;
+    '2,950.76' -> 2950.76; '2.950,76' -> 2950.76. Raises ValueError when the
+    token is not a number under any grouping convention."""
+    if want_float:
+        if not _GROUPED_FLOAT_RE.match(token):
+            raise ValueError(token)
+        # The decimal point is a trailing '.' or ',' group that is not a
+        # thousands group: fewer or more than three digits, or the only
+        # separator kind when groups are ambiguous ('2,950.76' -> '.'), or
+        # a separator after more than three leading digits ('2950.760' is
+        # not grouped at all).
+        last_sep = max(token.rfind('.'), token.rfind(','))
+        if last_sep > 0 and (len(token) - last_sep - 1 != 3 or last_sep > 3
+                             or token[last_sep] == '.' and ',' in token
+                             or token[last_sep] == ',' and '.' in token):
+            integer, frac = token[:last_sep], token[last_sep + 1:]
+        else:
+            integer, frac = token, ''
+        digits = ''.join(ch for ch in integer if ch.isdigit())
+        return float(digits + ('.' + frac if frac else ''))
+    if not _GROUPED_INT_RE.match(token):
+        raise ValueError(token)
+    return int(''.join(ch for ch in token if ch.isdigit()))
+
+
+_STAT_MSEC_RE = re.compile(r'^\s*([\d,.\'\u202f\u00a0 ]*\d)\s+msec\s+(\S+)')
+_STAT_COUNT_RE = re.compile(r'^\s*([\d,.\'\u202f\u00a0 ]*\d)\s+(\S+)')
+_STAT_ELAPSED_RE = re.compile(r'^\s*([\d,.]+)\s+seconds\s+time\s+elapsed')
+
+
 def parse_perf_stat(text):
     """Parse perf stat output into structured metrics.
 
     Returns dict: {'metric_name': {'value': int|float, 'comment': str}}
+
+    Forgiving about digit grouping (see _GROUPING) and about anything it
+    cannot read: a malformed line is skipped, never raised, because this
+    runs on the agent's receive thread where an exception ends the session.
     """
     metrics = {}
     for line in text.strip().split('\n'):
@@ -445,23 +518,10 @@ def parse_perf_stat(text):
 
         # Float with msec unit (task-clock on some systems):
         #   "2,950.76 msec task-clock  # 0.983 CPUs utilized"
-        m = re.match(r'^\s*([\d,.]+)\s+msec\s+(\S+)', line)
+        m = _STAT_MSEC_RE.match(line)
         if m:
             try:
-                value = float(m.group(1).replace(',', ''))
-                name = m.group(2).split(':')[0]
-                comment = _extract_stat_comment(line)
-                _accumulate_stat(metrics, name, value, comment)
-            except ValueError:
-                pass
-            continue
-
-        # Integer counter:
-        #   "9,310,933,573      cycles:u  # 3.155 GHz  (85.56%)"
-        m = re.match(r'^\s*([\d,]+)\s+(\S+)', line)
-        if m:
-            try:
-                value = int(m.group(1).replace(',', ''))
+                value = _parse_grouped_number(m.group(1).strip(), True)
                 name = m.group(2).split(':')[0]
                 comment = _extract_stat_comment(line)
                 _accumulate_stat(metrics, name, value, comment)
@@ -470,10 +530,27 @@ def parse_perf_stat(text):
             continue
 
         # Time elapsed: "3.002210655 seconds time elapsed"
-        m = re.match(r'^\s*([\d.]+)\s+seconds\s+time\s+elapsed', line)
+        m = _STAT_ELAPSED_RE.match(line)
         if m:
-            _accumulate_stat(metrics, 'time_elapsed',
-                             float(m.group(1)), 'seconds')
+            try:
+                _accumulate_stat(metrics, 'time_elapsed',
+                                 float(m.group(1).replace(',', '.')), 'seconds')
+            except ValueError:
+                pass
+            continue
+
+        # Integer counter:
+        #   "9,310,933,573      cycles:u  # 3.155 GHz  (85.56%)"
+        m = _STAT_COUNT_RE.match(line)
+        if m:
+            try:
+                value = _parse_grouped_number(m.group(1).strip(), False)
+                name = m.group(2).split(':')[0]
+                comment = _extract_stat_comment(line)
+                _accumulate_stat(metrics, name, value, comment)
+            except ValueError:
+                pass
+            continue
 
     _compute_derived_stats(metrics)
     return metrics
@@ -492,30 +569,53 @@ def _accumulate_stat(metrics, name, value, comment):
     metrics[name] = {'value': value, 'comment': comment}
 
 
+def stat_counter(metrics, *names):
+    """The value of a counter under any of `names`, or 0.
+
+    An exact key wins. Otherwise the PMU-qualified spellings are summed:
+    a hybrid CPU reports `cpu_core/cycles/` and `cpu_atom/cycles/` and
+    never a bare `cycles`, which used to leave IPC and the miss rates
+    blank on every such machine.
+    """
+    for name in names:
+        entry = metrics.get(name)
+        if isinstance(entry, dict) and isinstance(entry.get('value'),
+                                                  (int, float)):
+            return entry['value']
+    for name in names:
+        total = 0
+        found = False
+        for key, entry in metrics.items():
+            if (key not in _DERIVED_STAT_KEYS and isinstance(entry, dict)
+                    and isinstance(entry.get('value'), (int, float))
+                    and event_base(key) == name):
+                total += entry['value']
+                found = True
+        if found:
+            return total
+    return 0
+
+
 def _compute_derived_stats(metrics):
     """(Re)compute IPC / cache-miss / branch-miss rates from counters."""
-    cycles = metrics.get('cycles', {}).get('value', 0)
-    instructions = metrics.get('instructions', {}).get('value', 0)
+    cycles = stat_counter(metrics, 'cycles', 'cpu-cycles')
+    instructions = stat_counter(metrics, 'instructions')
     if cycles > 0 and instructions > 0:
         metrics['ipc'] = {
             'value': round(instructions / cycles, 2),
             'comment': 'instructions per cycle',
         }
 
-    cache_refs = metrics.get('cache-references', {}).get('value', 0)
-    cache_misses = metrics.get('cache-misses', {}).get('value', 0)
+    cache_refs = stat_counter(metrics, 'cache-references')
+    cache_misses = stat_counter(metrics, 'cache-misses')
     if cache_refs > 0 and cache_misses > 0:
         metrics['cache_miss_rate'] = {
             'value': round(100.0 * cache_misses / cache_refs, 2),
             'comment': '% cache miss rate',
         }
 
-    branches = 0
-    for k in metrics:
-        if 'branches' in k and 'misses' not in k:
-            branches = metrics[k].get('value', 0)
-            break
-    branch_misses = metrics.get('branch-misses', {}).get('value', 0)
+    branches = stat_counter(metrics, 'branches', 'branch-instructions')
+    branch_misses = stat_counter(metrics, 'branch-misses')
     if branches > 0 and branch_misses > 0:
         metrics['branch_miss_rate'] = {
             'value': round(100.0 * branch_misses / branches, 2),

@@ -67,3 +67,29 @@ function flatten(node: FlameNode, depth: number, x: number, width: number,
   }
   return maxDepth;
 }
+
+/**
+ * Samples covered by the rects whose names match `re`, counting each stack
+ * once: a match nested inside another match is already inside its
+ * ancestor's value. Summing every match reported "4 / 266 frames
+ * (100.2%)" for a pattern that hit a frame and its descendants.
+ */
+export function matchedCoverage(rects: FlameRect[], re: RegExp): { count: number; samples: number } {
+  let count = 0;
+  let samples = 0;
+  // Rects are emitted parent before child, so a covering ancestor is
+  // always seen first; `open` holds the x-extents counted so far.
+  const open: { x0: number; x1: number; depth: number }[] = [];
+  for (const r of rects) {
+    if (!re.test(r.name)) continue;
+    count++;
+    const x0 = r.x;
+    const x1 = r.x + r.w;
+    const covered = open.some((o) => o.depth < r.depth && x0 >= o.x0 - 1e-6 && x1 <= o.x1 + 1e-6);
+    if (!covered) {
+      samples += r.value;
+      open.push({ x0, x1, depth: r.depth });
+    }
+  }
+  return { count, samples };
+}

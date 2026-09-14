@@ -24,6 +24,11 @@ describe('urlHash codec', () => {
     expect(parseHash('#tid=notanumber')).toEqual({});
   });
 
+  it('drops a tab name that is not one of the five', () => {
+    expect(parseHash('#tab=bogus')).toEqual({});
+    expect(parseHash('#tab=threads').tab).toBe('threads');
+  });
+
   it('encodes special characters in zoom names', () => {
     const h = buildHash({ zoom: ['a&b', 'c=d'] });
     expect(parseHash(h).zoom).toEqual(['a&b', 'c=d']);

@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../api/client';
 import { useLive } from '../store/live';
-import { useUi } from '../store/ui';
 
 export interface SourceLine {
   line: number;
@@ -31,6 +30,7 @@ function heatClass(percent: number): string {
 export function SourceLines({ filePath, lines, headerSuffix }:
     { filePath: string; lines: SourceLine[]; headerSuffix: string }) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const scrolledFor = useRef<string | null>(null);
   const pendingHighlight = useLive((s) => s.pendingHighlight);
 
   const totalSamples = lines.reduce((sum, l) => sum + l.samples, 0);
@@ -43,11 +43,16 @@ export function SourceLines({ filePath, lines, headerSuffix }:
   const displayLines = lines.length > maxLine ? lines.slice(0, maxLine) : lines;
   const truncated = lines.length > displayLines.length;
 
-  // Scroll to the hottest line (or flash the highlighted function)
+  // Scroll to the hottest line when a file opens (or flash the highlighted
+  // function). Not on every refresh: the live view re-fetches per chunk,
+  // and the scroll position used to jump back to the hottest line each
+  // time, out from under whatever the operator was reading.
   useEffect(() => {
     const root = scrollRef.current;
     if (!root) return;
+    if (scrolledFor.current === filePath && !pendingHighlight) return;
     const raf = requestAnimationFrame(() => {
+      scrolledFor.current = filePath;
       if (pendingHighlight) {
         useLive.setState({ pendingHighlight: null });
         for (const sl of root.querySelectorAll('.source-line')) {
@@ -68,7 +73,7 @@ export function SourceLines({ filePath, lines, headerSuffix }:
     });
     return () => cancelAnimationFrame(raf);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filePath, lines]);
+  }, [filePath, lines, pendingHighlight]);
 
   return (
     <>
@@ -98,39 +103,74 @@ export function SourceLines({ filePath, lines, headerSuffix }:
 export default function SourceView() {
   const selectedEvent = useLive((s) => s.selectedEvent);
   const currentSourceFile = useLive((s) => s.currentSourceFile);
+  const chunkCount = useLive((s) => s.chunkCount);
+  const generation = useLive((s) => s.generation);
+  const isReplayMode = useLive((s) => s.isReplayMode);
   const entry = useLive((s) => s.perEvent[s.selectedEvent]);
-  const showError = useUi((s) => s.showError);
+  // A stable reference while the file's embedded lines do not change
+  // (replay embeds annotated source in the snapshot).
+  const embeddedLines = useLive((s) => {
+    const src = s.perEvent[s.selectedEvent]?.source as
+      Record<string, SourceLine[]> | null | undefined;
+    return s.currentSourceFile ? src?.[s.currentSourceFile] : undefined;
+  });
 
   const [lines, setLines] = useState<SourceLine[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const loadedFile = useRef<string | null>(null);
 
   const sourceFiles = (entry?.source_files ?? []) as SourceFileRef[];
-  const embedded = entry?.source as Record<string, SourceLine[]> | undefined;
 
+  // Keyed on the file, the event and the chunk: a new chunk re-fetches
+  // the annotation while the previous lines stay on screen (no flash, no
+  // scroll jump); a file switch clears them. The cancelled flag keeps a
+  // slow response for file A from painting under file B's header.
   useEffect(() => {
-    setLines(null);
     setLoadError(null);
-    if (!currentSourceFile) return;
-    // Session replay embeds annotated source in the snapshot
-    if (embedded?.[currentSourceFile]) {
-      setLines(embedded[currentSourceFile]);
+    if (!currentSourceFile) {
+      setLines(null);
+      loadedFile.current = null;
       return;
     }
-    setLoading(true);
+    if (embeddedLines) {
+      setLines(embeddedLines);
+      loadedFile.current = currentSourceFile;
+      return;
+    }
+    if (isReplayMode) {
+      setLines(null);
+      setLoadError('No annotated source for ' + currentSourceFile + ' in this session');
+      return;
+    }
+    const fileChanged = loadedFile.current !== currentSourceFile;
+    if (fileChanged) {
+      setLines(null);
+      setLoading(true);
+    }
+    let cancelled = false;
     api.source(currentSourceFile, selectedEvent)
       .then((data) => {
+        if (cancelled) return;
         setLoading(false);
         const got = (data.lines ?? []) as unknown as SourceLine[];
-        if (got.length > 0) setLines(got);
-        else setLoadError('No source data for ' + currentSourceFile);
+        if (got.length > 0) {
+          setLines(got);
+          loadedFile.current = currentSourceFile;
+        } else {
+          setLines(null);
+          setLoadError('No source data for ' + currentSourceFile);
+        }
       })
       .catch((err) => {
+        if (cancelled) return;
         setLoading(false);
-        setLoadError('Error loading source.');
-        showError('Failed to load source: ' + String(err));
+        if (fileChanged) setLines(null);
+        setLoadError('Could not load source: '
+          + (err instanceof Error ? err.message : String(err)));
       });
-  }, [currentSourceFile, selectedEvent, embedded, showError]);
+    return () => { cancelled = true; };
+  }, [currentSourceFile, selectedEvent, chunkCount, generation, isReplayMode, embeddedLines]);
 
   return (
     <>
@@ -148,8 +188,8 @@ export default function SourceView() {
         {!currentSourceFile && (
           <p className="empty">Click a function in the table to view source code.</p>
         )}
-        {loading && <p className="empty loading">Loading source...</p>}
-        {loadError && <p className="empty">{loadError}</p>}
+        {loading && !lines && <p className="empty loading">Loading source...</p>}
+        {loadError && !lines && <p className="empty">{loadError}</p>}
         {lines && lines.length > 0 && currentSourceFile && (
           <SourceLines filePath={currentSourceFile} lines={lines}
                        headerSuffix={selectedEvent} />

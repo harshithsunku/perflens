@@ -4,7 +4,190 @@ Cross-session working state. Update at the start and end of every working
 session. Release history lives in [CHANGELOG.md](CHANGELOG.md); this file
 is what is *currently true* and what is *left to do*.
 
-## Current phase — 0.11.0 released
+## Current phase — the stabilization pass toward 0.12.0
+
+Started 2026-09-14 on branch `stabilize-0.12.0`, from the plan at
+`~/.claude/plans/understand-this-project-and-deep-fox.md` and the agent review
+in the gitignored `AGENT_FINDINGS.md` (38 findings, A-01..A-38, all
+re-verified against the code before any of them was touched). Order of work:
+agent → transport → server → UI → docs, hardware, release. No new features;
+the four findings that need a wire change (A-18, A-25, A-28, A-31) are
+deferred. Decisions taken with the user: one sampling event by default
+(UI-side), musl for every release asset, both SSH beds plus a checklist for
+the big-endian target, and a 0.12.0 release at the end.
+
+- [x] **Phase 0 — baseline.** master fast-forwarded to PR #4's merge; the
+      gate was green (361 pytest, 24 vitest, 10 Playwright, typecheck, ruff,
+      mypy, version, OpenAPI drift, three cross builds with `soft-float ABI,
+      BE8` on armeb). `tests/test_parser_compat.py` — two tests with no
+      assertion, hidden by a warning filter naming a deleted file — removed;
+      the `core` fixture is defined once.
+- [x] **Phase 1 — agent correctness (sixth unfreeze, no wire change).**
+      A-01 (size flush), A-02 (stat coverage), A-03 (call-graph probe), A-04
+      (nice in rounds), A-05 (monotonic), A-06 (LC_ALL=C + parser), A-08
+      (bounded reaping, process groups), A-09 (send timeouts), A-10
+      (close-on-exec), A-11 (frame cap, bounded queue), A-13 (atomics), A-14
+      (ids, validation, scoped args, bounded writer), A-26 (writev,
+      TCP_NODELAY), A-37 (send helpers), A-38 (leftovers), plus A-21's
+      logging and A-22's buffers because the files were open. Found and
+      fixed on the way, not in the findings: a child forked from the command
+      thread ran the agent's SIGTERM handler before exec and shut down the
+      session socket — the protocol suite caught it as "agent disconnected"
+      right after `stop`. **58 protocol tests** (was 43 collected), 385
+      pytest in all. Cross builds green on all three local toolchains.
+- [x] **Phase 2 — agent responsiveness (same unfreeze).** A-07 (probe on
+      the collection thread, cancellable, `status: probing`), A-12 (10 s
+      window, silent peer replaced), A-16 (overlapping rounds, free-space
+      check), A-19 (metrics: open-once files, thermal zone choice, cpufreq
+      holes, pre-3.14 meminfo, dynamic core count), A-20 (process list
+      reads less, per-core CPU%), A-23 (batched probe, ~7 runs), A-24
+      (per-pid check on switch), A-36 (wakeable sleeps). Not moved off the
+      command thread, deliberately: `list_processes` (0.5 s), `verify_perf`
+      (≤15 s) and `update`. `make -C agent-c check` runs C unit tests over
+      the metrics parsers. **68 protocol tests.**
+- [x] **Phase 3 — build, update, CI hardening.** A-30 (checksum before
+      exec, via the device's `sha256sum`), A-32 (hardening flags; ASan+UBSan
+      and TSan jobs — TSan was clean once `g_shutdown` and the child-pid
+      slots became C11 atomics), A-33 (`--gc-sections`, strip in CI, the
+      unstripped binary kept as an artifact), A-34 (musl for all five
+      assets, soft-float armv7; `x86_64-linux-musl-cross.tgz`,
+      `aarch64-linux-musl-cross.tgz` and `arm-linux-musleabi-cross.tgz`
+      uploaded to the `toolchains` release, sha256 in the PR). The x86_64
+      musl agent passed the full protocol suite natively; the ARM ones
+      are `readelf`-checked here and run on hardware in Phase 7. CI asserts
+      static linking and the float ABI, and shellchecks the scripts.
+      **72 protocol tests.**
+- [x] **Phase 4 — transport (server side of the socket).** Legacy hello
+      tokens refused when the server has one configured (the item SECURITY.md
+      scheduled for 0.12.0); one malformed frame no longer ends a session
+      (non-object metrics, a bad stat line, `cpu: null` in the summary);
+      stat-only chunks keep their counters; keepalive plus a 30 s send bound
+      on every agent socket and a 1..600 s bound on relayed command
+      timeouts; the accept loop survives an `accept()` error; an unwritable
+      sessions dir is refused at startup and tolerated at connect; chunks
+      spool through a temp name and a failed one is a gap, not an
+      overwrite; `metadata.json` is written at session start and refreshed
+      per chunk (`live: true`), finalized by a uvicorn shutdown hook that
+      stops the agent and joins the save, and a startup sweep removes empty
+      session dirs and rebuilds metadata for orphaned chunks; a replacement
+      agent waits for the old receiver to finish before state is reset;
+      frame caps 64 KB pre-auth / 80 MB in session / 256 MB decompressed.
+      Not done: parsing off the socket thread (4.11) — measure the metrics
+      gap on the hybrid bed in Phase 7 first; the agent side's stat and
+      command replies no longer wait on the data send since Phase 1's
+      `writev` change, so the case for it is weaker than when the plan was
+      written. **9 new session tests** in `tests/test_agentlink_session.py`.
+- [x] **Phase 5 — server.** The shared source mapper gets a lock per
+      `addr2line` pipe and one around its cache-mutating phases; tool reads
+      time out (30 s), a dead or hung tool is restarted and given up after
+      three failures, and unanswered addresses are never cached or
+      persisted as `??`; the mapper is closed when replaced or at shutdown.
+      Snapshot cost is per chunk again: no tree copy, the worker serializes
+      a changed event once (JSON + a deflate segment) and `/api/snapshot`
+      splices the bytes, gzip included. Ring-derived views are memoized per
+      `(generation, chunk_count)`; the parser is 2× faster (tab-led lines
+      are frames); `generation`, `ring_samples` and `session_samples` on
+      every version stamp; the SSE burst starts with `status`/`agent`; the
+      CORS wildcard is gone; hybrid-spelled counters derive IPC and the
+      miss rates (server and MCP); corrupt metadata, failed deletes, the
+      replay-cache race, the on-loop import write, `--import` failures,
+      unbounded `limit`, equal ports and malformed map entries all
+      answer honestly. Deferred: per-sample memory layout (5.13), pending
+      the soak. **32 new tests.**
+- [x] **Phase 6 — UI.** Fetch bookkeeping (in-flight event switches,
+      coalesced stamps, `generation` resets, bounded requests, surfaced
+      snapshot failures with the ambiguous-event fallback); SSE backoff
+      3 → 30 s with a distinct "server unreachable" state and no forced
+      exit from replay (the banner has the button); the StrictMode boot
+      bug; banners outside the hidden view with `role="alert"` and a sticky
+      variant; the swallowed-error sites routed to the banner; source view
+      keep-previous-data with cancellation and scroll only on file change;
+      replay no longer leaks live queries; control bar keeps the agent's
+      settings on a switch, shows `probing` with elapsed time, plain Stop
+      and Start beside Disconnect; wizard validation, poll cap and
+      cancellation, no advance on a rejected path, config restore,
+      connected reset; **A-15: one sampling event by default**; search
+      boxes keep spaces and report invalid patterns; delegated flame-graph
+      handlers and memoized rects; `var(--…)` sparklines; the six undefined
+      CSS tokens defined and the light tertiary contrast fixed; a11y
+      labels, focus and tab roles; delete confirmation, `?` button, drag
+      hint, live/recovered session tags. **53 vitest (was 24), 16
+      Playwright scenarios (was 10).** Deferred: component render tests
+      needing jsdom, the visual overhaul.
+- [ ] **Phase 7 — docs, hardware pass, 0.12.0.** Done: docs drift
+      (`--module-map`, `cpu-clock`/`task-clock`, the CI description, musl
+      toolchains, "12 .c files", the build snippets in README, the docs
+      site and CONTRIBUTING, the in-app docs for the single-event default
+      and live-only thread views); hardware pass on both SSH beds (below);
+      the big-endian checklist written for the user; version bumped to
+      0.12.0 in all seven places; PR #5 opened. CI on it found the
+      sanitizer jobs failing at link time: `make check` reused objects from
+      the instrumented build. Fixed with a build-flags stamp that also
+      rebuilds on a `VERSION` change. Reviewing the regenerated screenshots
+      found four UI problems, all fixed: counters running off the stat
+      bar, per-core process CPU shown as critical and clipped, a
+      "symbolization degraded" banner for one unnamed frame in 2.4 million,
+      and a search readout over 100%. Screenshots and the demo GIF are
+      regenerated from a live capture and reviewed. CI green on every job.
+      Left: the release itself and the user's big-endian run.
+
+### Hardware pass, 2026-09-14
+
+Both SSH beds ran the stabilization branch's musl agent, installed through
+`install-agent.sh` from a local staging release (`sha256: verified` on
+both). Each run: `start` with one event (`cycles`) at 99 Hz and a 60 s
+interval, five minutes of SSE watched from the controller, a stop and
+restart on the same pid, disconnect.
+
+| | x86_64 container (hybrid, paranoid 0) | ARM64 board (8 cores, paranoid -1) |
+|---|---|---|
+| probe (`Probe finished in`) | 10.8 s | 12.7 s |
+| mode, call graph | continuous, `fp` | continuous, `fp` |
+| chunk interval | 60.1–60.3 s | 50.7–60.1 s (16 MB size flush) |
+| chunk text → wire | 9.8 MB → 0.49 MB | 16.8 MB → 0.80 MB |
+| samples per chunk | ~18,600 | ~29,900 |
+| stat sections | every chunk after the first, `time_elapsed` 60.0 s each | same |
+| metrics gap, max | 2.0 s (150 frames) | 2.4 s (150 frames) |
+| restart on the same pid | 0.0 s, capabilities carried over | same |
+| server errors / bad frames | 0 | 0 |
+
+- **The hardware run found a regression the suite could not.** The agent
+  now runs perf with `LC_ALL=C`, which prints counters without grouping,
+  and the grouping-tolerant stat parser added in Phase 1 matched a
+  12-digit plain count under neither of its branches: every counter except
+  `page-faults` vanished from the live stat bar on both beds. Every
+  committed fixture was captured under a grouping locale and the protocol
+  shim printed `1,234,567`, so nothing could show it. Fixed (plain digits
+  accepted first), the shim now prints C-locale numbers, and the stat
+  coverage protocol test asserts the parsed values. Re-parsed from the
+  spooled chunks: `cycles`, `instructions`, `task-clock` and IPC are all
+  present (container IPC 2.4 on the E-cores its cpuset exposes, ARM IPC
+  1.1).
+- **A-02 verified.** Every chunk after the first carries exactly one stat
+  round of 60.0 s: the whole interval is counted, where 0.11.0 counted
+  about half of it, one chunk late.
+- **A-01 verified.** On the ARM board 26 threads at 99 Hz produce ~17 MB
+  of `perf script` text a minute, so chunks flush on size just before the
+  interval ends; no chunk was dropped.
+- **Plan item 4.11 (parse off the socket thread) is not needed.** With
+  9.8 MB and 16.8 MB chunks parsed inline, the largest gap between system
+  metrics frames was 2.0 s and 2.4 s against a 2 s cadence.
+- **Probe time** is 10.8 s and 12.7 s, down from ~24 s of `perf` sleeps in
+  0.11.0, but above the plan's "under 5 s on x86" target on the hybrid
+  container, where every event is probed per PMU.
+- **Self-update** on the ARM board, over an ssh reverse tunnel to a
+  loopback origin: a tampered asset is refused with "checksum mismatch"
+  and the binary left untouched; a missing sidecar warns and proceeds over
+  curl; a matching sidecar logs "Checksum verified". A plaintext LAN origin
+  is refused outright, as designed.
+- **The armv7 soft-float agent** runs under the ARM board's 64-bit kernel:
+  six record events, `fp`, pipe mode, probe 15.5 s, a headless round of
+  2,048 samples with its stat section.
+- **Not run here:** the big-endian ARMv7 target (the user's checklist, at
+  `~/.perflens-testbeds/bigendian-checklist-0.12.0.md`) and the overnight
+  soak.
+
+## Previous phase — 0.11.0 released
 
 **0.11.0 is released** (2026-09-13): tag `v0.11.0`, a GitHub release with all 21
 assets, and PyPI. It carries the big-endian pass, server-side naming of frames
@@ -60,8 +243,9 @@ installs.
       purged from the local object store. GitHub still serves them by hash
       (and through PR #3's force-push event) until GitHub Support removes them;
       that request is the owner's to file.
-- [ ] **Refuse legacy hello tokens when the server has a token set** —
-      scheduled for 0.12.0 in SECURITY.md.
+- [x] **Refuse legacy hello tokens when the server has a token set** —
+      done in the 0.12.0 stabilization pass (Phase 4); the rejection names
+      the upgrade.
 - [ ] **Server RSS drift after the sample ring fills — the overnight soak never
       ran.** Deferred by the user (2026-09-13). The only run under 0.10.0 lasted
       20 minutes and ended in a deliberate stop, not a crash, with the function
@@ -76,7 +260,10 @@ installs.
       running agent through `verify_perf {perf}`.
 - [x] **`perflens push-agent` on big-endian ARM** (2026-09-13): it now probes
       byte order the way `install-agent.sh` does.
-- [ ] Carried, smaller: the armv7 agent is untested under 0.10.0.
+- [x] The armv7 agent under a 64-bit kernel (2026-09-14, the 0.12.0 musl
+      soft-float build on the ARM64 bed's `CONFIG_COMPAT` kernel): probes
+      six record events, `fp` call graphs and pipe mode in 15.5 s and
+      collects a headless round (2,048 samples, 7.4 MB, one stat section).
 
 ### perf outside `PATH`, verified on hardware (2026-09-13)
 

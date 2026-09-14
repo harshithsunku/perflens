@@ -5,6 +5,7 @@ get it via `request.app.state.ctx`, worker threads receive it explicitly
 at construction. No module-level globals.
 """
 
+import collections
 import dataclasses
 import os
 import sys
@@ -32,6 +33,40 @@ def default_wizard_state():
     }
 
 
+class ViewCache:
+    """A small LRU for ring-derived views (threads, window, source).
+    Keys carry the ring's (generation, chunk_count) stamp, so entries age
+    out on their own as chunks land. Thread-safe."""
+
+    def __init__(self, maxsize=16):
+        self.maxsize = maxsize
+        self._lock = threading.Lock()
+        self._entries = collections.OrderedDict()
+        self.hits = 0
+        self.misses = 0
+
+    def get(self, key):
+        with self._lock:
+            hit = self._entries.get(key)
+            if hit is None:
+                self.misses += 1
+                return None
+            self._entries.move_to_end(key)
+            self.hits += 1
+            return hit
+
+    def put(self, key, value):
+        with self._lock:
+            self._entries[key] = value
+            self._entries.move_to_end(key)
+            while len(self._entries) > self.maxsize:
+                self._entries.popitem(last=False)
+
+    def clear(self):
+        with self._lock:
+            self._entries.clear()
+
+
 @dataclasses.dataclass
 class AppContext:
     """Everything the server needs, in one place. Built once in main()
@@ -46,6 +81,24 @@ class AppContext:
     # SSE sinks — the HTTP layer registers its fan-out here at startup.
     # Broadcasts before registration (or with no browsers) are no-ops.
     _sse_sinks: list = dataclasses.field(default_factory=list)
+    # Request-path caches (see web.py): ring-derived views, and each
+    # session's metadata.json keyed by path -> (mtime_ns, dict).
+    views: ViewCache = dataclasses.field(default_factory=ViewCache)
+    session_meta_cache: dict = dataclasses.field(default_factory=dict)
+    # PATCH /api/config swaps the source mapper; one at a time.
+    config_lock: threading.Lock = dataclasses.field(
+        default_factory=threading.Lock)
+    _replay_locks: dict = dataclasses.field(default_factory=dict)
+    _replay_locks_guard: threading.Lock = dataclasses.field(
+        default_factory=threading.Lock)
+
+    def replay_lock(self, session_id):
+        """The lock serializing replay builds of one saved session."""
+        with self._replay_locks_guard:
+            lock = self._replay_locks.get(session_id)
+            if lock is None:
+                lock = self._replay_locks[session_id] = threading.Lock()
+            return lock
 
     def register_sse_sink(self, fn):
         """Register a callable(event_type, data) that delivers SSE events.
@@ -92,6 +145,14 @@ def main(argv=None):
     cfg = config_from_args(argv)
 
     os.makedirs(cfg.sessions_dir, exist_ok=True)
+    if not os.access(cfg.sessions_dir, os.W_OK):
+        # Found at connect time otherwise, where it used to kill the
+        # receive thread before it read a byte.
+        print(f"[server] Error: sessions directory is not writable: "
+              f"{cfg.sessions_dir}", file=sys.stderr)
+        sys.exit(1)
+    from perflens.sessions import sweep_sessions_dir
+    sweep_sessions_dir(cfg.sessions_dir)
 
     if not os.path.isdir(cfg.ui_dir):
         print(f"[server] Warning: UI directory not found at {cfg.ui_dir}",
@@ -116,7 +177,10 @@ def main(argv=None):
             ctx.state.add_samples(samples)
             print(f"[server] Imported {len(samples)} samples as session "
                   f"{session_id}", file=sys.stderr)
-        except RuntimeError as e:
+        except Exception as e:
+            # Broad on purpose: an arbitrary perf.data through an external
+            # perf and a forgiving parser. Anything it raises is a failed
+            # import, reported as such rather than as a traceback.
             print(f"[server] Import failed: {e}", file=sys.stderr)
             sys.exit(1)
 

@@ -76,3 +76,23 @@ def test_explicit_addr2line_beats_the_prefix(fake_toolchain, tmp_path):
     probe_tools(cfg)
     assert cfg.addr2line_bin == str(explicit)
     assert cfg.readelf_bin == str(fake_toolchain / (PREFIX + 'readelf'))
+
+
+# ---------------------------------------------------------------------------
+# Argument checks
+# ---------------------------------------------------------------------------
+
+def test_equal_agent_and_http_ports_are_refused():
+    with pytest.raises(SystemExit):
+        config_from_args(['--port', '8080', '--http-port', '8080'])
+
+
+def test_malformed_map_entries_are_reported_and_skipped(capsys):
+    cfg = config_from_args(['--path-map', '/build/src=/home/me/src,bogus,=x,',
+                            '--module-map', '/opt/app=/tmp/app.sym,nope'])
+    assert cfg.path_map == {'/build/src': '/home/me/src'}
+    assert cfg.module_map == {'/opt/app': '/tmp/app.sym'}
+    err = capsys.readouterr().err
+    assert "ignoring --path-map entry 'bogus'" in err
+    assert "ignoring --path-map entry '=x'" in err
+    assert "ignoring --module-map entry 'nope'" in err

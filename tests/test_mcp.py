@@ -31,23 +31,6 @@ FIXTURE = FIXTURES[0]
 # Fixtures
 # ---------------------------------------------------------------------------
 
-@pytest.fixture()
-def core(tmp_path, perflens_home):
-    """An AppContext with a stub UI dir (no workers, no source mapper)."""
-    from perflens.app import AppContext
-    from perflens.config import ServerConfig
-    from perflens.state import MetricsState, ProfilingState
-
-    sessions_dir = str(tmp_path / 'sessions')
-    os.makedirs(sessions_dir)
-    ui_dir = tmp_path / 'ui'
-    ui_dir.mkdir()
-    (ui_dir / 'index.html').write_text('<!DOCTYPE html><title>stub</title>')
-    cfg = ServerConfig(source_dir=str(tmp_path), sessions_dir=sessions_dir,
-                       browse_root=str(tmp_path), ui_dir=str(ui_dir))
-    return AppContext(config=cfg, state=ProfilingState(max_samples=100000),
-                      metrics=MetricsState())
-
 
 @pytest.fixture()
 def session_id(core):
@@ -512,6 +495,12 @@ def test_agent_connect_points_the_agent_at_perf_path(core, monkeypatch):
         def __init__(self):
             self.sent = []
 
+        def close(self):
+            self.connected = False
+
+        def join(self, timeout=None):
+            pass
+
         def send_command(self, cmd, args, timeout=60):
             self.sent.append((cmd, args))
             if args.get('perf') == '/opt/perf-4.4/bin/perf':
@@ -672,3 +661,24 @@ def test_pick_event_plain_hardware_unchanged():
     plain = {'cycles': {}, 'instructions': {}}
     assert pick_event(plain) == 'cycles'
     assert pick_event(plain, 'instructions') == 'instructions'
+
+
+def test_pick_event_falls_back_to_the_software_clock():
+    """A target with no hardware PMU samples on cpu-clock; `available[0]`
+    used to hand back whatever sorted first."""
+    from perflens.mcp.client import pick_event
+    assert pick_event({'page-faults': {}, 'cpu-clock': {}}) == 'cpu-clock'
+    assert pick_event({'task-clock': {}, 'context-switches': {}}) == 'task-clock'
+
+
+def test_derived_counters_sum_hybrid_spellings():
+    from perflens.mcp.format import derived_counters
+    derived = derived_counters({
+        'cpu_core/cycles/': {'value': 1000}, 'cpu_atom/cycles/': {'value': 500},
+        'cpu_core/instructions/': {'value': 3000},
+        'cpu_atom/instructions/': {'value': 750},
+        'cpu_core/branch-instructions/': {'value': 400},
+        'cpu_core/branch-misses/': {'value': 8},
+    })
+    assert derived['ipc'] == 2.5
+    assert derived['branch_miss_rate_percent'] == 2.0

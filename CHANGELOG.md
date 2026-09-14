@@ -7,8 +7,240 @@ releases may break APIs between minor versions when needed.
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-09-14
+
+The sixth agent unfreeze, decided 2026-09-14 for a stabilization pass over
+the whole project. The wire protocol is unchanged: every frame type, command
+and hello field is as in 0.11.0, and a 0.11.0 server drives this agent as
+before. What changed is how the agent runs `perf`, what it does when
+something does not exit, and what a peer can make it do before it has
+authenticated. The server side of the socket got the same treatment: what
+one bad frame, one dead device or one full disk could do to a session.
+The UI's turn was stability first, then the rough edges: errors that were
+swallowed, a reconnect that threw the operator out of a saved session, a
+source view that reset itself every chunk.
+
+### Security
+
+- **Pre-0.10.0 agents are refused by a server with a pairing code.** Such
+  an agent puts its secret in the hello, where any port scanner reads it,
+  and until now a server with `--token` fell back to comparing it — the
+  leak the pairing handshake replaced. The rejection names the upgrade
+  (`perflens push-agent`, or `--update` on the device). A server with no
+  code configured sends no `auth` at all, so an old agent dialling it in
+  `--server` mode still pairs. Scheduled in SECURITY.md for this release.
+- The server bounds what a peer can make it allocate: 64 KB for the hello
+  and auth frames (read before the peer has proved anything), 80 MB for a
+  session frame, 256 MB for one frame's decompressed text. A garbage header
+  claiming 4 GB used to be allocated as asked.
+- **No more `Access-Control-Allow-Origin: *`.** Every API response carried
+  it, so any web page the operator visited could read `/api/browse` (a
+  listing under the home directory), `/api/agent` and every saved profile
+  from `127.0.0.1:8080`. The UI is same-origin and the Vite dev server
+  proxies `/api`, so nothing legitimate needed it.
+
 ### Fixed
 
+- **One malformed frame ended the whole session.** The receive loop's
+  catch-all broke out of the loop, and three ordinary things reached it: a
+  metrics frame that is not a JSON object, a `seconds time elapsed` line
+  the parser could not read, and a `cpu: null` in the health summary. A
+  bad frame is now dropped and logged (the first three with a trace, the
+  rest counted) and the capture goes on.
+- **Every counter longer than three digits vanished under the C locale.**
+  The agent runs perf with `LC_ALL=C` since this release, and the C locale
+  groups nothing, so a `cycles` count arrives as twelve plain digits — which
+  the grouping-tolerant number parser added in the same pass matched under
+  neither of its branches. Every counter but the two-digit `page-faults`
+  was dropped. Found on the first hardware run after the change, on the
+  hybrid container bed; no fixture could have shown it, since every
+  committed capture was made under a grouping locale. Plain digits are
+  accepted first now, and the protocol shim prints them the way the C
+  locale does.
+- **The first chunks after `start` lost their counters.** Continuous mode's
+  first chunk or two carry only `PERF_STAT` while `perf record` fills its
+  ring buffer, and the server skipped a chunk with no samples before
+  merging its stat section. The counters are merged first.
+- **A dead device wedged every later command.** `send_command` held the
+  session lock across a `sendall` with no timeout, so a device that
+  stopped reading parked the next command behind it for as long as TCP
+  retransmits (about fifteen minutes), and the ones after that filled the
+  HTTP threadpool. Every agent socket now has keepalive, `TCP_USER_TIMEOUT`
+  and a 30 s send bound, on both connect paths, and a relayed command's
+  timeout is bounded to 1..600 s.
+- **The listener died on one `accept()` error.** `EMFILE` under descriptor
+  pressure or `ECONNABORTED` ended the accept thread and closed the
+  listening socket for good, with nothing in the API saying so. It logs,
+  backs off a second and keeps listening.
+- **A full or read-only sessions directory killed the receiver before it
+  read a byte**, leaving the UI showing a connected agent forever. The
+  directory is checked at startup (`perflens serve` refuses to start) and,
+  should it fail later, the session runs unsaved with one log line.
+- **A chunk that failed to spool (`ENOSPC`) was overwritten by the next.**
+  The truncated file kept its index, so the following chunk replaced it
+  and the count under-reported. Chunks are written to a temp name and
+  renamed; a failed one is a gap.
+- **A server killed mid-capture left an invisible session.** `metadata.json`
+  was written only when the receive loop ended, and daemon threads die with
+  uvicorn, so Ctrl-C left the chunks with no metadata: unlisted, not
+  replayable, never cleaned up (STATUS counted 332 such directories on one
+  machine). The metadata is written when the session directory is created
+  and refreshed with every chunk (`live: true` until finalized); a uvicorn
+  shutdown hook stops the agent and waits for the save; and a startup sweep
+  removes session directories with neither chunks nor metadata and rebuilds
+  metadata (`recovered: true`) for ones with chunks and none.
+- **Replacing an agent mid-chunk mixed the two sessions.** The new agent's
+  install reset the state and metrics while the old receiver might still
+  be parsing, so the dying agent's last chunk landed in the new session and
+  the old one was saved with the new agent's (empty) metrics. The old
+  receiver is closed and joined (bounded, 10 s) before the reset.
+- `connect_to_agent` closes the socket when installing the session fails
+  after a successful handshake, and in-flight commands are failed at once
+  on disconnect rather than left to time out.
+- **The source mapper was shared across threads with no lock.** The
+  rebuild worker and every request thread drove the same `addr2line` pipes,
+  whose protocol is "write N addresses, read 2N lines": two threads
+  interleaving read each other's answers — names and line numbers silently
+  swapped — and left the pipe desynchronized for the rest of its life.
+  Each pipe now has a lock held across an exchange, and the mapper one
+  around its cache-mutating phases.
+- **A hung `addr2line` or `readelf` froze the server.** The worker blocked
+  in `readline()` for good, so every UI update stopped with nothing in the
+  log. Reads time out after 30 s of silence; the tool is killed and
+  restarted, and after three deaths in a row it is given up on with one
+  log line. Addresses an exchange did not answer are left for the next
+  chunk rather than cached — and persisted, in `symbols.db`, for as long
+  as the cache lived — as `??`; a symbol table `readelf` did not finish is
+  not persisted either.
+- **A replaced source mapper leaked.** `PATCH /api/config` swapped in a new
+  mapper and dropped the old one with its `addr2line` children and sqlite
+  handle open (`close()` had no production caller). The old mapper is
+  closed after the swap, two PATCHes cannot race, and the mapper is closed
+  at shutdown.
+- **The UI showed the previous session after a reconnect.** `chunk_count`
+  restarts at 0 on every session reset while the browser's last-fetched
+  version held the old count, so nothing refetched until the new count
+  overtook it. Version stamps (`/api/status`, `/api/snapshot`, the
+  `data_version` SSE event) carry a `generation` that a reset bumps, and
+  name both totals: `ring_samples` (the bounded ring, what `total_samples`
+  always was) and `session_samples` (everything parsed this session).
+- **A browser attaching to a running session never learned an agent was
+  connected.** The SSE stream's opening burst carried only the data version
+  and counters; it now starts with `status` and, when one is connected,
+  `agent`.
+- IPC and the miss rates were blank on hybrid CPUs (`cpu_core/cycles/` and
+  `cpu_atom/cycles/`, never a bare `cycles`) and the branch-miss rate was
+  blank whenever the counter was spelled `branch-instructions`, which is
+  how perf spells it when asked by that name. Both the server's derived
+  stats and the MCP `perflens_perf_stat` tool resolve counters through the
+  event's base name and sum the PMU-qualified spellings. The MCP default
+  event falls back to `cpu-clock`/`task-clock` before "whatever sorts
+  first", for targets with no hardware PMU.
+- Error paths that used to be tracebacks or lies: a truncated
+  `metadata.json` is a 500 with the error envelope (`bad_metadata`) on
+  replay and export and is skipped by the list; `DELETE /api/sessions/<id>`
+  reports a failure instead of `ok` after `ignore_errors=True` left the
+  directory; the replay cache is written to a temp name and renamed, and
+  one session is built by one request at a time (two tabs used to build it
+  twice and race on the file); a `perf.data` upload is written to disk off
+  the event loop (up to 500 MB used to be written on it, stalling SSE for
+  every browser meanwhile); `--import` at startup reports any failure
+  rather than only `RuntimeError`; `/api/sessions?limit=` is bounded at
+  1000; `--port` equal to `--http-port` is refused; a malformed
+  `--path-map`/`--module-map` entry is reported instead of dropped.
+- The symbolization tally on `/api/index/status` counted replayed and
+  exported frames as if they were the live capture's.
+- `verify_perf` mutated the hello dict other threads were serializing; it
+  now replaces it.
+- **UI: an event switch during a fetch was dropped.** The snapshot fetch's
+  in-flight guard sat above the `force` check, so choosing another event
+  while a chunk was loading left the previous event on screen until the
+  next chunk. The switch is remembered and issued when the fetch lands;
+  stamps that arrive meanwhile coalesce into one catch-up fetch. Every
+  request is bounded (30 s, agent commands the server's own timeout plus
+  headroom), so a half-open connection can no longer latch the
+  bookkeeping in "fetching" for good, and a failed snapshot is reported
+  — a hybrid CPU's `400 ambiguous_event` used to be swallowed, leaving
+  the table showing skeleton rows forever; the UI now picks the concrete
+  PMU event the server names.
+- **UI: a reconnecting server read as a disconnected agent, and threw the
+  operator out of replay.** Any SSE drop marked the agent disconnected and
+  retried every 3 s forever; the `status` frame on reconnect (and, since
+  the server now sends one on every connection, on *every* reconnect)
+  called `exitReplay`. The header now distinguishes "server unreachable,
+  reconnecting" from the agent state, the retry backs off from 3 s to
+  30 s, and leaving replay is the operator's action: the replay banner
+  has a button for it.
+- **UI: development builds had no live updates.** The boot effect's
+  StrictMode guard returned no cleanup on the second pass, so `npm run
+  dev` ran with no SSE connection and no keyboard shortcuts. Only the
+  one-shot boot actions are guarded now.
+- **UI: errors nobody could see.** The error banner rendered inside the
+  hidden profiling view, so a failed deep link or a wizard error on the
+  landing page was invisible; it now sits above every view with
+  `role="alert"`, and transport failures stay until dismissed. Fourteen
+  `.catch(() => {})` sites — pause, resume, stop, disconnect, every 502 —
+  now reach the banner with the server's message; the sessions, threads
+  and thread-detail tables render a failure instead of "Loading…" forever
+  on a dead server; an export that fails (a 400 or 404) reports instead
+  of opening a tab of raw JSON, and downloads through a blob rather than
+  a popup.
+- **UI: the source view reset itself on every chunk** and scrolled back
+  to the hottest line out from under the reader; a slow response could
+  paint file A under file B's header. It now keeps the previous lines
+  while the next chunk's annotation loads, scrolls only when the file
+  changes, and cancels a superseded fetch (the thread drill-down too).
+- **UI: replay leaked live queries.** The thread overview, the thread
+  view and the time window read the raw sample ring, which a saved
+  session does not carry; in replay they queried the live server anyway
+  (and showed another session's threads). They are off in replay, the
+  thread filter is hidden there, and the Threads tab says why.
+- **UI: switching process reset the sampling settings** to 99 Hz / 8 s
+  and the default events; it now keeps the agent's current frequency,
+  interval and event list. The control bar shows the agent's `probing`
+  state with elapsed seconds while a start or switch is in flight, keeps
+  pause and stop disabled meanwhile, derives its label from the agent's
+  own `status` rather than local flags, and closes its popovers on
+  Escape (a pending close timer no longer fires after unmount).
+- **UI: the wizard** advanced to the options step after a rejected binary
+  path; polled the index status every 500 ms with no cap and no
+  cancellation after leaving the wizard; sent 99999 Hz and turned 0 into
+  99 silently (frequency 1–10000, interval 1–300 and port 1–65535 are
+  validated with a message); never reset "connected" when the agent
+  dropped; and applied a toolchain prefix and sysroot it never restored
+  (both are read back from `/api/config`).
+- **UI: search boxes trimmed on every keystroke**, so a space could never
+  be typed; an invalid regex in the function filter was ignored while the
+  flame graph reported it. Both keep what was typed, filter on a deferred
+  value so a table of thousands stays responsive, and both report
+  "invalid regex".
+- **UI: six CSS custom properties were used but never defined** (the
+  thread filter had no border, the core bars no track, the cached memory
+  segment no colour); light-theme tertiary text was 2.5:1 on white and is
+  4.8:1 now; two dead tokens are gone.
+- **UI: long-running counters ran off the stat bar.** Counters sum over the
+  whole session, so a busy target showed `11219.4B` and a fractional
+  `task-clock` printed every digit; both were cut to `11219.…` on the card.
+  Values now scale to T, and large fractional counters scale like integer
+  ones.
+- **UI: a busy multi-threaded process read as critical.** Process CPU is
+  reported per core (100% is one busy core, as `top` shows it), while the
+  health strip drew it on a 0–100 scale: a process using five cores read
+  `501.2%` in red and its sparkline sat clipped at the top. The card's
+  severity and the chart now scale with the core count.
+- **UI: the flame graph's search readout could exceed 100%.** It summed
+  every matching frame, so a match nested inside another match was counted
+  twice ("4 / 266 frames (100.2%)"). Each stack is now counted once.
+- **A banner said symbolization had failed when one frame in 2.4 million
+  was unnamed.** A profile is reported degraded only when at least 1% of
+  userspace frames stay unnamed; a stray JIT or vdso frame no longer
+  raises the "supply the matching unstripped binary" warning.
+- **Switching between a sanitizer build and a normal build left stale
+  objects.** `make check` after `make SANITIZE=…` linked instrumented
+  objects without the sanitizer runtime (both CI sanitizer jobs failed on
+  it), and a `VERSION` change left the old version compiled into an agent
+  that rebuilt nothing. Objects now record the flags they were built with
+  and rebuild when those change; CI runs the unit tests instrumented too.
 - **`perflens push-agent --help` prints usage.** It handed `--help` to ssh as
   the host and failed with `ssh failed: unknown option -- -`. `-h`/`--help`
   now print the usage and exit 0, and any other argument starting with `-` is
@@ -16,14 +248,351 @@ releases may break APIs between minor versions when needed.
 - **`perflens serve --help` described `--token` backwards.** It said agents
   must present the secret in their hello, which stopped being true in 0.10.0:
   the server presents the pairing code to the agent through the `auth` command,
-  and the agent never sends one. The help now says so, and notes that a
-  pre-0.10.0 agent's hello token is still accepted with a warning.
+  and the agent never sends one. The help now says so.
 - **`--max-samples` help understated memory.** It put the default's plateau
   near 850 MB; the measured figure at 500000 samples is near 1.1 GB, as the
   README and reference already said.
 - **README release-assets table.** A sentence between table rows cut off the
   `perflens-tools-linux-{x86_64,aarch64}.tar.gz` row, which rendered as plain
   text.
+- **Long intervals lost every chunk, silently.** Continuous mode capped a
+  chunk at 64 MB of `perf script` text, and past the cap the sink's sticky
+  error made the flush skip the send and log nothing. Measured at ~3.4 MB/s
+  on an 8-core target, the cap arrived after ~19 s, so any interval longer
+  than that — the UI offers up to 300 s — shipped nothing at all and looked
+  like an idle target. Chunks now flush at 16 MB of raw text as well as at
+  the interval, cut at a sample boundary like a deadline flush; a chunk the
+  sink still refuses is counted and logged.
+- **`perf stat` counted only every other interval, one chunk late.** A stat
+  round started only after the previous result had been attached to a
+  chunk, so with rounds as long as the interval, half the wall time went
+  uncounted and the totals were about half the truth. Rounds now run back
+  to back and every completed round rides the next chunk.
+- **The call-graph probe recorded `cycles` unconditionally and accepted any
+  output.** On a target without a PMU it only ever worked because some
+  perfs fall back to cpu-clock themselves; and "perf script printed
+  something" is the same trap the pipe-mode probe had already closed. It
+  now records the first event the target can record, requires call-chain
+  frames in the output, and is skipped when nothing can be recorded at all
+  (that case used to spend up to ninety seconds timing out).
+- **Rounds-mode `perf script` ran at normal priority.** Continuous mode
+  niced the symbolizer; the rounds fallback — chosen on exactly the
+  single-core targets where it matters — did not. Every `perf script` the
+  agent runs is now at nice 5.
+- **Deadlines used the wall clock.** The command queue waited on
+  `CLOCK_REALTIME` and the pairing deadline was `time(NULL)`, so an NTP step
+  — routine on boards that boot in 1970 and jump when the network comes up —
+  dropped a legitimate server with "no valid pairing code within 30s", or
+  held the loop until the clock caught up. Both are monotonic now.
+- **`perf stat` numbers depended on the device's locale.** perf groups
+  digits with the locale's separator and the parser stripped only `,`, so a
+  device set to `de_DE` printed `9.310.933.573` and the counter parsed as
+  `9.31`. The agent runs every perf child with `LC_ALL=C`; the server's
+  parser additionally accepts `.`, `'`, a space and a narrow no-break space
+  as grouping, for agents that predate this, and no longer raises on a
+  malformed `seconds time elapsed` line (that exception ended the session).
+- **A perf child that would not exit hung `stop`, and teardown with it.**
+  Teardown sent SIGTERM and then blocked in `waitpid()`; a perf stuck
+  flushing a small RAM-backed `/tmp` never came back, `stop` joins that
+  thread, so the command loop froze. Children are now reaped with a
+  three-second grace before SIGKILL, and each runs in its own process group
+  so the kill reaches the `sleep` workload perf spawned — the SIGKILL paths
+  used to leave one orphaned `sleep` per killed round. Rounds mode also
+  stops waiting on a stuck child the moment `stop` arrives instead of
+  sitting out the round's timeout.
+- **A signal landing on a just-forked child tore down the session.** Until
+  it execs, a child shares the agent's signal handlers, and the SIGTERM
+  handler shuts down the session socket the child still held a copy of. A
+  `stop` racing a child forked from the command thread ended the connection
+  at both ends in the same millisecond. Signals are blocked across `fork()`
+  and reset to their defaults in the child before anything else.
+- **Sends had no time bound during a session.** Keepalive only probes an
+  idle connection; with a chunk in flight Linux retransmits for about
+  fifteen minutes before `send()` fails, and a server that is alive but not
+  reading never fails it at all. The agent held `sock_lock` through the
+  blocked send, so metrics and every command response froze with it and
+  `--server` mode never reconnected. Session sockets now carry
+  `TCP_USER_TIMEOUT` and `SO_SNDTIMEO` (60 s; `PERFLENS_SEND_TIMEOUT_MS`
+  overrides).
+- **perf children inherited every descriptor.** A child that inherited the
+  listening socket kept the port bound after the agent was SIGKILLed, so a
+  restart failed with `EADDRINUSE` until the last perf exited; one that
+  inherited the session socket hid the disconnect from the server. Pipes
+  and sockets are close-on-exec.
+- **Before authenticating, a peer could make the agent allocate 64 MB per
+  frame, without limit.** Server → agent frames are JSON commands of a few
+  hundred bytes; they are capped at 64 KB, and the command queue at 64
+  entries — beyond either the connection is dropped.
+- **Command ids were echoed unescaped**, so an id containing `"` or `\`
+  produced invalid JSON — before authentication as well. Ids are accepted
+  only as `[A-Za-z0-9_.:-]{1,63}` and escaped on the way out, as is every
+  error message. `start` now validates `frequency` (1 to the kernel's
+  `perf_event_max_sample_rate`) and `duration` (1–300 s) as `configure`
+  does — `duration: 0` spun rounds mode through record and script back to
+  back. Argument lookups are scoped to the `args` object, so a `pid` in a
+  later sibling no longer stands in for a missing one, an `args` object
+  containing a `cmd` key cannot shadow the command, and a string value that
+  equals a key name is not a key. Responses are built with a bounded
+  writer that answers an error instead of sending a truncated document.
+- **A probe blocked every other command, and a disconnect did not stop
+  it.** `start` and `reprobe` probed on the command thread — 20 s on a
+  typical target, minutes on a slow single-core one — so `ping`, `status`
+  and `stop` waited behind it, the server's command timeout could expire
+  while the agent later started profiling anyway, and a peer that went
+  away mid-probe left perf running against the target until the probe
+  finished. The probe now runs on the collection thread: `status` reports
+  `probing`, `stop` cancels it within a poll interval and the pending
+  `start`/`reprobe` is answered `cancelled`, and a lost session ends it.
+- **Switching process re-ran the whole probe.** Events, call-graph method,
+  script fields and pipe mode depend on the kernel, the perf build and the
+  permissions, not on the pid. A `start` on another pid now runs one
+  short `perf record` against it and keeps the rest; only if that is
+  refused (another user's process, say) does it probe again.
+- **One silent connection held `--listen` for the whole auth window.** A
+  peer that connected and sent nothing kept the only slot for 30 s, and a
+  server that crashed without a FIN kept it until keepalive noticed. The
+  window is 10 s, and while a session is unauthenticated the listening
+  socket is still polled: a new peer replaces the silent one at once. An
+  authenticated session is never replaced.
+- **Metrics: cpufreq stopped at the first offline core** (every later
+  core's frequency was dropped; missing cores are now `null`); **only
+  `thermal_zone0` was read**, which on many SoCs is a PMIC, battery or
+  board sensor (the zone typed as CPU/SoC/package is chosen at startup,
+  else the hottest zone each tick); **kernels before 3.14**, which lack
+  `MemAvailable`, counted the page cache as used memory; and hosts with
+  more than 128 cores were silently truncated. The collector also opens
+  each `/proc` and `/sys` file once and re-reads it in place, instead of
+  opening, parsing and closing about thirty files every two seconds.
+- **The process list read every process's `comm` and `cmdline`** — up to
+  4096 opens each — before sorting and keeping 200, and its CPU% divided
+  by the ticks of every core, so one saturated core on a 24-core host read
+  4.2 % there and 100 % in the health strip for the same process. It reads
+  `comm` from the stat line it already has, `cmdline` for the entries it
+  returns, and reports per-core CPU% like `top` and the process metrics.
+  Hosts with more processes than the old fixed cap no longer lose
+  whichever came last.
+- **Rounds mode sampled nothing while `perf script` ran.** Round N+1's
+  recording now starts the moment round N's ends, and round N is
+  symbolized alongside it — on the single-core targets that get rounds
+  mode, that was seconds to tens of seconds of blind time per round. A
+  round is also not started when the temp filesystem has under 32 MB
+  free, with a warning naming `TMPDIR`.
+- **Three `send()` calls per frame.** Length, flag and payload went out
+  separately, so Nagle held the later segments for the peer's delayed ACK
+  (40 ms on Linux) and every small response paid it. One `writev()` per
+  frame, and `TCP_NODELAY`.
+- **`verify_perf` reported a perf functional when nothing could be
+  sampled.** Its check counted `cycles`, which on a PMU-less target exits 0
+  with `<not supported>`. It counts the first event the target is known to
+  record, or `cpu-clock`, and reads the output.
+- **The listen banner guessed the address from the route to 8.8.8.8**, and
+  printed `127.0.0.1` on any network without a default route. It lists
+  every non-loopback IPv4 address from the interfaces.
+- Pausing continuous collection logged "Pipeline ended unexpectedly" and
+  slept a second, because the pause kills the pipeline and its EOF arrived
+  before the loop noticed the new state.
+- Cross-thread flags (`authed`, `collect_stop`, `session_done`) were
+  `volatile int`, which is not thread-safe; they are `_Atomic`, and
+  `frequency`/`duration` are read under the state lock. The agent builds as
+  C11.
+
+- **Self-update ran the download before any check.** `--update` (and the
+  `update` command) executed the downloaded binary for `--version` before
+  comparing versions, so even a rejected update had run whatever the origin
+  served, as the agent's user — often root on a device — and the `wget`
+  fallback is usually BusyBox's, which validates no TLS certificate. The
+  agent now fetches the release's `.sha256` sidecar and checks the download
+  with the device's `sha256sum` before making it executable or running it;
+  a mismatch is refused and the file removed. Without a sidecar or a
+  `sha256sum` it proceeds with a warning over curl, and refuses over wget.
+  A plaintext origin is still refused, except on loopback.
+
+### Changed
+
+- **Every release agent is a musl static build, and both 32-bit ones are
+  soft-float.** The x86_64, aarch64 and armv7 assets were static *glibc*,
+  which cannot reliably resolve names (`getaddrinfo` wants the host's NSS
+  libraries at run time, which a foreign device does not have — the linker
+  warned about it on every build), and armv7 was hard-float, the same
+  SIGILL trap the big-endian pass hit on boards without VFP. The three
+  extra toolchains live on the repo's `toolchains` release like the
+  big-endian ones. The x86_64 asset went from 2.06 MB to 0.67 MB, with
+  `-ffunction-sections`/`--gc-sections` dropping the unused half of the
+  vendored zstd (the agent only compresses) and the release asset stripped
+  (the unstripped binary stays a CI artifact). Hardening flags for a
+  network-facing daemon: `-fstack-protector-strong`, `-D_FORTIFY_SOURCE=2`,
+  `-Wformat=2`, `relro` + `now`.
+- CI asserts what the assets claim instead of printing it: statically
+  linked for every arch, a soft-float ABI for both 32-bit ARM assets, BE8
+  for the big-endian one. The agent's Makefile refuses a non-static link.
+  `build_package.sh` names its asset `armv7` like every consumer, and
+  `install-agent.sh` no longer treats a device without `od` as big-endian.
+- **Agent log lines carry an ISO-8601 timestamp and go out in one
+  `write(2)` each**, so lines from the collection, metrics and command
+  threads no longer interleave and a field log can be matched against the
+  server's. The per-chunk and per-round lines — one every eight seconds,
+  about a megabyte a day into a RAM-backed `/tmp` — are logged only with
+  `PERFLENS_LOG=debug`; a summary line goes out on the first chunk and
+  every hundredth.
+- **Temp files honour `TMPDIR`**, and `perflens-*` files of the agent's own
+  uid older than an hour — what a SIGKILLed agent leaves behind — are
+  removed at startup.
+- A profiled process is identified by pid *and* start time, so a pid the
+  kernel recycles while a session runs is reported as exited rather than
+  profiled.
+- The perf command lines every probe and both collection loops run are
+  assembled in one place (`perfcmd.c`); the drift that had the call-graph
+  probe on a different event than everything else cannot recur.
+- **The capability probe is about four times faster**: one `perf stat -x ,`
+  over every candidate instead of one per event (with the per-event form
+  as the fallback for a perf that rejects the batch), one `perf record`
+  over every survivor (bisected only if it fails), and the call-graph
+  recording reused for the `-F` check — about 7 perf runs and 6 s of
+  `sleep` where there were ~25 and 24 s. The probe logs how long it took.
+- Sleeping loops (paused, backing off, between metrics ticks) wait on a
+  condition variable that stop, pause and resume signal, so they react at
+  once rather than on their next 200 ms tick.
+- Small buffers (stderr captures, stat output) no longer start at 256 KB,
+  continuous mode reads straight into its carry buffer, and one zstd
+  context serves a whole pipeline instead of one per chunk.
+- `tests/test_parser_compat.py` is gone: its two tests had no assertions
+  and duplicated `test_parser.py`'s parametrized cases. The `core` fixture
+  is defined once, in `conftest.py`.
+- **Snapshot cost no longer grows with the session.** On every chunk the
+  aggregator deep-copied every event's whole flamegraph tree and re-sorted
+  every function, and `/api/snapshot` then re-serialized and re-gzipped
+  the dict per request. The tree is now kept in its serializable shape
+  (child lookup maps live beside it, depth is capped at insert time), the
+  worker serializes a changed event once — JSON bytes plus a raw-deflate
+  segment — and `/api/snapshot` splices those into its response, gzip
+  included, without re-encoding or recompressing a multi-megabyte profile.
+- **Ring-derived views are memoized per chunk.** `/api/threads`,
+  `/api/threads/<tid>`, `/api/window` and `/api/source` copied and rescanned
+  the whole ring (up to `--max-samples` entries, inline expansion
+  allocating a dict per sample) on every request, and the UI refetches
+  them on every chunk and every timeline drag. A small LRU on the context,
+  keyed by the view's parameters and the ring's `(generation, chunk_count)`,
+  answers repeats. The load-base recovery pass runs once per chunk instead
+  of once per resolution phase.
+- **The parser is twice as fast**: a tab-led line is a call-chain frame
+  and only frames are, so the two header regexes are no longer tried on
+  every one of them first (1.6 s → 0.8 s over 840 000 lines of the fixture
+  captures). A line over 16 KB is skipped rather than matched (the header
+  regex backtracks quadratically on a long non-matching line).
+- `/api/sessions` re-reads a session's `metadata.json` only when its mtime
+  changes.
+- `ProfilingState.get_snapshot` (no callers) and `models.SourceLine`
+  (unreferenced, and the wrong shape) are gone.
+- **UI: one sampling event by default.** The wizard's Perf step selects
+  `cycles` (or the software clock on a target with no PMU) and the rest
+  are opt-in; every `start` the UI sends carries an explicit event list.
+  Each extra event multiplies the data the device sends, and a six-event
+  default was the usual reason a slow target fell behind.
+- **UI: "Stop" now means stop.** The header's Stop and the control bar's
+  ■ both *disconnected* the agent — which a `--server` agent answers by
+  dialling back in within seconds. The header button is "Disconnect", the
+  control bar has a plain Stop (the `stop` command; the agent stays
+  connected, a ▶ starts the same process again) beside a separate
+  Disconnect, and the bar shows the events being recorded.
+- UI: the header, banners and app shell subscribe to the store fields
+  they render rather than the whole store, so a 2 s metrics frame no
+  longer re-renders the entire tree; the profiling view is mounted only
+  while shown (its 1 s ticker, index-status query and health strip ran
+  on the landing page); the flame graph handles clicks with one delegated
+  handler on the `<svg>` instead of four closures per frame, memoizes the
+  rect colours and labels, clears its click timer on unmount and clamps
+  the context menu to the viewport; the thread flame graph is sized to
+  its container rather than 900 px; the sparklines use `var(--…)` instead
+  of ~15 `getComputedStyle` calls per render every two seconds, and their
+  panel arrays are memoized; tables keep their previous rows while the
+  next chunk's data loads.
+- UI: deleting a session asks first; a `?` button in the header opens the
+  shortcut help; a hint under the sparklines says that dragging selects a
+  time window; a session still receiving (or never finalized) is tagged
+  `live` in the list and a rebuilt one `recovered`; icon-only buttons have
+  `aria-label`s, wizard labels are bound to their inputs, clickable
+  rows/cards/menu items take keyboard focus and Enter, the tab strip has
+  `aria-controls`/`tabpanel`; `parseHash` validates `tab`.
+
+### Tests
+
+- The perf shim used by the protocol tests now records how each invocation
+  was run (nice level, locale, inherited descriptors, pid) and can be made
+  slow, stuck, chatty or PMU-less, which is what the fourteen new tests
+  need: size-based flushing, stat coverage, priority in both modes,
+  `LC_ALL=C`, no inherited sockets, `TMPDIR` and the stale-file sweep,
+  timestamps, a child that ignores SIGTERM, a server that stops reading,
+  the pre-auth frame cap, id and argument handling, `start` validation,
+  the Nagle round trip, and the `verify_perf` functional check. The
+  chains-dropped pipe-mode case now models perf 4.4 exactly — chains
+  through a file, none through a pipe — since the call-graph probe no
+  longer accepts chainless output. Ten more cover the batched probe and
+  its per-event fallback, commands answered during a probe, stop and
+  disconnect cancelling one, a process switch without a re-probe, a
+  silent `--listen` peer being replaced and dropped, overlapping rounds,
+  the shared CPU% convention, and the per-core metrics. `make -C agent-c
+  check` runs C unit tests over the `/proc` and `/sys` parsers with
+  captured input (an offline core, a kernel without `MemAvailable`, the
+  thermal zone choice). CI runs the protocol tests under
+  AddressSanitizer+UBSan and under ThreadSanitizer (`make SANITIZE=…`) —
+  the TSan run is what turned the shutdown flag and the child-pid slots
+  into C11 atomics — and shellchecks the shell scripts. Three tests drive
+  `--update` against a fake release over loopback: a verified asset, a
+  tampered one that must never run, and a missing sidecar.
+- `tests/test_agentlink_session.py` drives the server's receive loop with a
+  scripted pure-Python agent: malformed frames, a stat-only chunk, early
+  and final metadata, an empty session leaving no directory, a chunk write
+  failing with `ENOSPC`, the startup sweep, replacing an agent mid-session,
+  the shutdown hook, the socket bounds, an oversized hello and an oversized
+  session frame, and an `accept()` error. The legacy-token test in
+  `test_agentlink_auth.py` now asserts the refusal, and a second one that a
+  tokenless server still pairs an old agent.
+- Server: four threads resolving disjoint address sets through one mapper
+  get exactly the single-thread answers; a fake `addr2line` that hangs, one
+  that answers one address per life, and one that dies on start (the pipe
+  is given up after three) — with the persistent cache checked for what
+  must not be in it; the worker's cached bytes decode to the snapshot and
+  the spliced gzip body decodes with both `gzip` and `zlib`; the fixture
+  captures parse to the sample count their metadata records; a 40 KB line;
+  hybrid-spelled counters; `generation` and both totals on `/api/status`;
+  the bytes path answering exactly what the dict path did, gzipped or not;
+  no CORS header; the SSE burst starting with `status` and `agent`; the
+  session list's bound and metadata cache; corrupt metadata as an error
+  envelope; a refused delete; view memoization across chunks and resets;
+  the previous mapper closed on `PATCH /api/config`; equal ports refused;
+  malformed map entries reported.
+- UI: vitest units for the live store (stamp coalescing, an event switch
+  during a fetch, a generation reset, the ambiguous-event fallback, a
+  failed fetch releasing the in-flight guard, PMU-qualified event
+  selection), the event helpers, `unwrap`, the error banner's sticky and
+  auto-hide modes, the reconnect backoff, hash validation, stat value
+  scaling and search coverage (53 tests, was 24); Playwright scenarios for the error banner on a bad deep link,
+  the Threads tab in replay, the replay exit button, the delete
+  confirmation, a search term with a space and an invalid pattern, and
+  the header's Disconnect/shortcuts buttons (16 scenarios, was 10).
+
+### Verified on hardware
+
+On an x86_64 hybrid-CPU container and an 8-core ARM64 board, with the
+release's musl agents installed through `install-agent.sh` (checksum
+verified): continuous collection at one event, 60 s intervals, a `perf
+stat` round of exactly 60 s on every chunk after the first, chunks of
+9.8 MB and 16.8 MB of text sent as 0.49 MB and 0.80 MB, the largest gap
+between health frames 2.4 s, the probe 10.8 s and 12.7 s, and a restart on
+the same process in no time at all. Self-update refused a tampered asset
+and verified a good one. The armv7 soft-float agent ran under the board's
+64-bit kernel. That run is also where the C-locale counter regression
+above was found.
+
+### Known issues
+
+- Not yet run on the big-endian ARMv7 target: the armeb asset is the same
+  soft-float BE8 build the 0.11.0 pass validated, rebuilt with musl and
+  the new hardening flags, and checked with `readelf -h` only.
+- The capability probe is still over ten seconds on a hybrid-CPU host,
+  where every candidate event is checked per PMU.
+- Server memory after the sample ring fills: the overnight soak carried
+  since 0.9.0 has still not run.
 
 ## [0.11.0] — 2026-09-13
 

@@ -5,7 +5,9 @@ Replaces the full re-aggregation of every accumulated sample on each chunk
 that are updated only with the new chunk's samples:
 
   - add_chunk() is O(new_samples x stack_depth)
-  - snapshot() is O(unique_functions + tree_nodes), cached until new data
+  - snapshot() is O(unique_functions) when dirty, O(1) otherwise; the
+    flamegraph tree is served in place, never copied
+  - blobs() serializes a dirty event once; /api/snapshot splices the bytes
 
 Aggregates cover the whole session: unlike the raw sample deque (which is a
 ring buffer capped by --max-samples and backs the thread/source drill-down
@@ -15,6 +17,7 @@ views), accumulator totals never evict.
 import threading
 from collections import defaultdict
 
+from perflens.api.responses import deflate_segment, dumps
 from perflens.parser import MAX_FLAMEGRAPH_DEPTH
 
 
@@ -26,7 +29,13 @@ class EventAccumulator:
         self.total_samples = 0
         self._self_counts = defaultdict(int)    # (func, module) -> leaf count
         self._total_counts = defaultdict(int)   # (func, module) -> stack count
-        self._root = {'name': 'root', 'value': 0, 'children': [], '_cmap': {}}
+        # The tree is kept in its serializable shape: {name, value, children,
+        # [module], [inlined], [truncated]}. The per-node child lookup maps
+        # live beside it, keyed by node identity, so a snapshot never has to
+        # copy the tree to strip them -- which it did, for every event, on
+        # every chunk, and which grew with the session rather than the chunk.
+        self._root = {'name': 'root', 'value': 0, 'children': []}
+        self._cmaps = {id(self._root): {}}      # id(node) -> {func: child}
         self._threads = {}                      # tid -> comm (first seen)
         # Source-file mapping (from unexpanded samples via the mapper)
         self._file_samples = defaultdict(int)   # fpath -> sample count
@@ -34,11 +43,15 @@ class EventAccumulator:
         self._file_found = {}                   # fpath -> bool (lazy)
         self._dirty = True
         self._snapshot = None
+        self._blob = None                       # (json bytes, deflate segment)
 
     # -- ingest ------------------------------------------------------------
 
     def add_samples(self, expanded_samples):
         """Fold inline-expanded samples of this event into the aggregates."""
+        cmaps = self._cmaps
+        root = self._root
+        root_cmap = cmaps[id(root)]
         for sample in expanded_samples:
             self.total_samples += 1
             tid = sample.get('tid', sample.get('pid', 0))
@@ -59,24 +72,34 @@ class EventAccumulator:
                     seen.add(key)
                     self._total_counts[key] += 1
 
-            # Flamegraph tree — keeps its child map permanently so inserts
-            # stay O(depth) per sample
-            root = self._root
+            # Flamegraph tree -- inserts stay O(depth) per sample. Depth is
+            # capped here, at insert time: orjson cannot encode past a fixed
+            # nesting depth, so an uncapped deep tree made /api/snapshot
+            # return 500 and blanked the whole UI. See MAX_FLAMEGRAPH_DEPTH.
             root['value'] += 1
             node = root
+            cmap = root_cmap
+            depth = 0
             for frame in reversed(frames):
+                if depth >= MAX_FLAMEGRAPH_DEPTH:
+                    node['truncated'] = True
+                    break
                 func_name = frame['func']
-                child = node['_cmap'].get(func_name)
+                child = cmap.get(func_name)
                 if child is None:
-                    child = {'name': func_name, 'value': 0, 'children': [],
-                             '_cmap': {}, '_inlined': False,
-                             '_module': frame.get('module', '')}
+                    child = {'name': func_name, 'value': 0, 'children': []}
+                    module = frame.get('module', '')
+                    if module:
+                        child['module'] = module
                     node['children'].append(child)
-                    node['_cmap'][func_name] = child
+                    cmap[func_name] = child
+                    cmaps[id(child)] = {}
                 child['value'] += 1
                 if frame.get('inlined'):
-                    child['_inlined'] = True
+                    child['inlined'] = True
                 node = child
+                cmap = cmaps[id(child)]
+                depth += 1
 
         self._dirty = True
 
@@ -112,10 +135,13 @@ class EventAccumulator:
     # -- snapshot ------------------------------------------------------------
 
     def snapshot(self, mapper=None):
-        """Serializable per-event entry, cached until new samples arrive.
-
-        Shape matches the old batch build_per_event_data() entry exactly:
+        """Serializable per-event entry, cached until new samples arrive:
         {function_summary, flamegraph, source_files, threads}.
+
+        The flamegraph is the live tree, not a copy. Callers read it or
+        serialize it; they do not mutate it, and they do not serialize it
+        while add_samples may be running (the rebuild worker holds the set's
+        lock for both, and /api/snapshot serves the bytes from blob()).
         """
         if not self._dirty and self._snapshot is not None:
             return self._snapshot
@@ -162,43 +188,25 @@ class EventAccumulator:
                 'total_samples': total,
                 'functions': func_list,
             },
-            'flamegraph': _copy_tree(self._root),
+            'flamegraph': self._root,
             'source_files': source_files,
             'threads': [{'tid': t, 'comm': c} for t, c in
                         sorted(self._threads.items(), key=lambda x: x[0])],
         }
         self._dirty = False
+        self._blob = None
         return self._snapshot
 
-
-def _copy_tree(root, max_depth=MAX_FLAMEGRAPH_DEPTH):
-    """Copy the mutable flamegraph tree into the serializable shape
-    (drop _cmap, promote _inlined/_module), iteratively — perf stacks plus
-    inline expansion can exceed Python's recursion limit.
-
-    Depth is capped for a second, independent reason: orjson cannot encode
-    past a fixed nesting depth, so an uncapped deep tree made /api/snapshot
-    return 500 and blanked the whole UI. See MAX_FLAMEGRAPH_DEPTH.
-    """
-    out_root = {'name': root['name'], 'value': root['value'], 'children': []}
-    stack = [(root, out_root, 0)]
-    while stack:
-        src, dst, depth = stack.pop()
-        if not src['children']:
-            continue
-        if depth >= max_depth:
-            dst['truncated'] = True
-            continue
-        for child in src['children']:
-            out = {'name': child['name'], 'value': child['value'],
-                   'children': []}
-            if child.get('_inlined'):
-                out['inlined'] = True
-            if child.get('_module'):
-                out['module'] = child['_module']
-            dst['children'].append(out)
-            stack.append((child, out, depth + 1))
-    return out_root
+    def blob(self, mapper=None):
+        """(json bytes, raw-deflate segment) of snapshot(), serialized once
+        per change. The deflate segment ends with a full flush so
+        responses.gzip_join can splice it into a gzip body without
+        recompressing a multi-megabyte profile per request."""
+        snap = self.snapshot(mapper)
+        if self._blob is None:
+            raw = dumps(snap)
+            self._blob = (raw, deflate_segment(raw))
+        return self._blob
 
 
 class AggregatorSet:
@@ -208,22 +216,30 @@ class AggregatorSet:
         self._lock = threading.Lock()
         self._accs = {}   # event_type -> EventAccumulator
 
-    def add_chunk(self, samples, mapper):
+    def add_chunk(self, samples, mapper, count_symbolization=True):
         """Fold one chunk (all events mixed, unexpanded) into the
         accumulators. Inline expansion and addr2line resolution happen here,
-        once, for the new samples only."""
+        once, for the new samples only.
+
+        `count_symbolization=False` for replay and export, whose frames are
+        not the live capture's and must not show up in its tally."""
         if not samples:
             return
 
-        # Name what the target's perf could not, before anything keys off
-        # frame['func'] -- the accumulators copy the name into dict keys and
-        # tree nodes by value, so a later rewrite would leave a stale
-        # '[unknown]' bucket and split one function across two names.
         if mapper:
-            mapper.resolve_unknown_frames(samples)
-
-        expanded = (mapper.expand_inline_frames(samples)
-                    if mapper else samples)
+            # Load-base recovery scans the chunk once, here, rather than in
+            # each of the three resolution passes below.
+            mapper.prime_module_bases(samples)
+            # Name what the target's perf could not, before anything keys
+            # off frame['func'] -- the accumulators copy the name into dict
+            # keys and tree nodes by value, so a later rewrite would leave a
+            # stale '[unknown]' bucket and split one function across two
+            # names.
+            mapper.resolve_unknown_frames(samples, count=count_symbolization,
+                                          primed=True)
+            expanded = mapper.expand_inline_frames(samples, primed=True)
+        else:
+            expanded = samples
 
         by_event_exp = defaultdict(list)
         for s in expanded:
@@ -240,13 +256,25 @@ class AggregatorSet:
                 acc.add_samples(group)
                 if mapper:
                     orig_group = by_event_orig.get(evt, [])
-                    line_data = mapper.map_samples_to_lines(orig_group)
+                    line_data = mapper.map_samples_to_lines(orig_group,
+                                                            primed=True)
                     acc.add_source_lines(line_data, orig_group, mapper)
 
     def snapshot_per_event(self, mapper=None):
         with self._lock:
             return {evt: acc.snapshot(mapper)
                     for evt, acc in sorted(self._accs.items())}
+
+    def snapshot_blobs(self, mapper=None):
+        """(per_event dicts, {event: (json bytes, deflate segment)}), built
+        under the lock so the bytes are of a consistent tree."""
+        with self._lock:
+            per_event = {}
+            blobs = {}
+            for evt, acc in sorted(self._accs.items()):
+                per_event[evt] = acc.snapshot(mapper)
+                blobs[evt] = acc.blob(mapper)
+            return per_event, blobs
 
     def event_types(self):
         with self._lock:
@@ -265,7 +293,7 @@ def build_per_event_batch(all_samples, mapper, source_builder=None):
     annotated-source dict to attach as entry['source'].
     """
     aggs = AggregatorSet()
-    aggs.add_chunk(all_samples, mapper)
+    aggs.add_chunk(all_samples, mapper, count_symbolization=False)
     per_event = aggs.snapshot_per_event(mapper)
 
     if source_builder is not None:

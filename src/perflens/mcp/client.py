@@ -335,9 +335,13 @@ def pick_event(per_event, event=None):
         raise PerfLensError(
             f'No data for event {event!r}. Events with data: '
             f'{", ".join(available)}.')
-    if 'cycles' in per_event:
-        return 'cycles'
-    cycles = [e for e in available if event_base(e) == 'cycles']
-    if cycles:
-        return cycles[0]
+    # cycles first; then the software clocks, which are what a target with
+    # no hardware PMU samples on -- there, `available[0]` used to be
+    # whatever sorted first, which on a mixed capture is not time at all.
+    for base in ('cycles', 'cpu-clock', 'task-clock'):
+        if base in per_event:
+            return base
+        matches = [e for e in available if event_base(e) == base]
+        if matches:
+            return matches[0]
     return available[0]

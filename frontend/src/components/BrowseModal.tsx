@@ -50,7 +50,7 @@ export default function BrowseModal({ request, onClose }:
       <div className="modal-content">
         <div className="modal-header">
           <h3>Browse Files</h3>
-          <button className="modal-close" onClick={onClose}>&times;</button>
+          <button className="modal-close" aria-label="Close" onClick={onClose}>&times;</button>
         </div>
         <div id="browse-path" className="browse-path">{path}</div>
         <div id="browse-entries" className="browse-entries">
@@ -59,16 +59,23 @@ export default function BrowseModal({ request, onClose }:
           {entries && (
             <>
               {parent && (
-                <div className="browse-entry" onClick={() => browseTo(parent)}>
+                <div className="browse-entry" role="button" tabIndex={0}
+                     onClick={() => browseTo(parent)}
+                     onKeyDown={(ev) => { if (ev.key === 'Enter') browseTo(parent); }}>
                   <span className="be-icon">..</span><span className="be-name">..</span>
                 </div>
               )}
               {entries.map((e) => (
-                <div key={e.path}
+                <div key={e.path} role="button" tabIndex={0}
                      className={'browse-entry' + (selected === e.path ? ' selected' : '')}
                      onClick={() => {
                        if (e.is_dir) browseTo(e.path);
                        else setSelected(e.path);
+                     }}
+                     onKeyDown={(ev) => {
+                       if (ev.key !== 'Enter') return;
+                       if (e.is_dir) browseTo(e.path);
+                       else { request.onSelect(e.path); onClose(); }
                      }}
                      onDoubleClick={() => {
                        if (e.is_dir) browseTo(e.path);

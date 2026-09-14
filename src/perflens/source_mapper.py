@@ -12,9 +12,11 @@ Supports:
 import bisect
 import os
 import re
+import select
 import subprocess
 import sys
 import threading
+import time
 from collections import Counter, defaultdict
 
 from perflens import symcache
@@ -30,6 +32,66 @@ BASE_MIN_VOTES = 4
 BASE_MIN_SHARE = 0.75
 BASE_SCAN_SAMPLES = 20000
 LAST_SYMBOL_SPAN = 1 << 20
+
+# A tool that stops answering. addr2line answers a batch in milliseconds
+# and readelf streams a symbol table continuously, so thirty seconds
+# without a byte is a hang, not a slow binary. The worker used to block
+# in readline() for good, which silently froze every UI update.
+TOOL_READ_TIMEOUT = 30.0
+# Consecutive deaths (crash, hang, failed start) before a binary's
+# addr2line is given up on for this server run.
+PIPE_MAX_FAILURES = 3
+
+
+class ToolTimeout(Exception):
+    """A child tool produced nothing for TOOL_READ_TIMEOUT seconds."""
+
+
+def _stream_lines(proc, timeout=TOOL_READ_TIMEOUT):
+    """Yield decoded lines from proc.stdout (a binary pipe), raising
+    ToolTimeout when the tool goes quiet. Iterating `proc.stdout` directly
+    has no timeout at all."""
+    fd = proc.stdout.fileno()
+    buf = b''
+    while True:
+        r, _, _ = select.select([fd], [], [], timeout)
+        if not r:
+            raise ToolTimeout(f'no output for {timeout:.0f}s')
+        data = os.read(fd, 1 << 16)
+        if not data:
+            if buf:
+                yield buf.decode('utf-8', errors='replace')
+            return
+        buf += data
+        start = 0
+        while True:
+            nl = buf.find(b'\n', start)
+            if nl < 0:
+                break
+            yield buf[start:nl].decode('utf-8', errors='replace')
+            start = nl + 1
+        buf = buf[start:]
+
+
+def _parse_addr2line_pair(func_line, file_line):
+    """(func, file, line) from addr2line's two output lines."""
+    file_line = re.sub(r'\s*\(discriminator \d+\)', '', file_line)
+    if func_line == '??':
+        return ('??', '??', 0)
+    if file_line.startswith('??'):
+        # A real symbol with no line info — ordinary for hand-written
+        # assembly, which is exactly where a soft-float target spends its
+        # time. The name is still good, and resolve_unknown_frames wants
+        # it. Line consumers already gate on `lineno > 0`.
+        return (func_line, '??', 0)
+    # file:line  (rfind: Windows paths carry colons)
+    idx = file_line.rfind(':')
+    if idx > 0:
+        try:
+            return (func_line, file_line[:idx], int(file_line[idx + 1:]))
+        except ValueError:
+            pass
+    return (func_line, '??', 0)
 
 
 class MapFileParser:
@@ -75,171 +137,179 @@ class Addr2LinePipe:
       Input:  one hex address per line
       Output: exactly 2 lines per address (function name, then file:line)
 
-    This makes batch processing predictable — N addresses in → 2N lines out.
+    This makes batch processing predictable — N addresses in → 2N lines out
+    — which is also why every exchange runs under the pipe's lock: two
+    threads interleaving their writes would each read the other's answers,
+    and the pipe would stay desynchronized for the rest of its life.
+
+    Reads time out (TOOL_READ_TIMEOUT); a hung or dead addr2line is killed
+    and restarted on the next call, and after PIPE_MAX_FAILURES in a row
+    the pipe is disabled with one log line. Addresses an exchange did not
+    answer are simply absent from the result — never reported as '??'.
     """
+
+    read_timeout = TOOL_READ_TIMEOUT
 
     def __init__(self, binary, addr2line_bin='addr2line', inline=False):
         self.binary = binary
         self.addr2line_bin = addr2line_bin
         self.inline = inline
         self._proc = None
+        self._buf = b''
+        self._lock = threading.Lock()
+        self.failures = 0           # consecutive
+        self.disabled = False
 
     def _ensure_started(self):
-        if self._proc is None or self._proc.poll() is not None:
-            flags = ['-f', '-i'] if self.inline else ['-f']
-            cmd = [self.addr2line_bin, '-e', self.binary] + flags
+        if self.disabled:
+            return False
+        if self._proc is not None and self._proc.poll() is None:
+            return True
+        flags = ['-f', '-i'] if self.inline else ['-f']
+        cmd = [self.addr2line_bin, '-e', self.binary] + flags
+        self._buf = b''
+        for argv in (['stdbuf', '-oL'] + cmd, cmd):
             try:
                 self._proc = subprocess.Popen(
-                    ['stdbuf', '-oL'] + cmd,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
-                    text=True,
-                    bufsize=1,
-                )
+                    argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL, bufsize=0)
+                return True
             except FileNotFoundError:
-                # stdbuf not available, try without
-                self._proc = subprocess.Popen(
-                    cmd,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
-                    text=True,
-                    bufsize=1,
-                )
+                continue        # no stdbuf, or no addr2line
+            except OSError as e:
+                self._fail(f'cannot start: {e}')
+                return False
+        self._proc = None
+        self._fail(f'{self.addr2line_bin}: not found')
+        return False
+
+    def _readline(self):
+        """One stdout line (stripped), or None at EOF. Raises ToolTimeout."""
+        fd = self._proc.stdout.fileno()
+        deadline = time.monotonic() + self.read_timeout
+        while True:
+            nl = self._buf.find(b'\n')
+            if nl >= 0:
+                line = self._buf[:nl]
+                self._buf = self._buf[nl + 1:]
+                return line.decode('utf-8', errors='replace').strip()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([fd], [], [], remaining)[0]:
+                raise ToolTimeout(f'no output for {self.read_timeout:.0f}s')
+            data = os.read(fd, 1 << 16)
+            if not data:
+                return None
+            self._buf += data
+
+    def _fail(self, reason):
+        """Kill the child (if any) and count the failure."""
+        if self._proc is not None:
+            try:
+                self._proc.kill()
+                self._proc.wait(timeout=2)
+            except (OSError, subprocess.SubprocessError):
+                pass    # already dead, or refusing to die in 2s
+            self._proc = None
+        self._buf = b''
+        self.failures += 1
+        name = os.path.basename(self.binary or '?')
+        if self.failures >= PIPE_MAX_FAILURES:
+            self.disabled = True
+            print(f"[source_mapper] addr2line for {name} failed "
+                  f"{self.failures} times in a row ({reason}); giving up on "
+                  f"it for this server run — frames will stay unresolved",
+                  file=sys.stderr)
+        else:
+            print(f"[source_mapper] addr2line for {name}: {reason}; "
+                  f"restarting", file=sys.stderr)
+
+    def _send(self, text):
+        self._proc.stdin.write(text.encode('ascii'))
+        self._proc.stdin.flush()
 
     def resolve_batch(self, addrs):
         """Resolve a list of addresses via the persistent pipe.
 
-        Returns {addr: (func, file, line)}.
+        Returns {addr: (func, file, line)} for the addresses answered.
         Processes in chunks to avoid pipe buffer deadlock.
         """
         if not addrs:
             return {}
-        self._ensure_started()
+        with self._lock:
+            return self._resolve_batch_locked(list(addrs))
 
+    def _resolve_batch_locked(self, addrs):
         results = {}
         CHUNK = 500  # safe for 64KB pipe buffer (~100 bytes output per addr)
-
-        try:
-            for i in range(0, len(addrs), CHUNK):
-                chunk = addrs[i:i + CHUNK]
-
+        for i in range(0, len(addrs), CHUNK):
+            chunk = addrs[i:i + CHUNK]
+            if not self._ensure_started():
+                return results
+            try:
+                self._send(''.join(f'{hex(a)}\n' for a in chunk))
                 for addr in chunk:
-                    self._proc.stdin.write(hex(addr) + '\n')
-                self._proc.stdin.flush()
-
-                for addr in chunk:
-                    func_line = self._proc.stdout.readline().strip()
-                    file_line = self._proc.stdout.readline().strip()
-
-                    if not func_line or not file_line:
-                        results[addr] = ('??', '??', 0)
-                        continue
-
-                    # Strip discriminator
-                    file_line = re.sub(r'\s*\(discriminator \d+\)', '', file_line)
-
-                    if func_line == '??':
-                        results[addr] = ('??', '??', 0)
-                        continue
-                    if file_line.startswith('??'):
-                        # A real symbol with no line info — ordinary for
-                        # hand-written assembly, which is exactly where a
-                        # soft-float target spends its time. The name is
-                        # still good, and resolve_unknown_frames wants it.
-                        # Line consumers already gate on `lineno > 0`.
-                        results[addr] = (func_line, '??', 0)
-                        continue
-
-                    # Parse file:line  (use rfind to handle Windows paths with colons)
-                    idx = file_line.rfind(':')
-                    if idx > 0:
-                        fpath = file_line[:idx]
-                        try:
-                            lineno = int(file_line[idx + 1:])
-                            results[addr] = (func_line, fpath, lineno)
-                        except ValueError:
-                            results[addr] = (func_line, '??', 0)
-                    else:
-                        results[addr] = (func_line, '??', 0)
-        except (BrokenPipeError, OSError):
-            if self._proc:
-                try:
-                    self._proc.kill()
-                    self._proc.wait(timeout=2)
-                except (OSError, subprocess.SubprocessError):
-                    pass    # already dead, or refusing to die in 2s
-            self._proc = None
-
+                    func_line = self._readline()
+                    file_line = self._readline() if func_line is not None else None
+                    if func_line is None or file_line is None:
+                        raise EOFError('exited mid-batch')
+                    results[addr] = _parse_addr2line_pair(func_line, file_line)
+            except (BrokenPipeError, OSError, EOFError, ToolTimeout) as e:
+                self._fail(str(e))
+                return results
+        self.failures = 0
         return results
 
     def resolve_inline(self, addrs):
         """Resolve addresses with inline expansion via sentinel protocol.
 
-        Returns {addr: [(func, file, line), ...]} where index 0 is innermost.
-        Processes one address at a time with a 0x0 sentinel to delimit output.
+        Returns {addr: [(func, file, line), ...]} where index 0 is innermost,
+        for the addresses answered. Processes one address at a time with a
+        0x0 sentinel to delimit output.
         """
         if not addrs:
             return {}
-        self._ensure_started()
+        with self._lock:
+            return self._resolve_inline_locked(list(addrs))
 
+    def _resolve_inline_locked(self, addrs):
         results = {}
+        if not self._ensure_started():
+            return results
         try:
             for addr in addrs:
-                self._proc.stdin.write(hex(addr) + '\n')
-                self._proc.stdin.write('0x0\n')
-                self._proc.stdin.flush()
-
+                self._send(f'{hex(addr)}\n0x0\n')
                 chain = []
                 while True:
-                    func_line = self._proc.stdout.readline().strip()
-                    file_line = self._proc.stdout.readline().strip()
-
-                    if not func_line or not file_line:
-                        break
-
-                    file_line = re.sub(r'\s*\(discriminator \d+\)', '', file_line)
-
+                    func_line = self._readline()
+                    file_line = self._readline() if func_line is not None else None
+                    if func_line is None or file_line is None:
+                        raise EOFError('exited mid-batch')
                     # Sentinel detection: 0x0 produces ?? / ??:0
                     if func_line == '??' and file_line.startswith('??'):
                         if not chain:
-                            # ?? was from the real address; sentinel still pending
-                            self._proc.stdout.readline()
-                            self._proc.stdout.readline()
+                            # ?? was from the real address; sentinel pending
+                            if self._readline() is None or self._readline() is None:
+                                raise EOFError('exited mid-batch')
                         break
-
-                    idx = file_line.rfind(':')
-                    if idx > 0:
-                        fpath = file_line[:idx]
-                        try:
-                            lineno = int(file_line[idx + 1:])
-                            chain.append((func_line, fpath, lineno))
-                        except ValueError:
-                            chain.append((func_line, '??', 0))
-                    else:
-                        chain.append((func_line, '??', 0))
-
+                    func, fpath, lineno = _parse_addr2line_pair(func_line, file_line)
+                    chain.append((func, fpath, lineno))
                 results[addr] = chain if chain else [('??', '??', 0)]
-        except (BrokenPipeError, OSError):
-            if self._proc:
-                try:
-                    self._proc.kill()
-                    self._proc.wait(timeout=2)
-                except (OSError, subprocess.SubprocessError):
-                    pass    # already dead, or refusing to die in 2s
-            self._proc = None
-
+        except (BrokenPipeError, OSError, EOFError, ToolTimeout) as e:
+            self._fail(str(e))
+            return results
+        self.failures = 0
         return results
 
     def close(self):
-        if self._proc and self._proc.poll() is None:
-            try:
-                self._proc.stdin.close()
-                self._proc.wait(timeout=5)
-            except (OSError, subprocess.TimeoutExpired):
-                self._proc.kill()
+        with self._lock:
+            if self._proc and self._proc.poll() is None:
+                try:
+                    self._proc.stdin.close()
+                    self._proc.wait(timeout=5)
+                except (OSError, subprocess.TimeoutExpired):
+                    self._proc.kill()
             self._proc = None
+            self._buf = b''
 
 
 class SourceMapper:
@@ -265,7 +335,16 @@ class SourceMapper:
         # the normal case for a firmware image.
         self.module_map = module_map or {}
 
+        # One mapper is shared by the rebuild worker and every request
+        # thread. The addr2line pipes have their own locks; this one covers
+        # the cache-mutating phases (symbol loads, base recovery, the
+        # address caches), which are not safe to interleave either.
+        # Reentrant: the public methods call each other.
+        self._lock = threading.RLock()
+        self._closed = False
+
         # Persistent cross-restart cache (~/.perflens/cache)
+        self._owns_cache = sym_cache is None
         self._sym_cache = sym_cache if sym_cache is not None \
             else symcache.SymbolCache()
         self._bkeys = {}            # binary path -> identity key (memoized)
@@ -349,23 +428,26 @@ class SourceMapper:
                           "(-i not supported by addr2line)", file=sys.stderr)
 
     def _get_pipe(self, binary):
-        """Get or create an addr2line pipe for a binary."""
-        if binary not in self._pipes:
-            if binary and os.path.isfile(binary) and self.addr2line_bin:
-                self._pipes[binary] = Addr2LinePipe(binary, self.addr2line_bin)
-            else:
+        """Get or create an addr2line pipe for a binary. None when there
+        is nothing to run it on, or when the pipe has been given up on."""
+        pipe = self._pipes.get(binary)
+        if pipe is None:
+            if self._closed or not (binary and os.path.isfile(binary)
+                                    and self.addr2line_bin):
                 return None
-        return self._pipes[binary]
+            pipe = self._pipes[binary] = Addr2LinePipe(binary, self.addr2line_bin)
+        return None if pipe.disabled else pipe
 
     def _get_inline_pipe(self, binary):
         """Get or create an inline addr2line pipe for a binary."""
-        if binary not in self._inline_pipes:
-            if binary and os.path.isfile(binary) and self.addr2line_bin:
-                self._inline_pipes[binary] = Addr2LinePipe(
-                    binary, self.addr2line_bin, inline=True)
-            else:
+        pipe = self._inline_pipes.get(binary)
+        if pipe is None:
+            if self._closed or not (binary and os.path.isfile(binary)
+                                    and self.addr2line_bin):
                 return None
-        return self._inline_pipes[binary]
+            pipe = self._inline_pipes[binary] = Addr2LinePipe(
+                binary, self.addr2line_bin, inline=True)
+        return None if pipe.disabled else pipe
 
     def _probe_inline_support(self):
         """Check if addr2line supports the -i (inline) flag."""
@@ -400,6 +482,12 @@ class SourceMapper:
         """
         if binary in self._symbol_cache:
             return self._symbol_cache[binary]
+        with self._lock:
+            return self._load_symbols_locked(binary)
+
+    def _load_symbols_locked(self, binary):
+        if binary in self._symbol_cache:      # loaded while we waited
+            return self._symbol_cache[binary]
 
         bkey = self._bkey(binary)
         cached = self._sym_cache.load_symtab(bkey)
@@ -413,6 +501,7 @@ class SourceMapper:
             return cached
 
         symbols = {}
+        complete = False
 
         # Try readelf first (per-binary, accurate).  Stream output
         # line-by-line so we never hold the full symbol table in RAM.
@@ -423,10 +512,9 @@ class SourceMapper:
                     [self.readelf_bin, '-s', '-W', binary],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,
-                    text=True,
-                    bufsize=1,
+                    bufsize=0,
                 )
-                for line in proc.stdout:
+                for line in _stream_lines(proc):
                     parts = line.split()
                     if len(parts) >= 8 and parts[3] == 'FUNC':
                         try:
@@ -437,18 +525,22 @@ class SourceMapper:
                         if addr > 0:
                             symbols[name] = addr
                 proc.wait(timeout=300)
-            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-                if proc:
-                    proc.kill()
-                    proc.wait()
+                complete = proc.returncode == 0
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError,
+                    ToolTimeout) as e:
+                print(f"[source_mapper] readelf -s on "
+                      f"{os.path.basename(binary)}: {e}", file=sys.stderr)
             finally:
                 if proc and proc.poll() is None:
                     proc.kill()
                     proc.wait()
 
         # Persist before merging map-file symbols (which belong to the map
-        # file, not to this binary's identity)
-        self._sym_cache.store_symtab(bkey, symbols)
+        # file, not to this binary's identity) — but only a table readelf
+        # finished, or a hang would be remembered as a binary with few
+        # symbols for as long as the cache lives.
+        if complete:
+            self._sym_cache.store_symtab(bkey, symbols)
 
         # Supplement with map file symbols
         for name, addr in self._map_symbols.items():
@@ -466,6 +558,13 @@ class SourceMapper:
         an approximation, but it only ever has to be good enough to bound the
         load base in _base_candidate().
         """
+        spans = self._sym_spans.get(binary)
+        if spans is not None:
+            return spans
+        with self._lock:
+            return self._symbol_spans_locked(binary)
+
+    def _symbol_spans_locked(self, binary):
         spans = self._sym_spans.get(binary)
         if spans is not None:
             return spans
@@ -679,27 +778,33 @@ class SourceMapper:
 
         batch_results = pipe.resolve_batch(uncached)
         new_entries = {}
-        for addr in uncached:
-            if addr in batch_results:
-                func, fpath, lineno = batch_results[addr]
-                if fpath != '??' and lineno > 0:
-                    self._addr2line_cache[(binary, addr)] = (fpath, lineno)
-                    new_entries[addr] = (fpath, lineno)
-                else:
-                    self._addr2line_cache[(binary, addr)] = ('??', 0)
-                    new_entries[addr] = ('??', 0)
-            else:
-                self._addr2line_cache[(binary, addr)] = ('??', 0)
+        # An address the pipe did not answer (it died or hung mid-batch)
+        # is left uncached, so the next chunk asks again. Caching it as
+        # '??' — let alone persisting that — turned one addr2line hiccup
+        # into a permanently blank line for that address.
+        for addr, (_func, fpath, lineno) in batch_results.items():
+            entry = (fpath, lineno) if fpath != '??' and lineno > 0 else ('??', 0)
+            self._addr2line_cache[(binary, addr)] = entry
+            new_entries[addr] = entry
         self._sym_cache.store_addr2line(self._bkey(binary), new_entries)
 
-    def map_samples_to_lines(self, samples):
+    def map_samples_to_lines(self, samples, primed=False):
         """Map all samples to source lines using batch resolution.
 
         Returns: {file_path: {line_no: {'samples': int}}}
+
+        `primed`: the caller already ran _prime_module_bases over these
+        samples this chunk (AggregatorSet.add_chunk does, once, instead of
+        each of its three mapper calls scanning the chunk again).
         """
+        with self._lock:
+            return self._map_samples_to_lines_locked(samples, primed)
+
+    def _map_samples_to_lines_locked(self, samples, primed):
         # Step 0: pin down where each module was loaded, so frames without a
         # symoff resolve to a real line instead of the function's first one.
-        self._prime_module_bases(samples)
+        if not primed:
+            self._prime_module_bases(samples)
 
         # Step 1: Collect all unique addresses per binary
         addrs_per_binary = defaultdict(set)
@@ -974,7 +1079,11 @@ class SourceMapper:
 
     def get_files_with_samples(self, samples):
         """Return list of source files that have samples, with sample counts."""
-        line_data = self.map_samples_to_lines(samples)
+        with self._lock:
+            return self._get_files_with_samples_locked(samples)
+
+    def _get_files_with_samples_locked(self, samples):
+        line_data = self._map_samples_to_lines_locked(samples, False)
 
         # Build function-to-file mapping from cached results
         file_functions = defaultdict(set)
@@ -1062,16 +1171,20 @@ class SourceMapper:
             for addr in addrs:
                 self._symname_cache[(binary, addr)] = None
             return
-        try:
-            results = pipe.resolve_batch(addrs)
-        except (OSError, ValueError):
-            results = {}
-        for addr in addrs:
-            func = (results.get(addr) or ('??',))[0]
+        # Only what the pipe answered is cached; an address it did not
+        # reach (the pipe died) is asked again next chunk.
+        for addr, (func, _fpath, _lineno) in pipe.resolve_batch(addrs).items():
             self._symname_cache[(binary, addr)] = (
                 None if not func or func == '??' else func)
 
-    def resolve_unknown_frames(self, samples):
+    def prime_module_bases(self, samples):
+        """Public entry for the per-chunk load-base pass (see
+        _prime_module_bases); the three resolution methods take
+        `primed=True` afterwards."""
+        with self._lock:
+            self._prime_module_bases(samples)
+
+    def resolve_unknown_frames(self, samples, count=True, primed=False):
         """Name frames the target's own perf could not, in place.
 
         A perf built without libelf still reads /proc/kallsyms, so kernel
@@ -1090,30 +1203,39 @@ class SourceMapper:
         held by the live ring, so /api/threads, /api/window, /api/source and
         the collapsed/SVG exports see the resolved names too.
 
+        `count=False` leaves the symbolization tally alone: replay and
+        export run the same pass over saved samples, and counting those
+        made /api/index/status report a live capture's frames twice.
+
         Returns the number of frames named.
         """
         if not samples:
             return 0
+        with self._lock:
+            return self._resolve_unknown_frames_locked(samples, count, primed)
 
+    def _resolve_unknown_frames_locked(self, samples, count, primed):
         # Unknown frames cannot vote for a load base (_base_candidate needs
         # a symbol name), so the bases must come from the named frames
         # first. expand_inline_frames primes them too, but it runs after
         # this and is skipped outright under --no-inline.
-        self._prime_module_bases(samples)
+        if not primed:
+            self._prime_module_bases(samples)
 
         # A hot loop resamples the same few addresses: 5,577 unknown frames
         # in one measured chunk collapsed to 195 distinct (binary, vaddr)
         # pairs, so ask addr2line once per pair, not once per frame.
         wanted = defaultdict(set)
         targets = []
+        seen = unknown_in = 0
         for sample in samples:
             for frame in sample['frames']:
                 if (frame.get('module') or '').startswith('['):
                     continue        # [kernel.kallsyms], [vdso], ...
-                self._sym_seen += 1
+                seen += 1
                 if frame.get('func') != UNKNOWN_FUNC:
                     continue
-                self._sym_unknown_in += 1
+                unknown_in += 1
                 binary = self._binary_for_frame(frame)
                 if not binary or not os.path.isfile(binary):
                     continue                    # nothing local to ask
@@ -1133,10 +1255,13 @@ class SourceMapper:
             if func:
                 frame['func'] = sys.intern(func)
                 named += 1
-        self._sym_named += named
+        if count:
+            self._sym_seen += seen
+            self._sym_unknown_in += unknown_in
+            self._sym_named += named
         return named
 
-    def expand_inline_frames(self, samples):
+    def expand_inline_frames(self, samples, primed=False):
         """Expand inline frames in sample data using addr2line -i.
 
         Returns a new sample list where each frame may be expanded into
@@ -1145,11 +1270,15 @@ class SourceMapper:
         """
         if not self.inline:
             return samples
+        with self._lock:
+            return self._expand_inline_frames_locked(samples, primed)
 
+    def _expand_inline_frames_locked(self, samples, primed):
         # Inline expansion can run before any line mapping, so it needs the
         # load bases primed too — otherwise every frame in a function shares
         # one address and collapses to a single inline chain.
-        self._prime_module_bases(samples)
+        if not primed:
+            self._prime_module_bases(samples)
 
         # Step 1: Collect unique (binary, vaddr) pairs not yet cached.
         # First touch of a binary bulk-loads its persisted inline chains.
@@ -1178,9 +1307,10 @@ class SourceMapper:
                     self._inline_cache[(binary, addr)] = None
                     new_entries[addr] = None
             else:
-                results = pipe.resolve_inline(unique_addrs)
-                for addr in unique_addrs:
-                    chain = results.get(addr)
+                # Unanswered addresses (pipe died mid-batch) stay uncached
+                # and are asked again next chunk, rather than remembered
+                # — and persisted — as "no inline chain".
+                for addr, chain in pipe.resolve_inline(unique_addrs).items():
                     if chain and len(chain) > 1:
                         self._inline_cache[(binary, addr)] = chain
                         new_entries[addr] = chain
@@ -1221,13 +1351,21 @@ class SourceMapper:
         return expanded_samples
 
     def close(self):
-        """Clean up addr2line processes."""
-        for pipe in self._pipes.values():
-            pipe.close()
-        self._pipes.clear()
-        for pipe in self._inline_pipes.values():
-            pipe.close()
-        self._inline_pipes.clear()
+        """Clean up addr2line processes and the persistent cache
+        connection (when this mapper opened it). Called when a mapper is
+        replaced by PATCH /api/config and at server shutdown; it used to
+        have no production caller, so every reconfiguration leaked a set
+        of addr2line children and a sqlite handle."""
+        with self._lock:
+            self._closed = True
+            for pipe in self._pipes.values():
+                pipe.close()
+            self._pipes.clear()
+            for pipe in self._inline_pipes.values():
+                pipe.close()
+            self._inline_pipes.clear()
+            if self._owns_cache:
+                self._sym_cache.close()
 
     # ------------------------------------------------------------------
     # Pre-indexing: eagerly load symbols and DWARF source file paths
@@ -1317,14 +1455,13 @@ class SourceMapper:
                 [self.readelf_bin, '--debug-dump=decodedline', '-W', binary],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
-                text=True,
-                bufsize=1,
+                bufsize=0,
             )
             # The decoded line table has lines like:
             #   /full/path/to/file.c                          42       0x401234  ...
             # or CU header lines like:
             #   CU: /full/path/to/file.c:
-            for line in proc.stdout:
+            for line in _stream_lines(proc):
                 line = line.strip()
                 if not line or line.startswith('Decoded'):
                     continue
@@ -1345,10 +1482,10 @@ class SourceMapper:
                     except ValueError:
                         pass
             proc.wait(timeout=300)
-        except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
-            if proc:
-                proc.kill()
-                proc.wait()
+        except (FileNotFoundError, OSError, subprocess.TimeoutExpired,
+                ToolTimeout) as e:
+            print(f"[source_mapper] readelf --debug-dump on "
+                  f"{os.path.basename(binary)}: {e}", file=sys.stderr)
         finally:
             if proc and proc.poll() is None:
                 proc.kill()

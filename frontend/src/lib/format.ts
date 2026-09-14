@@ -2,6 +2,9 @@
 
 export function formatNumber(n: number | null | undefined): string {
   if (n === undefined || n === null) return '--';
+  // Counters sum over the whole session: a busy target reaches trillions
+  // of cycles in minutes, which rendered as "11219.4B" and ran off the card.
+  if (n >= 1e12) return (n / 1e12).toFixed(1) + 'T';
   if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
   if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
   if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
@@ -12,6 +15,9 @@ export function formatNumber(n: number | null | undefined): string {
 export function formatStatValue(key: string, value: number): string {
   if (key === 'ipc') return value.toFixed(2);
   if (key === 'branch_miss_rate') return value.toFixed(1) + '%';
+  // Large values scale whether or not perf printed a fraction: task-clock
+  // is fractional msec, and its session sum rendered as "1003215.3".
+  if (Math.abs(value) >= 1000) return formatNumber(value);
   if (typeof value === 'number' && !Number.isInteger(value)) return value.toFixed(1);
   return formatNumber(value);
 }

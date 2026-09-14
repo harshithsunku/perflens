@@ -1,11 +1,18 @@
-import { useMemo, useState } from 'react';
+import { useDeferredValue, useMemo, useState } from 'react';
 import type { FunctionEntry, FunctionSummary } from '../api/client';
 import { useLive } from '../store/live';
 import { useUi } from '../store/ui';
 
+/** Map key for a function across snapshots: name and module, joined by a
+ * separator no symbol can contain. */
+const KEY_SEP = String.fromCharCode(0);
+export function fnKey(f: { name: string; module?: string | null }): string {
+  return f.name + KEY_SEP + (f.module || '');
+}
+
 interface Props {
   data: FunctionSummary | null;
-  /** name+"\0"+module -> baseline entry; null = diff off */
+  /** fnKey(entry) -> baseline entry; null = diff off */
   baselineMap: Map<string, FunctionEntry> | null;
   onSelectFunction: (funcName: string) => void;
 }
@@ -18,7 +25,7 @@ function fnSelfPct(f: FunctionEntry): number {
 
 function DiffCell({ f, baselineMap }: { f: FunctionEntry;
                     baselineMap: Map<string, FunctionEntry> }) {
-  const bf = baselineMap.get(f.name + '\u0000' + (f.module || ''));
+  const bf = baselineMap.get(fnKey(f));
   if (!bf) return <td className="diff-col"><span className="diff-new">new</span></td>;
   const d = fnSelfPct(f) - fnSelfPct(bf);
   if (Math.abs(d) < 0.05) {
@@ -36,6 +43,11 @@ function DiffCell({ f, baselineMap }: { f: FunctionEntry;
 export default function FunctionTable({ data, baselineMap, onSelectFunction }: Props) {
   const [sortKey, setSortKey] = useState<SortKey>('self');
   const [filter, setFilter] = useState('');
+  // The filter follows the deferred value so typing stays responsive on
+  // a table of thousands; the input itself keeps what was typed, spaces
+  // included (trimming on change made a space impossible to type).
+  const deferredFilter = useDeferredValue(filter);
+  const term = deferredFilter.trim();
   const [showCount, setShowCount] = useState(200);
   const dark = useUi((s) => s.theme) === 'dark';
   // Reset progressive display on event/thread switches
@@ -46,17 +58,20 @@ export default function FunctionTable({ data, baselineMap, onSelectFunction }: P
     setShowCount(200);
   }
 
+  const filterRe = useMemo(() => {
+    if (!term) return null;
+    try { return new RegExp(term, 'i'); } catch { return undefined; }
+  }, [term]);
+
   const sorted = useMemo(() => {
     if (!data?.functions) return [];
     const s = data.functions.slice().sort((a, b) => {
       if (sortKey === 'total') return (b.total_samples || 0) - (a.total_samples || 0);
       return (b.self_samples ?? b.samples) - (a.self_samples ?? a.samples);
     });
-    if (!filter) return s;
-    let re: RegExp | null = null;
-    try { re = new RegExp(filter, 'i'); } catch { re = null; }
-    return re ? s.filter((f) => re.test(f.name) || re.test(f.module || '')) : s;
-  }, [data, sortKey, filter]);
+    if (!filterRe) return s;
+    return s.filter((f) => filterRe.test(f.name) || filterRe.test(f.module || ''));
+  }, [data, sortKey, filterRe]);
 
   const totalFunctions = data?.functions?.length ?? 0;
   const visible = sorted.slice(0, showCount);
@@ -64,7 +79,8 @@ export default function FunctionTable({ data, baselineMap, onSelectFunction }: P
   const maxSelfPct = sorted.reduce((m, f) => Math.max(m, fnSelfPct(f)), 0);
   const maxTotalPct = sorted.reduce((m, f) => Math.max(m, f.total_percent || 0), 0);
 
-  const status = totalFunctions === 0 ? ''
+  const status = filterRe === undefined ? 'invalid regex'
+    : totalFunctions === 0 ? ''
     : sorted.length === totalFunctions
       ? `${totalFunctions} functions`
       : `${sorted.length} of ${totalFunctions} functions`;
@@ -73,9 +89,12 @@ export default function FunctionTable({ data, baselineMap, onSelectFunction }: P
     <>
       <div className="fn-toolbar">
         <input type="text" id="fn-search" placeholder="Filter functions..."
+               aria-label="Filter functions (regular expression)"
                value={filter}
-               onChange={(e) => { setFilter(e.target.value.trim()); setShowCount(200); }} />
-        <span id="fn-status" className="fn-status">{status}</span>
+               onChange={(e) => { setFilter(e.target.value); setShowCount(200); }} />
+        <span id="fn-status" className={'fn-status' + (filterRe === undefined ? ' err' : '')}>
+          {status}
+        </span>
       </div>
       <table id="function-table" className={baselineMap ? 'diff-mode' : ''}>
         <thead>
@@ -84,11 +103,13 @@ export default function FunctionTable({ data, baselineMap, onSelectFunction }: P
             <th>Function</th>
             <th>Module</th>
             <th className={'sortable' + (sortKey === 'self' ? ' active' : '')}
-                data-sort="self" onClick={() => { setSortKey('self'); setShowCount(200); }}>
+                data-sort="self" aria-sort={sortKey === 'self' ? 'descending' : 'none'}
+                onClick={() => { setSortKey('self'); setShowCount(200); }}>
               Self %
             </th>
             <th className={'sortable' + (sortKey === 'total' ? ' active' : '')}
-                data-sort="total" onClick={() => { setSortKey('total'); setShowCount(200); }}>
+                data-sort="total" aria-sort={sortKey === 'total' ? 'descending' : 'none'}
+                onClick={() => { setSortKey('total'); setShowCount(200); }}>
               Total %
             </th>
             <th className="diff-col">&Delta; Self</th>
@@ -124,8 +145,9 @@ export default function FunctionTable({ data, baselineMap, onSelectFunction }: P
             const totalColor = `hsl(210, 50%, ${dark ? 40 : 50}%)`;
             const moduleName = f.module ? f.module.split('/').pop() : '';
             return (
-              <tr key={f.name + '\u0000' + f.module} data-func={f.name}
-                  onClick={() => onSelectFunction(f.name)}>
+              <tr key={fnKey(f)} data-func={f.name} tabIndex={0}
+                  onClick={() => onSelectFunction(f.name)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') onSelectFunction(f.name); }}>
                 <td>{i + 1}</td>
                 <td><strong>{f.name}</strong></td>
                 <td title={f.module}>{moduleName}</td>

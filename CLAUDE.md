@@ -86,7 +86,18 @@ resolution. See [STATUS.md](STATUS.md) for what is open.
 - HTTP layer (`web.py`): FastAPI on uvicorn. SSE fan-out is an asyncio
   hub; worker threads publish via `loop.call_soon_threadsafe`. Live
   updates use notify-and-fetch: a tiny `data_version` SSE stamp, then the
-  browser pulls `/api/snapshot` for the event it is viewing.
+  browser pulls `/api/snapshot` for the event it is viewing. The rebuild
+  worker serializes each changed event once (JSON bytes plus a raw-deflate
+  segment, `aggregator.EventAccumulator.blob`); `/api/snapshot` splices
+  those into its response (`api/responses.gzip_join`) rather than
+  re-encoding the profile per request. Ring-derived views (`/api/threads`,
+  `/api/window`, `/api/source`) are memoized on `AppContext.views`, keyed
+  by their parameters and the ring's `(generation, chunk_count)`.
+- The `SourceMapper` is shared by the rebuild worker and every request
+  thread: each `Addr2LinePipe` holds a lock across an exchange, and the
+  mapper's `RLock` covers its cache-mutating phases. Tool reads time out
+  after 30 s of silence; a pipe is given up after three consecutive
+  failures; an address the tool did not answer is never cached as `??`.
 - The agent TCP listener, recv loops, and the aggregation rebuild worker
   are plain threads (blocking sockets + subprocess work); uvicorn owns
   only the HTTP side. Heavy request handlers are sync `def` routes that
@@ -106,18 +117,36 @@ resolution. See [STATUS.md](STATUS.md) for what is open.
 - Collection prefers continuous pipe mode (`perf record -o - | perf script
   -i -`, probed at startup): one long-lived pipeline with no sampling dead
   time, symbol tables parsed once, output cut into chunks every `duration`
-  seconds at sample boundaries and streamed through in-process zstd. Falls
-  back to discrete record/script rounds when pipe mode is unavailable.
-  `perf script` runs at `nice 5` so the profiler yields to the workload.
-- Single agent implementation: a static C binary (~2 MB, vendored zstd,
-  zero deps) that cross-compiles for five architectures, installs with one
-  curl command (install-agent.sh), and self-updates with --update.
+  seconds — or at 16 MB of raw text, whichever comes first — at sample
+  boundaries and streamed through in-process zstd. Falls back to discrete
+  record/script rounds when pipe mode is unavailable. Every `perf script`
+  runs at `nice 5` so the profiler yields to the workload, every perf child
+  runs with `LC_ALL=C` in its own process group, and `perf stat` rounds run
+  back to back so every interval is counted.
+- Single agent implementation: a static musl C binary (~0.7 MB, vendored
+  zstd, zero deps) that cross-compiles for five architectures from the
+  toolchains on the repo's `toolchains` GitHub release, installs with one
+  curl command (install-agent.sh), and self-updates with --update after
+  checking the release's `.sha256` sidecar with the device's `sha256sum`.
 - Bidirectional interactive protocol: agent sends hello + data + metrics,
   server sends commands (start, stop, pause, resume, configure, etc.).
   `start` accepts an optional `events` subset of the probed record events;
-  the UI's control-bar popovers expose live profiling settings (frequency,
-  interval, events — restarting collection transparently when needed),
-  process switching, and metrics toggles.
+  the UI always sends one — **one sampling event by default** (`cycles`,
+  or the software clock on a target without a PMU; the rest are opt-in in
+  the wizard's Perf step), since each extra event multiplies the data the
+  device sends. The control-bar popovers expose live profiling settings
+  (frequency, interval, events — restarting collection transparently when
+  needed), process switching, and metrics toggles; a process switch keeps
+  the current settings. The bar's Stop sends `stop` (the agent stays
+  connected); Disconnect ends the session.
+- UI conventions worth knowing: the store keeps the browser's own link to
+  the server (`sseState`) apart from whether an agent is connected; an SSE
+  drop backs off 3 → 30 s and never leaves replay mode on its own (the
+  replay banner's button does). Version stamps are compared through
+  `lib/events.versionKey` (generation first). Every request is bounded
+  (`api/client.ts`). Errors go to the banner through `reportError`; a
+  transport failure is sticky. The thread overview, thread view and time
+  window read the live ring and are off in replay.
 - Two connection patterns: `--server` (agent connects out to server) and
   `--listen` (agent binds port, server/UI connects in via wizard).
 - Agent collects device health metrics (CPU, memory, temperature, load,
@@ -141,15 +170,17 @@ resolution. See [STATUS.md](STATUS.md) for what is open.
 perflens/
 ├── install-agent.sh              # curl-able agent installer (no sudo)
 ├── agent-c/
-│   ├── src/                      # C agent modules (agent.h + 10 .c files)
+│   ├── src/                      # C agent modules (agent.h + 12 .c files)
 │   │   ├── agent.h               # shared types, constants, cross-module API
 │   │   ├── main.c                # agent state, session loop, run modes, CLI
 │   │   ├── collect.c             # round + continuous collection loops
 │   │   ├── commands.c            # command handlers + dispatch
+│   │   ├── perfcmd.c             # the perf command lines (record/script/stat)
 │   │   ├── metrics.c             # device health metrics
 │   │   ├── probe.c               # platform + perf capability probing
 │   │   ├── subproc.c             # signals, child tracking, fork/exec helpers
 │   │   ├── wire.c                # TCP framing + streaming zstd sink
+│   │   ├── auth.c                # pairing-code generation + comparison
 │   │   └── util.c, procs.c, update.c
 │   ├── Makefile                  # native + cross-compile targets
 │   └── vendor/zstd/              # zstd single-file amalgamation
@@ -227,11 +258,11 @@ perflens/
 
 | Endpoint                  | Method | Description                                     |
 |---------------------------|--------|-------------------------------------------------|
-| `/api/status`             | GET    | Server + agent connection state, sample totals  |
-| `/api/stream`             | GET    | SSE: `status`, `agent`, `data_version` (carries event types), `perf_stat`, `metrics` (typed by payload) |
-| `/api/snapshot?event=`    | GET    | Cached per-event snapshot (gzip); pairs with SSE `data_version` |
+| `/api/status`             | GET    | Server + agent connection state, sample totals, `generation` |
+| `/api/stream`             | GET    | SSE: `status`, `agent`, `data_version` (carries event types), `perf_stat`, `metrics` (typed by payload); opens with `status` (+ `agent`, `data_version`, `perf_stat` when present) |
+| `/api/snapshot?event=`    | GET    | Cached per-event snapshot (gzip, spliced from the worker's bytes); pairs with SSE `data_version` |
 | `/api/sessions?offset=&limit=` | GET | List saved sessions (paginated)               |
-| `/api/sessions/<id>`      | GET    | Lazy-replay a session from saved chunks (cached); 404 when missing |
+| `/api/sessions/<id>`      | GET    | Lazy-replay a session from saved chunks (cached); 404 when missing, 500 `bad_metadata` when unreadable |
 | `/api/sessions/<id>`      | DELETE | Delete a saved session                          |
 | `/api/sessions/<id>/export?format=&event=` | GET | Export: `collapsed`, `json`, or `svg` |
 | `/api/sessions/import`    | POST   | Import an uploaded `perf.data` as a session     |
@@ -268,7 +299,15 @@ head, since `perf_stat` has no REST endpoint.
 
 Error model: every failure is `{"error": {"code": "<slug>", "message":
 "..."}}` with a real status code (400 validation, 403 permission, 404
-missing, 409 wrong server state, 413 too large, 502 agent transport).
+missing, 409 wrong server state, 413 too large, 500 server-side failure
+such as unreadable metadata or a refused delete, 502 agent transport).
+
+Version stamps (`/api/status`, `/api/snapshot`, SSE `data_version`) carry
+`generation` (bumped on every session reset — compare it before
+`chunk_count`, which restarts at 0), `ring_samples` (the bounded ring;
+`total_samples` is the same number, kept for compatibility) and
+`session_samples` (everything parsed this session). Responses carry no
+CORS header: the UI is same-origin and the dev server proxies `/api`.
 
 ---
 
@@ -280,7 +319,8 @@ missing, 409 wrong server state, 413 too large, 502 agent transport).
 --source-dir DIR      Root of source tree         (default .)
 --binary PATH         Unstripped binary for addr2line
 --map PATH            GNU ld linker map file (optional symbol fallback)
---path-map FROM=TO    Rewrite compile-time paths to local paths
+--path-map FROM=TO    Rewrite compile-time paths to local paths (comma-separated)
+--module-map FROM=TO  Map a device module path to a local binary
 --addr2line PATH      Custom addr2line binary
 --readelf PATH        Custom readelf binary
 --toolchain-prefix P  Cross-compilation prefix (e.g. arm-linux-gnueabihf-)
@@ -323,6 +363,11 @@ Options:
 --version             Print version and exit
 ```
 
+Environment: `PERFLENS_LOG=debug` logs every chunk and round (otherwise a
+summary on the first and every hundredth); `TMPDIR` relocates the perf.data
+temp files; `PERFLENS_SEND_TIMEOUT_MS` overrides the 60 s send bound (the
+protocol tests shorten it).
+
 ---
 
 ## Development rules
@@ -356,6 +401,18 @@ Options:
   mid-collection). `status` gained `platform.perf_path`; the hello
   deliberately did not, because it goes out before authentication.
 
+  **The sixth, on 2026-09-14**, did not change the wire protocol either. It
+  was the stabilization pass toward 0.12.0, taken on the agent review in
+  the (gitignored) `AGENT_FINDINGS.md`: size-based chunk flushing, back-to-
+  back `perf stat` rounds, the call-graph probe on the probed event with a
+  call-chain check, `nice 5` for every `perf script`, monotonic deadlines,
+  `LC_ALL=C` for perf children, process groups and SIGTERM→SIGKILL reaping,
+  send timeouts, close-on-exec, the 64 KB command-frame cap, escaped and
+  validated ids and arguments, one `writev()` per frame, and `perfcmd.c` as
+  the single place a perf command line is assembled. Frame types, commands
+  and hello fields are exactly 0.11.0's; `status.state` may additionally
+  read `probing` and old servers pass it through as text.
+
   **The third unfreeze, in
   0.10.0, did** — pairing-code authentication. Before it, `--listen` bound
   every interface, accepted any peer, and executed all 13 commands with no
@@ -365,8 +422,9 @@ Options:
   (generated and logged when not supplied), sends none of it over the wire,
   and gates `dispatch_command` on a peer proving knowledge of it. Added
   `auth` to `CMD_TABLE` and a `--bind` flag; existing flags and frame types
-  are unchanged, and a 0.10.0 server still accepts a pre-0.10.0 agent on its
-  hello token with a warning.
+  are unchanged. A 0.10.0 and 0.11.0 server still accepted a pre-0.10.0
+  agent on its hello token with a warning; since 0.12.0 a server with a
+  token configured refuses such an agent and names the upgrade.
 - **Simplicity first.** A small, deliberate server dependency set
   (fastapi, uvicorn, orjson, zstandard, pydantic — all user-space).
   The UI is React + TS + Vite, but Node is dev/CI-only: the wheel ships
@@ -408,8 +466,14 @@ Options:
 - Single agent connection at a time — a new agent replaces the current one.
 - `perf_event_paranoid > 1` may restrict the set of usable events (the agent
   warns at startup).
-- Capability probing adds ~10-20 s on a typical target, longer on slow or hybrid-CPU hardware to first-connection startup (events,
-  call-graph modes `fp`/`dwarf`/`lbr`, script fields, pipe mode).
+- Capability probing adds a few seconds on a typical target (about 6 s of
+  `perf` sleeps: one batched `stat`, one batched `record`, one call-graph
+  recording, the pipe-mode probe), longer on slow or hybrid-CPU hardware:
+  measured 12.7 s on an 8-core ARM64 board and 10.8 s in a hybrid-CPU
+  container (2026-09-14).
+  It runs on the collection thread, so `ping`/`status`/`stop` answer
+  meanwhile and `status` reports `probing`. Switching process re-checks
+  only that the new pid can be recorded.
 - In continuous mode, `perf record` flushes its ring buffer in batches, so
   the first chunk or two after `start` may carry only PERF_STAT data before
   samples begin flowing.

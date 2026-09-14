@@ -195,22 +195,29 @@ The asset suffix is the normalized arch, not `uname -m`: a device reporting `arm
 ### Option B — build the agent yourself
 
 ```bash
-# Build (on your build machine)
+# Build (on your build machine). The release assets use these musl
+# toolchains (from the repository's `toolchains` release); a distro glibc
+# cross compiler works too, but static glibc cannot resolve host names on
+# a foreign device, so prefer musl for anything that dials a hostname.
 cd agent-c
-make                                    # native x86_64
-make CROSS=aarch64-linux-gnu-           # ARM64 little-endian
+make                                    # native
+make CROSS=x86_64-linux-musl-           # x86_64
+make CROSS=aarch64-linux-musl-          # ARM64 little-endian
 make CROSS=aarch64_be-linux-musl-       # ARM64 big-endian
-make CROSS=arm-linux-gnueabihf-         # ARMv7 little-endian
-make CROSS=armeb-linux-musleabihf-      # ARMv7 big-endian
+make CROSS=arm-linux-musleabi-          # ARMv7 little-endian (soft-float)
+make CROSS=armeb-linux-musleabi-        # ARMv7 big-endian (soft-float, BE8)
+make all-cross                          # all five into build/<arch>/
 
 # Deploy (single file, no dependencies)
-scp perflens-agent user@device:/tmp/
+scp build/<arch>/perflens-agent user@device:/tmp/
 ssh user@device
 /tmp/perflens-agent --server <server-ip>        # connects to server
 /tmp/perflens-agent --listen                     # or: wait for server (prints a pairing code)
 ```
 
-The agent is a single static binary (~2 MB) with zstd built in.
+The agent is a single static binary (under 1 MB stripped) with zstd built in.
+The Makefile applies `-march=armv7-a` to both 32-bit ARM targets; check a
+big-endian build with `readelf -h` (expect `soft-float ABI, BE8`).
 
 ### Option C — from source (dev / contributors)
 
@@ -254,7 +261,8 @@ Then browse to `http://<server-ip>:8080`.
 | `--source-dir DIR` | `.` | Root of the source tree for line annotation |
 | `--binary PATH` | — | Unstripped binary (enables `addr2line`) |
 | `--map PATH` | — | GNU ld linker map file (optional symbol fallback) |
-| `--path-map FROM=TO` | — | Rewrite compile-time paths to local paths (e.g. `/build/src=/home/user/src`) |
+| `--path-map FROM=TO` | — | Rewrite compile-time paths to local paths (e.g. `/build/src=/home/user/src`); comma-separated for several |
+| `--module-map FROM=TO` | — | Map a device module path to a local binary (e.g. `/opt/app/foo=/build/foo.sym`) — for the one shared object that does not live under a sysroot |
 | `--addr2line PATH` | — | Custom `addr2line` binary (overrides `bin/` and PATH) |
 | `--readelf PATH` | — | Custom `readelf` binary |
 | `--toolchain-prefix PREFIX` | — | Cross-compilation prefix (e.g. `arm-linux-gnueabihf-`); derives addr2line and readelf |
@@ -396,7 +404,9 @@ cp -r skills/perflens-profiling ~/.claude/skills/
 
 | Event | Typical use | Mode |
 |-------|-------------|------|
-| `cycles` | CPU time / hot paths | record + stat |
+| `cycles` | CPU time / hot paths (the UI's default sampling event) | record + stat |
+| `cpu-clock` | Wall-clock sampling where there is no hardware PMU (the default there) | record + stat |
+| `task-clock` | Task CPU time; the other software sampling event | record + stat |
 | `instructions` | IPC, retired instruction count | record + stat |
 | `cache-misses` | Last-level cache misses | record + stat |
 | `cache-references` | LLC accesses | record + stat |
@@ -406,7 +416,7 @@ cp -r skills/perflens-profiling ~/.claude/skills/
 | `context-switches` | Scheduling pressure | stat only |
 | `cpu-migrations` | Inter-CPU movement | stat only |
 
-The agent probes each event before use and only emits the ones the kernel actually supports.
+The agent probes each event before use and only emits the ones the kernel actually supports. The UI records **one sampling event by default** (`cycles`, or `cpu-clock` on a target without a PMU); the rest are opt-in, because each extra event multiplies the data the device sends. On hybrid CPUs events arrive per PMU (`cpu_core/cycles/`, `cpu_atom/cycles/`), never as a bare `cycles`.
 
 ---
 
@@ -430,9 +440,9 @@ dist/
 
 ### CI
 
-[`.github/workflows/test.yml`](.github/workflows/test.yml) runs the pytest suite on Python 3.10–3.13 (parser, aggregator differentials against device-captured fixtures, source mapper, HTTP API, MCP tools, provisioning against a fake release server, and the C-agent wire protocol driven through a fake framing server with a `perf` shim), and gates every PR on `ruff` and `tools/check_version.py`. A frontend job adds the OpenAPI schema drift check, the TypeScript typegen drift check, vitest unit tests, a self-contained Playwright browser E2E (`frontend/e2e/`) that replays a fixture session through the real UI, and a smoke run of the docs screenshot harness (`frontend/docs-shots/`) that asserts the images come out non-blank.
+[`.github/workflows/test.yml`](.github/workflows/test.yml) runs the pytest suite on Python 3.10–3.13 (parser, aggregator differentials against device-captured fixtures, source mapper, HTTP API, MCP tools, provisioning against a fake release server, and the C-agent wire protocol driven through a fake framing server with a `perf` shim), and gates every PR on `ruff`, `mypy` and `tools/check_version.py`. Two more jobs run the protocol tests against the agent built with AddressSanitizer+UBSan and with ThreadSanitizer (`make SANITIZE=…`) plus the C unit tests (`make check`), and a `shellcheck` job covers the shell scripts. A frontend job adds the OpenAPI schema drift check, the TypeScript typegen drift check, vitest unit tests, a self-contained Playwright browser E2E (`frontend/e2e/`) that replays a fixture session through the real UI, and a smoke run of the docs screenshot harness (`frontend/docs-shots/`) that asserts the images come out non-blank.
 
-[`.github/workflows/build.yml`](.github/workflows/build.yml) lints (`ruff`), runs the pytest suite, builds and smoke-runs the Python wheel (with a wheel-contents check), builds the static C agent for five architectures (x86_64, aarch64, aarch64_be, armv7, armeb), and builds static addr2line/readelf tools bundles (x86_64, aarch64) for `perflens provision`. Big-endian agent targets use musl toolchains from musl.cc since Ubuntu only ships little-endian sysroots. Tagged pushes (`v*`) create a GitHub Release and attach all artifacts — including raw `perflens-agent-linux-<arch>` binaries with stable names that `install-agent.sh` and the agent's `--update` fetch from `releases/latest/download/`. Tagged pushes also publish the package to [PyPI](https://pypi.org/project/perflens/) via Trusted Publishing (OIDC — no stored tokens).
+[`.github/workflows/build.yml`](.github/workflows/build.yml) lints (`ruff`), runs the pytest suite, builds and smoke-runs the Python wheel (with a wheel-contents check), builds the static C agent for five architectures (x86_64, aarch64, aarch64_be, armv7, armeb), and builds static addr2line/readelf tools bundles (x86_64, aarch64) for `perflens provision`. Every agent asset is a musl static build (static glibc cannot resolve host names on a foreign device), from toolchains published on the repository's `toolchains` release; both 32-bit ARM assets are soft-float. CI asserts what each asset claims — statically linked, the float ABI, BE8 for big-endian — and ships the stripped binary, keeping the unstripped one as a CI artifact. Tagged pushes (`v*`) create a GitHub Release and attach all artifacts — including raw `perflens-agent-linux-<arch>` binaries with stable names that `install-agent.sh` and the agent's `--update` fetch from `releases/latest/download/`. Tagged pushes also publish the package to [PyPI](https://pypi.org/project/perflens/) via Trusted Publishing (OIDC — no stored tokens).
 
 ---
 
@@ -442,7 +452,7 @@ dist/
 perflens/
 ├── install-agent.sh              # curl-able agent installer (arch detect, no sudo)
 ├── agent-c/
-│   ├── src/                      # C agent modules (agent.h + 10 .c files, static binary, zero deps)
+│   ├── src/                      # C agent modules (agent.h + 12 .c files, static binary, zero deps)
 │   ├── Makefile                  # native + cross-compile targets
 │   └── vendor/zstd/              # vendored zstd amalgamation
 ├── pyproject.toml                # pip/uv package (console script: perflens)

@@ -2,20 +2,41 @@
 #
 # Usage:
 #   make                               # native build
-#   make CROSS=aarch64-linux-gnu-      # ARM64 little-endian
-#   make CROSS=aarch64_be-linux-musl-   # ARM64 big-endian (musl)
-#   make CROSS=arm-linux-gnueabihf-    # ARMv7 32-bit little-endian
+#   make CROSS=x86_64-linux-musl-      # x86_64 (musl, fully static)
+#   make CROSS=aarch64-linux-musl-     # ARM64 little-endian (musl)
+#   make CROSS=aarch64_be-linux-musl-  # ARM64 big-endian (musl)
+#   make CROSS=arm-linux-musleabi-     # ARMv7 32-bit little-endian (musl, soft-float)
 #   make CROSS=armeb-linux-musleabi-   # ARMv7 32-bit big-endian (musl, soft-float)
-#   make CROSS=x86_64-linux-musl-      # x86_64 with musl (fully static)
 #   make all-cross                     # all cross targets
+#   make check                         # native unit tests (metrics parsers)
+#   make SANITIZE=address,undefined    # instrumented native build
+#
+# Every release asset is a musl static build: static glibc cannot reliably
+# resolve names (getaddrinfo needs the host's NSS libraries at run time), and
+# the toolchains all come from the repo's `toolchains` GitHub release.
 #   make clean
 
 CC      = $(CROSS)gcc
 VERSION := $(shell cat ../VERSION 2>/dev/null || echo dev)
-CFLAGS  = -std=c99 -O2 -Wall -Wextra -Wno-unused-parameter \
+# Hardening for a network-facing daemon: stack protector, fortified libc
+# calls (glibc; musl ignores the macro), format-string warnings as a gate,
+# and a read-only GOT/PLT after immediate binding. Per-function sections plus
+# --gc-sections drop the unused half of the vendored zstd (the agent only
+# compresses): measured -19% on x86_64, -30% on armeb.
+HARDEN  = -fstack-protector-strong -D_FORTIFY_SOURCE=2 \
+          -Wformat=2 -Wformat-security \
+          -ffunction-sections -fdata-sections
+CFLAGS  = -std=c11 -O2 -Wall -Wextra -Wno-unused-parameter \
           -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE \
-          -DAGENT_VERSION=\"$(VERSION)\" -I. $(ARCHFLAGS)
-LDFLAGS = -static -lpthread -lm
+          -DAGENT_VERSION=\"$(VERSION)\" -I. $(HARDEN) $(ARCHFLAGS)
+LDFLAGS = -static -Wl,-z,relro,-z,now -Wl,--gc-sections -lpthread -lm
+
+# `make SANITIZE=address,undefined` (or `thread`) builds an instrumented,
+# dynamically linked native agent for the protocol tests; CI runs both.
+ifneq ($(strip $(SANITIZE)),)
+  CFLAGS  += -fsanitize=$(SANITIZE) -fno-omit-frame-pointer -g -O1
+  LDFLAGS  = -fsanitize=$(SANITIZE) -lpthread -lm
+endif
 
 # Big-endian ARM needs an explicit -march, and the soft-float toolchain.
 #
@@ -33,6 +54,12 @@ LDFLAGS = -static -lpthread -lm
 #
 # Verify with: readelf -h <bin> | grep Flags   ->  soft-float ABI, BE8
 ifneq (,$(findstring armeb,$(CROSS)))
+  ARCHFLAGS = -march=armv7-a
+endif
+# The little-endian 32-bit asset is soft-float too, for the same reason: it
+# runs on VFP hardware as well, where a hard-float build does not run
+# without one. The musl toolchain also defaults to ARMv5; ask for v7.
+ifneq (,$(findstring arm-linux-musleabi-,$(CROSS)))
   ARCHFLAGS = -march=armv7-a
 endif
 
@@ -54,23 +81,47 @@ OBJDIR = $(OUTDIR)/obj
 BIN    = $(OUTDIR)/$(TARGET)
 OBJS   = $(patsubst src/%.c,$(OBJDIR)/%.o,$(SRCS)) $(OBJDIR)/zstd.o
 
-.PHONY: all clean all-cross print-bin
+# Objects record the flags they were built with. Without this, make reused
+# objects from a different configuration: `make check` after `make
+# SANITIZE=...` linked instrumented objects without the sanitizer runtime
+# (CI's sanitizer jobs failed on exactly that), and a VERSION change left
+# the old version compiled into an agent that rebuilt nothing.
+FLAGS_STAMP = $(OBJDIR)/.flags
+BUILD_FLAGS = $(CC) $(CFLAGS) $(LDFLAGS)
+
+.PHONY: all clean all-cross print-bin check FORCE
 
 all: $(BIN)
+
+# Native unit tests for the parsers that read /proc and /sys. They include
+# the module source directly, so the static parsers are reachable.
+check: $(OBJDIR)/test_metrics
+	$(OBJDIR)/test_metrics
+
+$(OBJDIR)/test_metrics: tests/test_metrics.c src/metrics.c src/agent.h $(FLAGS_STAMP) $(OBJDIR)/util.o $(OBJDIR)/subproc.o $(OBJDIR)/collect.o $(OBJDIR)/wire.o $(OBJDIR)/perfcmd.o $(OBJDIR)/probe.o $(OBJDIR)/zstd.o $(OBJDIR)/commands.o $(OBJDIR)/procs.o $(OBJDIR)/auth.o $(OBJDIR)/update.o
+	@mkdir -p $(OBJDIR)
+	$(CC) $(CFLAGS) -o $@ tests/test_metrics.c $(filter %.o,$^) $(LDFLAGS)
 
 print-bin:
 	@echo $(BIN)
 
+$(FLAGS_STAMP): FORCE
+	@mkdir -p $(OBJDIR)
+	@printf '%s\n' '$(BUILD_FLAGS)' | cmp -s - $@ || printf '%s\n' '$(BUILD_FLAGS)' > $@
+
 $(BIN): $(OBJS)
 	@mkdir -p $(OUTDIR)
 	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LDFLAGS)
-	@echo "Built: $@ ($(shell file $@ 2>/dev/null | grep -o 'statically linked' || echo 'check linking'))"
+	@if [ -z "$(SANITIZE)" ] && command -v file >/dev/null 2>&1 && \
+	    ! file $@ | grep -Eq 'static(ally|-pie) linked'; then \
+	    echo "error: $@ is not statically linked:"; file $@; exit 1; fi
+	@echo "Built: $@"
 
-$(OBJDIR)/%.o: src/%.c src/agent.h vendor/zstd/zstd.h
+$(OBJDIR)/%.o: src/%.c src/agent.h vendor/zstd/zstd.h $(FLAGS_STAMP)
 	@mkdir -p $(OBJDIR)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-$(OBJDIR)/zstd.o: vendor/zstd/zstd.c vendor/zstd/zstd.h
+$(OBJDIR)/zstd.o: vendor/zstd/zstd.c vendor/zstd/zstd.h $(FLAGS_STAMP)
 	@mkdir -p $(OBJDIR)
 	$(CC) $(CFLAGS) -DZSTD_DISABLE_ASM -c -o $@ $<
 
@@ -81,7 +132,7 @@ clean:
 
 # Cross-compile all supported targets — each into its own build/<arch>/.
 # No `clean` between arches: separate object dirs make the builds independent.
-CROSS_TARGETS = aarch64-linux-gnu- aarch64_be-linux-musl- arm-linux-gnueabihf- armeb-linux-musleabi- x86_64-linux-musl-
+CROSS_TARGETS = x86_64-linux-musl- aarch64-linux-musl- aarch64_be-linux-musl- arm-linux-musleabi- armeb-linux-musleabi-
 
 all-cross:
 	@for cross in $(CROSS_TARGETS); do \

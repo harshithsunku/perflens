@@ -25,42 +25,6 @@ REPLAY_CACHE_SCHEMA = 3
 FIXTURE = fixture_session_names()[0]
 
 
-@pytest.fixture()
-def core(tmp_path, perflens_home):
-    """Build a fresh AppContext (no workers, no source mapper).
-
-    ui_dir is a stand-in for the built frontend, so the suite always
-    exercises the shipped configuration (static assets mounted) whether
-    or not this machine has run `npm --prefix frontend run build`. The
-    two tests that care about the real assets, or about their absence,
-    build their own app.
-    """
-    from perflens.app import AppContext
-    from perflens.config import ServerConfig
-    from perflens.state import MetricsState, ProfilingState
-
-    sessions_dir = str(tmp_path / 'sessions')
-    os.makedirs(sessions_dir)
-    ui_dir = tmp_path / 'ui'
-    ui_dir.mkdir()
-    (ui_dir / 'index.html').write_text('<!DOCTYPE html><title>stub</title>')
-    cfg = ServerConfig(
-        source_dir=str(tmp_path),
-        sessions_dir=sessions_dir,
-        browse_root=str(tmp_path),
-        ui_dir=str(ui_dir),
-    )
-    yield AppContext(config=cfg,
-                     state=ProfilingState(max_samples=100000),
-                     metrics=MetricsState())
-
-
-@pytest.fixture()
-def client(core):
-    from perflens import web
-    with TestClient(web.create_app(core)) as c:
-        yield c
-
 
 @pytest.fixture()
 def session_id(core):
@@ -137,8 +101,11 @@ def test_ui_missing_fallback(core, tmp_path):
 def test_snapshot_empty_and_404(client):
     r = client.get('/api/snapshot')
     assert r.status_code == 200
-    assert r.json() == {'per_event': {},
-                        'version': {'chunk_count': 0, 'total_samples': 0}}
+    body = r.json()
+    assert body['per_event'] == {}
+    assert body['version'] == {'generation': 1, 'chunk_count': 0,
+                               'total_samples': 0, 'ring_samples': 0,
+                               'session_samples': 0}
     assert_error(client.get('/api/snapshot', params={'event': 'nope'}),
                  404, 'not_found')
 
@@ -761,6 +728,9 @@ def test_source_annotates_one_event(client, core):
         def annotate_source(self, file, samples):
             return [{'line': 1, 'samples': len(samples)}]
 
+        def close(self):
+            pass
+
     core.state.source_mapper = Mapper()
     assert_error(client.get('/api/source', params={'file': 'x.c'}),
                  400, 'ambiguous_event')
@@ -782,7 +752,14 @@ def test_verify_perf_refreshes_the_agents_hello(client, core, monkeypatch):
             return {'ok': True, 'available': True, 'path': args['perf'],
                     'version': 'perf version 4.4.0', 'functional': True}
 
+        def close(self):
+            self.connected = False
+
+        def join(self, timeout=None):
+            pass
+
     session = Session()
+    original = session.hello
     monkeypatch.setattr(core.agent, 'current', lambda: session)
     events = []
     monkeypatch.setattr(core, 'broadcast',
@@ -795,6 +772,8 @@ def test_verify_perf_refreshes_the_agents_hello(client, core, monkeypatch):
     assert info['hello']['platform']['perf_version'] == 'perf version 4.4.0'
     assert ('agent', {'agent': 'dev:9999',
                       'platform': session.hello['platform']}) in events
+    # The hello other threads may be serializing is replaced, not mutated
+    assert original['platform']['perf_version'] == 'unknown'
 
 
 def test_snapshot_gzip_negotiation(client, core):
@@ -953,3 +932,206 @@ def test_agent_command_rejects_stray_top_level_fields(client):
     r = client.post('/api/agent/command',
                     json={'cmd': 'configure', 'frequency': 499})
     assert_error(r, 400, 'validation')
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: versions, cached bytes, caches, error paths
+# ---------------------------------------------------------------------------
+
+def _one_sample(event='cycles', tid=1, func='f'):
+    return {'comm': 'w', 'pid': 1, 'tid': tid, 'event_count': 1,
+            'event_type': event,
+            'frames': [{'addr': '0', 'func': func, 'offset': '', 'module': 'm'}]}
+
+
+def _fold(core):
+    """Fold pending chunks the way the rebuild worker does."""
+    with core.state.lock:
+        pending, core.state._pending_chunks = core.state._pending_chunks, []
+        core.state._dirty = False
+        for chunk in pending:
+            core.state.aggregators.add_chunk(chunk, None)
+        per_event, blobs = core.state.aggregators.snapshot_blobs(None)
+        core.state._cached_per_event = per_event
+        core.state._cached_blobs = blobs
+
+
+def test_status_carries_generation_and_both_totals(client, core):
+    core.state.add_samples([_one_sample(), _one_sample()])
+    body = client.get('/api/status').json()
+    assert body['generation'] == 1
+    assert body['chunk_count'] == 1
+    assert body['total_samples'] == body['ring_samples'] == 2
+    assert body['session_samples'] == 2
+    core.state.reset()
+    body = client.get('/api/status').json()
+    assert body['generation'] == 2 and body['chunk_count'] == 0
+    assert body['session_samples'] == 0
+
+
+def test_snapshot_serves_the_workers_bytes(client, core):
+    """The spliced-bytes path must answer exactly what serializing the
+    dicts would, gzipped or not, for one event and for all."""
+    core.state.add_samples([_one_sample('cycles', func=f'f{i}')
+                            for i in range(3000)]
+                           + [_one_sample('instructions')])
+    _fold(core)
+    assert core.state._cached_blobs
+    for params in ({'event': 'cycles'}, {}):
+        gz = client.get('/api/snapshot', params=params,
+                        headers={'Accept-Encoding': 'gzip'})
+        plain = client.get('/api/snapshot', params=params,
+                           headers={'Accept-Encoding': 'identity'})
+        assert gz.headers.get('content-encoding') == 'gzip'
+        assert 'content-encoding' not in plain.headers
+        assert gz.json() == plain.json()
+        with core.state.lock:
+            per_event = core.state._cached_per_event
+            version = core.state.version_locked()
+        body = plain.json()
+        assert body['version'] == version
+        if params:
+            assert body['event'] == 'cycles'
+            assert body['data'] == per_event['cycles']
+        else:
+            assert body['per_event'] == per_event
+
+
+def test_no_cors_wildcard(client):
+    for path in ('/api/status', '/api/snapshot', '/api/sessions'):
+        assert 'access-control-allow-origin' not in client.get(path).headers
+
+
+def test_sse_initial_burst_starts_with_status_and_agent(core, live_server,
+                                                        monkeypatch):
+    """A browser attaching to a running session used to receive the data
+    version but never that an agent was connected."""
+    class Session:
+        connected = True
+        addr = 'dev:9999'
+        hello = {'platform': {'arch': 'armv7b'}}
+
+    monkeypatch.setattr(core.agent, 'current', lambda: Session())
+    with core.state.lock:
+        core.state.agent_connected = True
+        core.state.agent_addr = 'dev:9999'
+        core.state._cached_per_event = {'cycles': {}}
+        core.state.event_types = ['cycles']
+    got = _read_sse(live_server, {'status', 'agent', 'data_version', 'perf_stat'})
+    assert list(got)[:4] == ['status', 'agent', 'data_version', 'perf_stat']
+    assert got['status'] == {'connected': True, 'agent': 'dev:9999'}
+    assert got['agent'] == {'agent': 'dev:9999', 'platform': {'arch': 'armv7b'}}
+    assert got['data_version']['generation'] == 1
+
+
+def test_sse_without_an_agent_sends_no_agent_event(core, live_server):
+    got = _read_sse(live_server, {'status'}, max_lines=4)
+    assert list(got) == ['status']
+    assert got['status'] == {'connected': False, 'agent': None}
+
+
+def test_sessions_list_limit_is_bounded_and_metadata_cached(client, core,
+                                                             session_id):
+    body = client.get('/api/sessions', params={'limit': 10 ** 6}).json()
+    assert body['limit'] == 1000 and body['total'] == 1
+    meta_path = os.path.join(core.config.sessions_dir, session_id,
+                             'metadata.json')
+    assert meta_path in core.session_meta_cache
+    cached = core.session_meta_cache[meta_path][1]
+    assert client.get('/api/sessions').json()['sessions'][0] is not None
+    assert core.session_meta_cache[meta_path][1] is cached   # re-used
+    # A rewritten file (new mtime) is re-read
+    time.sleep(0.01)
+    with open(meta_path) as f:
+        meta = json.load(f)
+    meta['agent'] = 'edited'
+    with open(meta_path, 'w') as f:
+        json.dump(meta, f)
+    os.utime(meta_path, None)
+    assert client.get('/api/sessions').json()['sessions'][0]['agent'] == 'edited'
+
+
+def test_corrupt_session_metadata_is_an_error_envelope(client, core,
+                                                       session_id):
+    meta_path = os.path.join(core.config.sessions_dir, session_id,
+                             'metadata.json')
+    with open(meta_path, 'w') as f:
+        f.write('{"session_id": "x", ')
+    assert_error(client.get(f'/api/sessions/{session_id}'), 500, 'bad_metadata')
+    assert_error(client.get(f'/api/sessions/{session_id}/export',
+                            params={'format': 'json'}), 500, 'bad_metadata')
+    assert client.get('/api/sessions').json()['total'] == 0
+
+
+def test_session_delete_reports_a_failure(client, core, session_id,
+                                          monkeypatch):
+    from perflens import web
+
+    def refuse(path):
+        raise OSError(13, 'Permission denied')
+
+    monkeypatch.setattr(web.shutil, 'rmtree', refuse)
+    assert_error(client.delete(f'/api/sessions/{session_id}'), 500,
+                 'delete_failed')
+    assert client.get('/api/sessions').json()['total'] == 1
+
+
+def test_ring_views_are_memoized_per_chunk(client, core):
+    core.state.add_samples([_one_sample(tid=1), _one_sample(tid=2)])
+    first = client.get('/api/threads').json()
+    assert len(first['threads']) == 2
+    assert core.views.misses == 1 and core.views.hits == 0
+    assert client.get('/api/threads').json() == first
+    assert core.views.hits == 1
+    # A new chunk changes the answer; the old entry is not served
+    core.state.add_samples([_one_sample(tid=3)])
+    assert len(client.get('/api/threads').json()['threads']) == 3
+    assert core.views.misses == 2
+    # A reset bumps the generation even though chunk_count restarts
+    core.state.reset()
+    core.state.add_samples([_one_sample(tid=9)])
+    assert [t['tid'] for t in client.get('/api/threads').json()['threads']] == [9]
+    # Per-thread, window and source views take the same path
+    client.get('/api/threads/9')
+    client.get('/api/threads/9')
+    assert core.views.hits == 2
+
+
+def test_config_patch_closes_the_previous_mapper(client, core, tmp_path):
+    src = tmp_path / 'src'
+    src.mkdir()
+    assert client.patch('/api/config', json={'source_dir': str(src)}).status_code == 200
+    old = core.state.source_mapper
+    assert old is not None and not old._closed
+    assert client.patch('/api/config', json={'source_dir': str(src)}).status_code == 200
+    assert core.state.source_mapper is not old
+    assert old._closed
+    core.state.source_mapper.close()
+
+
+@pytest.mark.parametrize('stats, mode, detail', [
+    # One stray frame in 2.4 million is not a degraded profile
+    ({'userspace_frames': 2_420_098, 'unknown_frames': 1, 'resolved_frames': 0},
+     'device', ''),
+    ({'userspace_frames': 1000, 'unknown_frames': 5, 'resolved_frames': 50},
+     'server', '50 frames named'),
+    # A real share unnamed still says so, with the fix
+    ({'userspace_frames': 1000, 'unknown_frames': 300, 'resolved_frames': 0},
+     'degraded', '300 of 1,000'),
+    ({'userspace_frames': 1000, 'unknown_frames': 1000, 'resolved_frames': 0},
+     'degraded', 'cannot resolve'),
+])
+def test_symbolization_mode_ignores_stray_unnamed_frames(core, stats, mode, detail):
+    from perflens import web
+
+    class Mapper:
+        def symbolization_stats(self):
+            return stats
+
+        def close(self):
+            pass
+
+    core.state.source_mapper = Mapper()
+    sym = web._symbolization_status(core)
+    assert sym['mode'] == mode
+    assert (detail in sym['detail']) if detail else sym['detail'] == ''

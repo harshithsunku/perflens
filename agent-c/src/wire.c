@@ -8,10 +8,27 @@
  * TCP helpers
  * -------------------------------------------------------------------------- */
 
+static int send_timeout_ms(void)
+{
+    const char *s = getenv("PERFLENS_SEND_TIMEOUT_MS");
+    if (s && *s) {
+        long v = strtol(s, NULL, 10);
+        if (v >= 100 && v <= 3600000) return (int)v;
+    }
+    return SEND_TIMEOUT_MS;
+}
+
 /* Detect a dead peer even when idle: without keepalive a dropped network
  * path leaves the agent blocked in recv() forever (so --server mode never
- * reconnects). ~2 minutes to declare the connection dead. */
-void tcp_enable_keepalive(int fd)
+ * reconnects). ~2 minutes to declare the connection dead.
+ *
+ * Keepalive only covers an idle connection, though. With data queued or
+ * unacknowledged -- mid-chunk -- Linux retransmits until tcp_retries2
+ * (about 15 minutes) before send() fails, and a peer that is alive but not
+ * reading never makes it fail at all. TCP_USER_TIMEOUT and SO_SNDTIMEO bound
+ * both; the whole session held sock_lock through such a send, so metrics
+ * and every command response froze with it. */
+void tcp_session_opts(int fd)
 {
     int on = 1;
     setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof(on));
@@ -21,20 +38,42 @@ void tcp_enable_keepalive(int fd)
     setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
     setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
 #endif
+    /* Every frame now goes out in one writev(), so Nagle has nothing to
+     * coalesce and only delays small responses behind the peer's ACK. */
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
+
+    int ms = send_timeout_ms();
+#ifdef TCP_USER_TIMEOUT
+    unsigned int ut = (unsigned int)ms;
+    setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &ut, sizeof(ut));
+#endif
+    struct timeval tv;
+    tv.tv_sec = ms / 1000;
+    tv.tv_usec = (ms % 1000) * 1000;
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 }
 
-static int tcp_send_all(int fd, const void *data, size_t len)
+/* Write the whole iovec, resuming after partial writes. An EAGAIN here is
+ * the send timeout expiring, and the session is over. */
+static int send_iov_all(int fd, struct iovec *iov, int iovcnt)
 {
-    const char *p = (const char *)data;
-    size_t remaining = len;
-    while (remaining > 0) {
-        ssize_t n = send(fd, p, remaining, MSG_NOSIGNAL);
+    while (iovcnt > 0) {
+        ssize_t n = writev(fd, iov, iovcnt);
         if (n < 0) {
             if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) errno = ETIMEDOUT;
             return -1;
         }
-        p += n;
-        remaining -= (size_t)n;
+        size_t done = (size_t)n;
+        while (iovcnt > 0 && done >= iov[0].iov_len) {
+            done -= iov[0].iov_len;
+            iov++;
+            iovcnt--;
+        }
+        if (iovcnt > 0 && done > 0) {
+            iov[0].iov_base = (char *)iov[0].iov_base + done;
+            iov[0].iov_len -= done;
+        }
     }
     return 0;
 }
@@ -42,14 +81,20 @@ static int tcp_send_all(int fd, const void *data, size_t len)
 int tcp_send_frame(int fd, const void *payload,
                           size_t payload_len, uint8_t flag)
 {
-    /* 5-byte header: 4-byte big-endian length + 1-byte flag */
+    /* 5-byte header: 4-byte big-endian length + 1-byte flag, sent with the
+     * payload in one writev() rather than three send()s, which cost three
+     * system calls and a Nagle stall per frame. */
+    uint8_t header[5];
     uint32_t len_be = htonl((uint32_t)payload_len);
+    memcpy(header, &len_be, 4);
+    header[4] = flag;
 
-    if (tcp_send_all(fd, &len_be, 4) < 0 ||
-        tcp_send_all(fd, &flag, 1) < 0 ||
-        tcp_send_all(fd, payload, payload_len) < 0)
-        return -1;
-    return 0;
+    struct iovec iov[2];
+    iov[0].iov_base = header;
+    iov[0].iov_len = sizeof(header);
+    iov[1].iov_base = (void *)payload;
+    iov[1].iov_len = payload_len;
+    return send_iov_all(fd, iov, payload_len > 0 ? 2 : 1);
 }
 
 /* Receive exactly n bytes. Returns 0 on success, -1 on error/disconnect. */
@@ -89,9 +134,10 @@ int tcp_recv_frame(int fd, char **payload, uint32_t *out_len,
         return 0;
     }
 
-    /* Server→agent frames are small JSON commands. A huge length means a
-     * corrupt stream or a stray client — don't try to allocate it. */
-    if (len > MAX_BUF_SIZE) {
+    /* Server->agent frames are small JSON commands. A larger length means a
+     * corrupt stream or a stray client, and this runs before the peer has
+     * authenticated -- so it must not be able to make us allocate for it. */
+    if (len > MAX_CMD_FRAME) {
         agent_warn("Oversized frame (%u bytes) — dropping connection", len);
         return -1;
     }
@@ -112,7 +158,7 @@ int tcp_recv_frame(int fd, char **payload, uint32_t *out_len,
  * Compression sink (in-process zstd, streaming)
  *
  * perf script output is compressed as it is read from the pipe, so the raw
- * text (up to MAX_BUF_SIZE) never sits in memory — only the compressed
+ * text (up to MAX_BUF_SIZE) never sits in memory whole — only the compressed
  * stream, typically 20-40x smaller. Falls back to raw buffering when a
  * zstd context cannot be created.
  * -------------------------------------------------------------------------- */
@@ -192,23 +238,43 @@ void sink_free(struct sink *s)
     buf_free(&s->out);
 }
 
+/* Start a new frame on the same sink: the zstd context and the output
+ * buffer's capacity are kept, so a long pipeline stops allocating and
+ * freeing a compression context and a multi-MB buffer every chunk. */
+void sink_reset(struct sink *s)
+{
+    s->raw_len = 0;
+    s->error = 0;
+    s->out.len = 0;
+    if (s->zcs) {
+        size_t r = ZSTD_CCtx_reset(s->zcs, ZSTD_reset_session_only);
+        if (ZSTD_isError(r)) {
+            ZSTD_freeCStream(s->zcs);
+            s->zcs = NULL;
+            s->compress = 0;
+            agent_warn("zstd reset failed (%s) — sending uncompressed",
+                       ZSTD_getErrorName(r));
+        }
+    }
+}
+
 /* Like run_cmd(), but the child's stdout is streamed through a sink
  * instead of buffered whole. stderr is captured into err as usual. */
 int run_cmd_to_sink(char *const argv[], struct sink *sink,
-                           struct buf *err, int timeout_sec)
+                           struct buf *err, int timeout_sec, int flags,
+                           const struct agent_state *a)
 {
     if (err) err->len = 0;
 
     int out_fd, err_fd;
-    pid_t pid = fork_cmd(argv, &out_fd, &err_fd);
+    pid_t pid = fork_cmd(argv, &out_fd, &err_fd, flags);
     if (pid < 0) return -1;
 
     char *chunk = malloc(IO_CHUNK);
     if (!chunk) {
-        kill(pid, SIGKILL);
+        kill_child_group(pid, SIGKILL);
         close(out_fd); close(err_fd);
-        int ws;
-        do { } while (waitpid(pid, &ws, 0) < 0 && errno == EINTR);
+        reap_child(pid, 0);
         untrack_child(pid);
         return -1;
     }
@@ -217,11 +283,12 @@ int run_cmd_to_sink(char *const argv[], struct sink *sink,
     fds[0].fd = out_fd; fds[0].events = POLLIN;
     fds[1].fd = err_fd; fds[1].events = POLLIN;
     int open_fds = 2;
+    int killed = 0;
 
     struct timespec start;
     clock_gettime(CLOCK_MONOTONIC, &start);
 
-    while (open_fds > 0 && !g_shutdown) {
+    while (open_fds > 0 && !g_shutdown && !collection_cancelled(a)) {
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
         int elapsed_ms = (int)((now.tv_sec - start.tv_sec) * 1000 +
@@ -229,11 +296,12 @@ int run_cmd_to_sink(char *const argv[], struct sink *sink,
         int remaining_ms = timeout_sec * 1000 - elapsed_ms;
         if (remaining_ms <= 0) {
             agent_warn("Command timed out after %ds, killing", timeout_sec);
-            kill(pid, SIGKILL);
+            kill_child_group(pid, SIGKILL);
+            killed = 1;
             break;
         }
 
-        int ret = poll(fds, 2, remaining_ms < 500 ? remaining_ms : 500);
+        int ret = poll(fds, 2, remaining_ms < 200 ? remaining_ms : 200);
         if (ret < 0) {
             if (errno == EINTR) continue;
             break;
@@ -258,7 +326,7 @@ int run_cmd_to_sink(char *const argv[], struct sink *sink,
             if (!err) {
                 ssize_t n = read(fds[1].fd, chunk, IO_CHUNK);
                 if (n <= 0) { close(fds[1].fd); fds[1].fd = -1; open_fds--; }
-            } else if (buf_ensure(err, err->len + 4096) < 0) {
+            } else if (buf_ensure_small(err, err->len + 4096, SMALL_BUF_SIZE) < 0) {
                 close(fds[1].fd); fds[1].fd = -1; open_fds--;
             } else {
                 ssize_t n = read(fds[1].fd, err->data + err->len,
@@ -276,16 +344,10 @@ int run_cmd_to_sink(char *const argv[], struct sink *sink,
     if (fds[1].fd >= 0) close(fds[1].fd);
     free(chunk);
 
-    int status = 0;
-    int rc;
-    do {
-        rc = waitpid(pid, &status, 0);
-    } while (rc < 0 && errno == EINTR);
-
+    int status = reap_child(pid, killed ? 0 : CHILD_GRACE_MS);
     untrack_child(pid);
 
     if (WIFEXITED(status))
         return WEXITSTATUS(status);
     return -1;
 }
-

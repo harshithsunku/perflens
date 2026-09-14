@@ -10,6 +10,7 @@ tests/sample_workload
 .DS_Store
 *.o
 agent-c/perflens-agent
+agent-c/obj/
 agent-c/perflens-agent-*
 tests/matrixlab/build/
 tests/matrixlab/bin/
@@ -20,3 +21,5 @@ src/perflens/ui/
 frontend/test-results/
 frontend/playwright-report/
 *.tsbuildinfo
+# Local review notes, not for the repo
+/AGENT_FINDINGS.md

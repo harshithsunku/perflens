@@ -1,7 +1,7 @@
 // URL-hash deep links: #tab=flamegraph&event=cycles&tid=123&zoom=a;b&session=<id>
 // Shareable and refresh-surviving. Pure codec + store sync glue.
 
-import type { Tab } from './ui';
+import { isTab, type Tab } from './ui';
 
 export interface HashState {
   tab?: Tab;
@@ -20,7 +20,7 @@ export function parseHash(hash: string): HashState {
     if (i <= 0) continue;
     const key = kv.slice(0, i);
     const val = kv.slice(i + 1);
-    if (key === 'tab') out.tab = val as Tab;
+    if (key === 'tab') { if (isTab(val)) out.tab = val; }
     else if (key === 'event') out.event = decodeURIComponent(val);
     else if (key === 'tid') {
       const t = parseInt(val, 10);

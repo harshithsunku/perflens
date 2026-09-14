@@ -23,15 +23,28 @@ class Status(BaseModel):
     status: Literal['ok']
     agent_connected: bool
     agent_addr: Optional[str] = None
+    # total_samples is the ring's length (kept for compatibility);
+    # ring_samples says so by name, session_samples counts every sample
+    # parsed this session, which the ring under-reports once it wraps.
     total_samples: int
+    ring_samples: int = 0
+    session_samples: int = 0
     chunk_count: int
+    # Bumped on every session reset (a new agent, a reconnect)
+    generation: int = 1
 
 
 class DataVersion(BaseModel):
     """Version stamp for the notify-and-fetch cycle. Broadcast over SSE
-    (with event_types) and echoed by /api/snapshot (without)."""
+    (with event_types) and echoed by /api/snapshot (without).
+
+    A stamp is newer than another when its generation is higher, or equal
+    and its chunk_count higher: chunk_count restarts at 0 on every reset."""
+    generation: int = 1
     chunk_count: int
     total_samples: int
+    ring_samples: int = 0
+    session_samples: int = 0
     event_types: Optional[list[str]] = None
 
 
@@ -85,14 +98,6 @@ class SourceFileRef(BaseModel):
     functions: list[str]
 
 
-class SourceLine(BaseModel):
-    line_no: int
-    text: str
-    samples: int
-    percent: float
-    model_config = ConfigDict(extra='allow')
-
-
 class PerEventEntry(BaseModel):
     function_summary: FunctionSummary
     flamegraph: FlamegraphNode
@@ -132,6 +137,11 @@ class SessionMetadata(BaseModel):
     perf_stat: dict[str, Any] = Field(default_factory=dict)
     platform: Optional[dict[str, Any]] = None
     metrics_summary: Optional[dict[str, Any]] = None
+    # True while the session is still receiving (its metadata is refreshed
+    # per chunk); a server that died mid-capture leaves it True.
+    live: bool = False
+    # Metadata rebuilt at startup for a capture the server never finalized.
+    recovered: bool = False
 
 
 class SessionListResponse(BaseModel):
@@ -364,7 +374,9 @@ class AgentCommandRequest(BaseModel):
 
     cmd: AgentCommandName
     args: dict[str, Any] = Field(default_factory=dict)
-    timeout: int = 60
+    # Bounded: each relayed command parks a threadpool thread for up to
+    # this long, and an unbounded value could park it for days.
+    timeout: int = Field(60, ge=1, le=600)
 
 
 class AgentCommandResponse(BaseModel):

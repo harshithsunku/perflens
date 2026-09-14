@@ -47,21 +47,25 @@ static int detect_asset_arch(char *buf, size_t buflen)
 #endif
 }
 
-/* Download url to dest via curl (preferred) or wget. exec failure = 127. */
-static int download_file(const char *url, const char *dest)
+/* Download url to dest via curl (preferred) or wget. exec failure = 127.
+ * Sets *via_wget when the fallback was used: BusyBox wget, the norm on
+ * embedded targets, does not validate TLS certificates. */
+static int download_file(const char *url, const char *dest, int *via_wget)
 {
     struct buf err;
     buf_init(&err);
+    *via_wget = 0;
 
     char *curl_argv[] = { (char *)"curl", (char *)"-fsSL",
                           (char *)"--connect-timeout", (char *)"20",
                           (char *)"-o", (char *)dest, (char *)url, NULL };
-    int rc = run_cmd(curl_argv, NULL, &err, 300);
+    int rc = run_cmd(curl_argv, NULL, &err, 300, NULL);
     if (rc == 127) {
         char *wget_argv[] = { (char *)"wget", (char *)"-q",
                               (char *)"-T", (char *)"20",
                               (char *)"-O", (char *)dest, (char *)url, NULL };
-        rc = run_cmd(wget_argv, NULL, &err, 300);
+        rc = run_cmd(wget_argv, NULL, &err, 300, NULL);
+        *via_wget = 1;
         if (rc == 127) {
             agent_warn("Neither curl nor wget found — cannot download");
             buf_free(&err);
@@ -79,6 +83,65 @@ static int download_file(const char *url, const char *dest)
     }
     buf_free(&err);
     return 0;
+}
+
+/* Compare the download against the published <asset>.sha256 sidecar with
+ * the device's own sha256sum (coreutils and BusyBox both have one), before
+ * the file is made executable or run. Returns 1 verified, 0 mismatch,
+ * -1 could not verify (no sidecar, no sha256sum). A checksum from the same
+ * origin as the asset guards against truncation, corruption and a
+ * poisoned single object, not against an attacker who controls the origin
+ * -- but it also means a rejected update is never executed. */
+static int verify_sha256(const char *url, const char *file, char *why,
+                         size_t whylen)
+{
+    char sidecar_url[600], sidecar[PATH_MAX + 40];
+    snprintf(sidecar_url, sizeof(sidecar_url), "%s.sha256", url);
+    snprintf(sidecar, sizeof(sidecar), "%s.sha256", file);
+
+    int via_wget;
+    if (download_file(sidecar_url, sidecar, &via_wget) != 0) {
+        snprintf(why, whylen, "no checksum sidecar published for this asset");
+        return -1;
+    }
+
+    char expected[80] = "";
+    FILE *f = fopen(sidecar, "r");
+    if (f) {
+        if (fscanf(f, "%64s", expected) != 1) expected[0] = '\0';
+        fclose(f);
+    }
+    unlink(sidecar);
+    if (strlen(expected) != 64) {
+        snprintf(why, whylen, "checksum sidecar unreadable");
+        return -1;
+    }
+
+    char *argv[] = { (char *)"sha256sum", (char *)file, NULL };
+    struct buf out;
+    buf_init(&out);
+    int rc = run_cmd(argv, &out, NULL, 120, NULL);
+    if (rc == 127) {
+        buf_free(&out);
+        snprintf(why, whylen, "sha256sum not found on this device");
+        return -1;
+    }
+    char actual[80] = "";
+    if (rc == 0 && out.len >= 64) {
+        memcpy(actual, out.data, 64);
+        actual[64] = '\0';
+    }
+    buf_free(&out);
+    if (strlen(actual) != 64) {
+        snprintf(why, whylen, "sha256sum failed (rc=%d)", rc);
+        return -1;
+    }
+    if (strcmp(actual, expected) != 0) {
+        snprintf(why, whylen, "checksum mismatch: expected %.12s…, got %.12s…",
+                 expected, actual);
+        return 0;
+    }
+    return 1;
 }
 
 int self_update(char *msg, size_t msglen)
@@ -104,8 +167,11 @@ int self_update(char *msg, size_t msglen)
     /* The downloaded file is made executable and run, so refuse an origin
      * that offers no transport authentication at all. The compiled-in default
      * is https; this only bites an operator who pointed the agent at a
-     * plaintext mirror. */
-    if (strncmp(base, "http://", 7) == 0) {
+     * plaintext mirror. Loopback is the exception: a mirror on the device
+     * itself (or the protocol tests) crosses no network. */
+    if (strncmp(base, "http://", 7) == 0 &&
+        strncmp(base, "http://127.", 11) != 0 &&
+        strncmp(base, "http://localhost", 16) != 0) {
         snprintf(msg, msglen,
                  "refusing to update over plaintext http:// "
                  "(set PERFLENS_UPDATE_URL to an https:// origin)");
@@ -119,9 +185,33 @@ int self_update(char *msg, size_t msglen)
     snprintf(tmp, sizeof(tmp), "%s.update.%d", self, (int)getpid());
 
     agent_log("Downloading %s ...", url);
-    if (download_file(url, tmp) != 0) {
+    int via_wget = 0;
+    if (download_file(url, tmp, &via_wget) != 0) {
         snprintf(msg, msglen, "download failed: %.400s", url);
         return -1;
+    }
+
+    /* Verify before anything runs. The old order ran `--version` on the
+     * download first, so even a rejected update had executed the file. */
+    char why[256];
+    int verified = verify_sha256(url, tmp, why, sizeof(why));
+    if (verified == 0) {
+        snprintf(msg, msglen, "update refused: %s", why);
+        unlink(tmp);
+        return -1;
+    }
+    if (verified < 0) {
+        if (via_wget && strncmp(base, "https://", 8) == 0) {
+            /* wget here is usually BusyBox's, which checks no certificate:
+             * an unverifiable download over it is trust in nothing. */
+            snprintf(msg, msglen, "update refused: %s, and the download went "
+                     "through wget, which may not validate TLS", why);
+            unlink(tmp);
+            return -1;
+        }
+        agent_warn("Update downloaded but not verified (%s)", why);
+    } else {
+        agent_log("Checksum verified");
     }
 
     if (chmod(tmp, 0755) != 0) {
@@ -134,7 +224,7 @@ int self_update(char *msg, size_t msglen)
     struct buf out;
     buf_init(&out);
     char *ver_argv[] = { tmp, (char *)"--version", NULL };
-    int rc = run_cmd(ver_argv, &out, NULL, 30);
+    int rc = run_cmd(ver_argv, &out, NULL, 30, NULL);
     if (rc != 0 || out.len == 0 ||
         !str_contains_lower(out.data, out.len, "perflens-agent")) {
         snprintf(msg, msglen, "downloaded binary failed verification (rc=%d)", rc);

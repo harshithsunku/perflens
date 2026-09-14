@@ -316,18 +316,19 @@
                             <h3>Build the static binary</h3>
                             <p>Zero runtime dependencies; vendored zstd; cross-compiles from a single Makefile.</p>
 <pre><code>cd agent-c
-make                                    # native x86_64
-make CROSS=aarch64-linux-gnu-           # ARM64 little-endian
+make                                    # native
+make CROSS=x86_64-linux-musl-           # x86_64
+make CROSS=aarch64-linux-musl-          # ARM64 little-endian
 make CROSS=aarch64_be-linux-musl-       # ARM64 big-endian
-make CROSS=arm-linux-gnueabihf-         # ARMv7 little-endian
-make CROSS=armeb-linux-musleabihf-      # ARMv7 big-endian</code></pre>
+make CROSS=arm-linux-musleabi-          # ARMv7 little-endian (soft-float)
+make CROSS=armeb-linux-musleabi-        # ARMv7 big-endian (soft-float, BE8)</code></pre>
                         </div>
                     </div>
                     <div class="step">
                         <div class="step-num">2</div>
                         <div class="step-body">
                             <h3>Ship the single file</h3>
-                            <p>The output is one ~2 MB binary. No libc surprises, no Python needed.</p>
+                            <p>The output is one static binary under 1&nbsp;MB. No libc surprises, no Python needed.</p>
 <pre><code>scp perflens-agent user@device:/tmp/
 ssh user@device /tmp/perflens-agent --server &lt;server-ip&gt;</code></pre>
                         </div>

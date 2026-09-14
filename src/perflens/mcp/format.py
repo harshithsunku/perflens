@@ -10,6 +10,8 @@ and the reply says exactly which call fetches the next page.
 
 import json
 
+from perflens.parser import event_base
+
 MAX_LIMIT = 100
 
 # Beyond this a call path is more noise than signal, so the middle is
@@ -152,18 +154,29 @@ def derived_counters(perf_stat):
     IPC and the miss rates are what distinguish "this loop is slow" from
     "this workload is starved on memory", which changes the fix entirely.
     """
+    def number(raw):
+        if isinstance(raw, dict):
+            raw = raw.get('value')
+        if isinstance(raw, str):
+            try:
+                raw = float(raw.replace(',', ''))
+            except ValueError:
+                raw = None
+        return float(raw) if isinstance(raw, (int, float)) else None
+
     def value(*names):
         for name in names:
-            raw = perf_stat.get(name)
-            if isinstance(raw, dict):
-                raw = raw.get('value')
-            if isinstance(raw, str):
-                try:
-                    raw = float(raw.replace(',', ''))
-                except ValueError:
-                    raw = None
-            if isinstance(raw, (int, float)):
-                return float(raw)
+            v = number(perf_stat.get(name))
+            if v is not None:
+                return v
+        # A hybrid CPU reports cpu_core/cycles/ and cpu_atom/cycles/, never
+        # a bare cycles: sum the PMU-qualified spellings of the same event.
+        for name in names:
+            parts = [number(raw) for key, raw in perf_stat.items()
+                     if event_base(key) == name]
+            parts = [p for p in parts if p is not None]
+            if parts:
+                return sum(parts)
         return None
 
     cycles = value('cycles', 'cpu-cycles')

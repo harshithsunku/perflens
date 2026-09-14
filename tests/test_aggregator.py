@@ -166,3 +166,51 @@ def test_shallow_stacks_are_not_marked_truncated():
         n = stack.pop()
         assert 'truncated' not in n
         stack.extend(n.get('children') or [])
+
+
+# ---------------------------------------------------------------------------
+# Serialized once, spliced per request
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize('name', fixture_session_names())
+def test_blobs_are_the_snapshot_and_splice_into_valid_gzip(name):
+    """/api/snapshot serves the worker's cached bytes: they must be the
+    JSON of the snapshot, the tree must carry no private keys, and the
+    deflate segment must splice into a gzip body any decoder accepts."""
+    import gzip
+    import zlib
+
+    import orjson
+
+    from perflens.api.responses import deflate_segment, gzip_join
+
+    aggs = AggregatorSet()
+    for chunk in load_fixture_chunks(name):
+        aggs.add_chunk(chunk, None)
+    per_event, blobs = aggs.snapshot_blobs(None)
+    assert set(blobs) == set(per_event)
+    for evt, (raw, segment) in blobs.items():
+        assert orjson.loads(raw) == per_event[evt]
+        stack = [per_event[evt]['flamegraph']]
+        while stack:
+            node = stack.pop()
+            assert not [k for k in node if k.startswith('_')], node.keys()
+            stack.extend(node['children'])
+        head = b'{"event":"' + evt.encode() + b'","data":'
+        body = gzip_join([(head, deflate_segment(head)), (raw, segment),
+                          (b'}', deflate_segment(b'}'))])
+        expected = head + raw + b'}'
+        assert gzip.decompress(body) == expected
+        assert zlib.decompress(body, 31) == expected
+        assert orjson.loads(expected)['data'] == per_event[evt]
+
+
+def test_blob_is_reused_until_new_samples_arrive():
+    aggs = AggregatorSet()
+    aggs.add_chunk([_deep_sample(3)], None)
+    _, first = aggs.snapshot_blobs(None)
+    _, again = aggs.snapshot_blobs(None)
+    assert again['cycles'] is first['cycles']
+    aggs.add_chunk([_deep_sample(3)], None)
+    _, third = aggs.snapshot_blobs(None)
+    assert third['cycles'] is not first['cycles']

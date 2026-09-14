@@ -2,6 +2,7 @@
 merging, multi-round file splitting, and malformed-input tolerance."""
 
 import pytest
+from conftest import fixture_session_names
 
 from perflens.parser import (HEADER_RE, PERF_STAT_MARKER, _normalize_event,
                              event_base, filter_samples_by_event,
@@ -293,3 +294,131 @@ def test_frame_strings_are_shared_across_samples():
     assert len(funcs) == 1
     assert len(modules) == 1
     assert len(comms) == 1
+
+
+# ---------------------------------------------------------------------------
+# perf stat digit grouping: the device's locale, not ours
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize('line,name,value', [
+    ('     9,310,933,573      cycles:u    #  3.155 GHz', 'cycles', 9310933573),
+    ('     9.310.933.573      cycles      #  3.155 GHz', 'cycles', 9310933573),
+    ("     9'310'933'573      cycles", 'cycles', 9310933573),
+    ('     9 310 933 573      cycles', 'cycles', 9310933573),
+    ('     9\u202f310\u202f933\u202f573      cycles', 'cycles', 9310933573),
+    ('               12      page-faults', 'page-faults', 12),
+    ('          2,950.76 msec task-clock  #  0.983 CPUs utilized', 'task-clock', 2950.76),
+    ('          2.950,76 msec task-clock  #  0.983 CPUs utilized', 'task-clock', 2950.76),
+    ('             12.50 msec task-clock', 'task-clock', 12.5),
+    ('          2 950,76 msec task-clock', 'task-clock', 2950.76),
+], ids=['c-locale', 'de_DE', 'de_CH', 'fr_FR-space', 'fr_FR-nnbsp',
+        'small-int', 'msec-c', 'msec-de', 'msec-plain', 'msec-fr'])
+def test_perf_stat_accepts_every_thousands_separator(line, name, value):
+    """perf stat prints big numbers with the locale's grouping, and only ','
+    used to be stripped: a de_DE device's 9.310.933.573 became 9.31."""
+    from perflens.parser import parse_perf_stat
+    stats = parse_perf_stat(line)
+    assert stats[name]['value'] == value
+
+
+def test_perf_stat_skips_what_it_cannot_read():
+    """Runs on the receive thread: a malformed line must never raise."""
+    from perflens.parser import parse_perf_stat
+    text = (
+        "         1,234,567      cycles\n"
+        "         1,23,45        instructions\n"     # not grouped by threes
+        "         garbage        cache-misses\n"
+        "       1.2.3 seconds time elapsed\n"          # the float() that used to raise
+        "              2.00 msec task-clock\n"
+    )
+    stats = parse_perf_stat(text)
+    assert stats['cycles']['value'] == 1234567
+    assert stats['task-clock']['value'] == 2.0
+    assert 'instructions' not in stats
+    assert 'time_elapsed' not in stats
+
+
+# ---------------------------------------------------------------------------
+# Fast path, long lines, hybrid counters
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize('name', fixture_session_names())
+def test_fixture_sample_counts_match_their_metadata(name):
+    """The frame fast path (a tab-led line is a frame) must parse the real
+    captures to the sample count the device reported when they were
+    saved."""
+    import json
+    import os
+
+    from conftest import REPO, load_fixture_chunks
+    with open(os.path.join(REPO, 'tests', 'fixtures', name, 'metadata.json')) as f:
+        expected = json.load(f)['total_samples']
+    assert sum(len(c) for c in load_fixture_chunks(name)) == expected
+
+
+def test_overlong_line_is_skipped_not_matched():
+    import time
+    junk = 'comm 1 ' + 'x' * 40000 + ' 1.0: 1 cycles:\n'
+    good = ("sample_workload 12345 6543210.123456: 1000003 cycles:\n"
+            "\t    7f1234567890 main+0x10 (/usr/bin/sample_workload)\n")
+    t0 = time.monotonic()
+    samples = parse_perf_script(junk + good)
+    assert time.monotonic() - t0 < 2
+    assert len(samples) == 1 and samples[0]['frames'][0]['func'] == 'main'
+
+
+def test_tab_led_line_that_is_not_a_frame_still_reaches_the_header_regex():
+    """A header never starts with a tab, but the fast path must fall through
+    rather than drop a line it could not parse as a frame."""
+    text = ("\tsample_workload 1 6543210.1: 1 cycles:\n"
+            "\t    7f1234567890 main+0x10 (/usr/bin/x)\n")
+    samples = parse_perf_script(text)
+    assert len(samples) == 1 and samples[0]['comm'] == 'sample_workload'
+
+
+def test_derived_stats_sum_pmu_qualified_counters():
+    """A hybrid CPU reports cpu_core/cycles/ and cpu_atom/cycles/, never a
+    bare cycles; IPC and the miss rates used to be blank there."""
+    text = ("     1,000      cpu_core/cycles/\n"
+            "       500      cpu_atom/cycles/\n"
+            "     3,000      cpu_core/instructions/\n"
+            "       750      cpu_atom/instructions/\n"
+            "       200      cpu_core/cache-references/\n"
+            "        50      cpu_core/cache-misses/\n")
+    stats = parse_perf_stat(text)
+    assert stats['ipc']['value'] == 2.5
+    assert stats['cache_miss_rate']['value'] == 25.0
+
+
+def test_perf_stat_accepts_ungrouped_numbers():
+    """The agent runs perf under LC_ALL=C since 0.12.0, and the C locale
+    groups nothing: a 12-digit cycles count arrives as plain digits. The
+    grouping-tolerant regex matched neither branch for it and every
+    counter but the two-digit page-faults was dropped -- found on the
+    first hardware run after the change, not by any fixture (all of which
+    were captured under a grouping locale)."""
+    text = ("\n Performance counter stats for process id '1587':\n\n"
+            "      784760762882      cpu_atom/cycles/                          \n"
+            "     <not counted>      cpu_core/cycles/                    (0.00%)\n"
+            "     1895864972475      cpu_atom/instructions/                    \n"
+            "                33      page-faults                               \n"
+            "           2950.76 msec task-clock            #    0.983 CPUs utilized\n"
+            "          2950.760 msec cpu-clock\n"
+            "       180.009563356 seconds time elapsed\n")
+    stats = parse_perf_stat(text)
+    assert stats['cpu_atom/cycles/']['value'] == 784760762882
+    assert stats['cpu_atom/instructions/']['value'] == 1895864972475
+    assert 'cpu_core/cycles/' not in stats
+    assert stats['page-faults']['value'] == 33
+    assert stats['task-clock']['value'] == 2950.76
+    assert stats['cpu-clock']['value'] == 2950.76
+    assert stats['time_elapsed']['value'] == 180.009563356
+    assert stats['ipc']['value'] == 2.42
+
+
+def test_branch_miss_rate_from_branch_instructions():
+    """perf spells the counter `branch-instructions` when asked for it by
+    that name (the fixtures do); only `branches` used to be recognised."""
+    stats = parse_perf_stat("     4,000      branch-instructions\n"
+                            "        80      branch-misses\n")
+    assert stats['branch_miss_rate']['value'] == 2.0

@@ -2,16 +2,15 @@ import { useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { baselineFromSession, replaySession } from '../lib/replay';
-import { useUi } from '../store/ui';
+import { reportError } from '../store/ui';
 
 export default function SessionsTab() {
   const queryClient = useQueryClient();
-  const showError = useUi((s) => s.showError);
   const fileInput = useRef<HTMLInputElement>(null);
   const [importStatus, setImportStatus] = useState('');
   const [importing, setImporting] = useState(false);
 
-  const { data } = useQuery({
+  const { data, error, isError } = useQuery({
     queryKey: ['sessions'],
     queryFn: api.sessions,
   });
@@ -29,18 +28,18 @@ export default function SessionsTab() {
     } catch (err) {
       setImporting(false);
       setImportStatus('');
-      showError('Import failed: '
-        + (err instanceof Error ? err.message : String(err)));
+      reportError('Import failed', err);
     }
   };
 
   const onDelete = async (sessionId: string) => {
+    // Deleting removes the chunks from disk; nothing brings them back
+    if (!window.confirm(`Delete session ${sessionId} from disk?`)) return;
     try {
       await api.deleteSession(sessionId);
       void queryClient.invalidateQueries({ queryKey: ['sessions'] });
     } catch (err) {
-      showError('Delete failed: '
-        + (err instanceof Error ? err.message : String(err)));
+      reportError('Delete failed', err);
     }
   };
 
@@ -60,7 +59,11 @@ export default function SessionsTab() {
         <span id="import-status">{importStatus}</span>
       </div>
       <div id="sessions-list" data-testid="sessions-list">
-        {!sessions ? (
+        {isError ? (
+          <p className="empty view-error">
+            Could not list sessions: {error instanceof Error ? error.message : String(error)}
+          </p>
+        ) : !sessions ? (
           <p className="empty">Loading sessions...</p>
         ) : sessions.length === 0 ? (
           <p className="empty">No saved sessions.</p>
@@ -74,8 +77,22 @@ export default function SessionsTab() {
             </thead>
             <tbody>
               {sessions.map((s) => (
-                <tr key={s.session_id}>
-                  <td>{s.session_id}</td>
+                <tr key={s.session_id} data-live={s.live ? '1' : undefined}>
+                  <td>
+                    {s.session_id}
+                    {s.live && (
+                      <span className="session-tag session-live"
+                            title="Still receiving, or the server stopped before it was finalized">
+                        live
+                      </span>
+                    )}
+                    {s.recovered && (
+                      <span className="session-tag"
+                            title="Metadata rebuilt from the chunks at startup">
+                        recovered
+                      </span>
+                    )}
+                  </td>
                   <td>{s.agent || '--'}</td>
                   <td>{s.total_samples}</td>
                   <td>{(s.event_types ?? []).join(', ')}</td>

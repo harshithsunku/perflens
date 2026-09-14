@@ -52,7 +52,7 @@ export class ApiError extends Error {
   }
 }
 
-async function unwrap<T>(r: Response): Promise<T> {
+export async function unwrap<T>(r: Response): Promise<T> {
   if (r.ok) return r.json() as Promise<T>;
   let code = 'http_error';
   let message = `HTTP ${r.status}`;
@@ -67,16 +67,39 @@ async function unwrap<T>(r: Response): Promise<T> {
   throw new ApiError(r.status, code, message);
 }
 
-async function getJson<T>(url: string): Promise<T> {
-  return unwrap<T>(await fetch(url));
+/** Every request is bounded: a half-open connection used to leave a fetch
+ * pending forever, and the snapshot bookkeeping latched on it. Relayed agent
+ * commands get the server's own timeout plus headroom. */
+export const REQUEST_TIMEOUT_MS = 30_000;
+
+/** Network and timeout failures as ApiError too, so callers see one shape. */
+async function guarded(run: () => Promise<Response>): Promise<Response> {
+  try {
+    return await run();
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'TimeoutError') {
+      throw new ApiError(0, 'timeout', 'the server did not answer in time');
+    }
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw new ApiError(0, 'aborted', 'request aborted');
+    }
+    throw new ApiError(0, 'network', 'cannot reach the server');
+  }
 }
 
-async function sendJson<T>(method: string, url: string, body?: unknown): Promise<T> {
-  return unwrap<T>(await fetch(url, {
+async function getJson<T>(url: string, timeoutMs = REQUEST_TIMEOUT_MS): Promise<T> {
+  return unwrap<T>(await guarded(() =>
+    fetch(url, { signal: AbortSignal.timeout(timeoutMs) })));
+}
+
+async function sendJson<T>(method: string, url: string, body?: unknown,
+                           timeoutMs = REQUEST_TIMEOUT_MS): Promise<T> {
+  return unwrap<T>(await guarded(() => fetch(url, {
     method,
     headers: { 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
-  }));
+    signal: AbortSignal.timeout(timeoutMs),
+  })));
 }
 
 const q = encodeURIComponent;
@@ -132,17 +155,25 @@ export const api = {
   connect: (host: string, port: number, token?: string) =>
     sendJson<ConnectResponse>('POST', '/api/agent/connect', { host, port, token }),
 
-  agentCommand: (cmd: string, args: Record<string, unknown> = {}, timeout = 30) =>
-    sendJson<AgentCommandResult>('POST', '/api/agent/command',
-      { cmd, args, timeout }),
+  /** `timeout` is the server-side bound (seconds, 1..600); the request itself
+   * waits that long plus headroom, and the server stretches start/reprobe/
+   * list_processes to at least 120 s on its own. */
+  agentCommand: (cmd: string, args: Record<string, unknown> = {}, timeout = 30) => {
+    const serverSecs = ['start', 'reprobe', 'list_processes'].includes(cmd)
+      ? Math.max(timeout, 120) : timeout;
+    return sendJson<AgentCommandResult>('POST', '/api/agent/command',
+      { cmd, args, timeout }, (serverSecs + 15) * 1000);
+  },
 
   config: () => getJson<ConfigState>('/api/config'),
   patchConfig: (update: ConfigUpdate) =>
     sendJson<ConfigState>('PATCH', '/api/config', update),
 
+  // No timeout: a 500 MB upload through perf script takes as long as it
+  // takes, and the server bounds it (413 / its own 300 s perf timeout).
   importPerfData: async (file: File): Promise<ImportResponse> =>
-    unwrap<ImportResponse>(
-      await fetch('/api/sessions/import', { method: 'POST', body: file })),
+    unwrap<ImportResponse>(await guarded(() =>
+      fetch('/api/sessions/import', { method: 'POST', body: file }))),
 };
 
 export const exportUrls = {

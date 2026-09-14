@@ -12,9 +12,12 @@ interface PerflensHook {
   zoomNames: string[];
 }
 
-const pageErrors: string[] = [];
+// Per test: the bad-deep-link scenario below provokes a 404 on purpose,
+// and a module-wide collector would carry it into the tour at the end.
+let pageErrors: string[] = [];
 
 test.beforeEach(({ page }) => {
+  pageErrors = [];
   page.on('pageerror', (err) => pageErrors.push(String(err)));
   page.on('console', (msg) => {
     if (msg.type() === 'error') pageErrors.push(msg.text());
@@ -209,9 +212,75 @@ test('setting a baseline shows the diff column and legend', async ({ page }) => 
   await expect(page.getByTestId('diff-legend')).toBeHidden();
 });
 
-test('no page errors across the whole run', async ({ page }) => {
+test('a bad deep link puts the error where the operator can see it', async ({ page }) => {
+  await page.goto('/#session=does-not-exist');
+  const banner = page.locator('#error-banner');
+  await expect(banner).toHaveClass(/visible/);
+  await expect(banner).toContainText('Replay error');
+  await expect(banner).toHaveAttribute('role', 'alert');
+});
+
+test('the threads tab says it is live-only during replay, and replay stays', async ({ page }) => {
   await replayFixture(page);
-  for (const tab of ['functions', 'flamegraph', 'threads', 'sessions']) {
+  await page.locator('.tab[data-tab="threads"]').click();
+  await expect(page.getByTestId('threads-replay-note')).toBeVisible();
+  await expect(page.locator('#replay-banner')).toHaveClass(/visible/);
+  // The thread filter reads the live ring, so it is not offered in replay
+  await expect(page.locator('#thread-filter')).toHaveCount(0);
+});
+
+test('leaving replay is the operator\'s action', async ({ page }) => {
+  await replayFixture(page);
+  await page.getByTestId('replay-exit').click();
+  await expect(page.locator('#replay-banner')).not.toHaveClass(/visible/);
+  // No agent connected: back to the landing page
+  await expect(page.getByTestId('card-sessions')).toBeVisible();
+});
+
+test('deleting a session asks first', async ({ page }) => {
+  await page.goto('/');
+  await page.getByTestId('card-sessions').click();
+  const rows = page.locator('#sessions-table tbody tr');
+  await expect(rows).toHaveCount(1);
+  let asked = '';
+  page.once('dialog', (d) => { asked = d.message(); void d.dismiss(); });
+  await rows.first().locator('.session-delete-btn').click();
+  await expect.poll(() => asked).toContain(FIXTURE);
+  await page.waitForTimeout(200);
+  await expect(rows).toHaveCount(1);
+});
+
+test('a search term keeps a typed space and reports an invalid pattern', async ({ page }) => {
+  await replayFixture(page);
+  await page.locator('.tab[data-tab="flamegraph"]').click();
+  await expect(page.locator('#flamegraph-container svg g[data-idx]').first()).toBeVisible();
+  const name = await page.evaluate(() => {
+    const hook = (window as unknown as { __perflens: PerflensHook }).__perflens;
+    return hook.rects[hook.rects.length - 1]?.name ?? '';
+  });
+  await page.locator('#fg-search').fill(name.slice(0, 3) + ' ');
+  await expect(page.locator('#fg-search')).toHaveValue(name.slice(0, 3) + ' ');
+  await expect(page.locator('#fg-search-matches')).toContainText('frames');
+  await page.locator('#fg-search').fill('(');
+  await expect(page.locator('#fg-search-matches')).toHaveText('invalid regex');
+
+  await page.locator('.tab[data-tab="functions"]').click();
+  await page.locator('#fn-search').fill('[');
+  await expect(page.locator('#fn-status')).toHaveText('invalid regex');
+});
+
+test('header offers Disconnect (not Stop) and a shortcuts button', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.locator('#stop-btn')).toHaveText('Disconnect');
+  await page.locator('#help-btn').click();
+  await expect(page.getByTestId('shortcuts-help')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.getByTestId('shortcuts-help')).toBeHidden();
+});
+
+test('no page errors while touring the tabs', async ({ page }) => {
+  await replayFixture(page);
+  for (const tab of ['functions', 'source', 'flamegraph', 'threads', 'sessions']) {
     await page.locator(`.tab[data-tab="${tab}"]`).click();
     await page.waitForTimeout(200);
   }

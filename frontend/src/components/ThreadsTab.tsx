@@ -1,57 +1,70 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../api/client';
 import type { ThreadViewResponse } from '../api/client';
 import { CHAR_WIDTH, FONT_SIZE, ROW_HEIGHT, layoutFlamegraph } from '../lib/flamegraph/layout';
 import type { FlameNode } from '../lib/flamegraph/types';
 import { fgModuleColor, heatColor } from '../lib/flamegraph/colors';
+import { useContainerWidth } from '../lib/useContainerWidth';
 import { useLive } from '../store/live';
 import { useUi } from '../store/ui';
 import { SourceLines, type SourceLine } from './SourceView';
+
+function errText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
 
 /** Static (non-zooming) flamegraph for the thread drill-down. */
 function ThreadFlamegraph({ tree, totalSamples }:
     { tree: FlameNode | null; totalSamples: number }) {
   const dark = useUi((s) => s.theme) === 'dark';
   const [hoverText, setHoverText] = useState<string | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  // Sized to its container, not a fixed 900 px
+  const width = useContainerWidth(containerRef, 8);
 
   const layout = useMemo(() => {
-    if (!tree?.children?.length) return null;
-    return layoutFlamegraph(tree, { width: 900, totalSamples });
-  }, [tree, totalSamples]);
+    if (!tree?.children?.length || width < 10) return null;
+    return layoutFlamegraph(tree, { width, totalSamples });
+  }, [tree, totalSamples, width]);
 
-  if (!layout) return <p className="empty">No flame graph data</p>;
-  const height = layout.height;
+  const height = layout?.height ?? 0;
 
   return (
-    <>
-      <svg width={900} height={height} className="flamegraph-svg"
-           style={{ display: 'block', margin: '0 auto' }}
-           onMouseLeave={() => setHoverText(null)}>
-        {layout.rects.filter((r) => r.w >= 0.5).map((r, idx) => {
-          const y = height - (r.depth + 1) * ROW_HEIGHT;
-          const maxChars = Math.floor((r.w - 6) / CHAR_WIDTH);
-          const label = r.w > 36 && maxChars > 1
-            ? (r.name.length > maxChars ? r.name.substring(0, maxChars - 1) + '…' : r.name)
-            : null;
-          const title = `${r.name} (${r.value} samples, ${r.percent.toFixed(1)}%)`;
-          return (
-            <g key={idx} onMouseMove={() => setHoverText(title)}>
-              <rect x={r.x} y={y} width={Math.max(r.w - 1, 1)} height={ROW_HEIGHT - 1}
-                    fill={fgModuleColor(r.name, r.module, r.inlined, dark)} rx={2} />
-              {label && (
-                <text x={r.x + 3} y={y + 13} fontSize={FONT_SIZE}
-                      fill="var(--fg-text)" pointerEvents="none">{label}</text>
-              )}
-              <title>{title}</title>
-            </g>
-          );
-        })}
-      </svg>
-      <div className={'fg-info-bar' + (hoverText ? ' fg-info-active' : '')}>
-        {hoverText ?? 'Hover over a frame to see details'}
-      </div>
-    </>
+    <div ref={containerRef} className="thread-fg-wrap">
+      {!layout ? (
+        tree?.children?.length ? null : <p className="empty">No flame graph data</p>
+      ) : (
+        <>
+          <svg width={width} height={height} className="flamegraph-svg"
+               style={{ display: 'block', margin: '0 auto' }}
+               onMouseLeave={() => setHoverText(null)}>
+            {layout.rects.filter((r) => r.w >= 0.5).map((r, idx) => {
+              const y = height - (r.depth + 1) * ROW_HEIGHT;
+              const maxChars = Math.floor((r.w - 6) / CHAR_WIDTH);
+              const label = r.w > 36 && maxChars > 1
+                ? (r.name.length > maxChars ? r.name.substring(0, maxChars - 1) + '…' : r.name)
+                : null;
+              const title = `${r.name} (${r.value} samples, ${r.percent.toFixed(1)}%)`;
+              return (
+                <g key={idx} onMouseMove={() => setHoverText(title)}>
+                  <rect x={r.x} y={y} width={Math.max(r.w - 1, 1)} height={ROW_HEIGHT - 1}
+                        fill={fgModuleColor(r.name, r.module, r.inlined, dark)} rx={2} />
+                  {label && (
+                    <text x={r.x + 3} y={y + 13} fontSize={FONT_SIZE}
+                          fill="var(--fg-text)" pointerEvents="none">{label}</text>
+                  )}
+                  <title>{title}</title>
+                </g>
+              );
+            })}
+          </svg>
+          <div className={'fg-info-bar' + (hoverText ? ' fg-info-active' : '')}>
+            {hoverText ?? 'Hover over a frame to see details'}
+          </div>
+        </>
+      )}
+    </div>
   );
 }
 
@@ -59,22 +72,28 @@ function ThreadDetail({ tid, comm, onBack }:
     { tid: number; comm: string; onBack: () => void }) {
   const selectedEvent = useLive((s) => s.selectedEvent);
   const chunkCount = useLive((s) => s.chunkCount);
+  const generation = useLive((s) => s.generation);
   const [subTab, setSubTab] = useState<'t-functions' | 't-flamegraph' | 't-source'>('t-functions');
   const [sourceFile, setSourceFile] = useState<string | null>(null);
   const [sourceLines, setSourceLines] = useState<SourceLine[] | null>(null);
   const [sourceStatus, setSourceStatus] = useState<string | null>(null);
+  const loadSeq = useRef(0);
 
-  const { data } = useQuery<ThreadViewResponse>({
-    queryKey: ['thread-view', selectedEvent, tid, chunkCount],
+  const { data, error, isError } = useQuery<ThreadViewResponse>({
+    queryKey: ['thread-view', selectedEvent, tid, generation, chunkCount],
     queryFn: () => api.threadView(selectedEvent, tid),
   });
 
   const loadSource = (filePath: string) => {
+    // A slow response for the previous file must not paint under this
+    // file's header
+    const seq = ++loadSeq.current;
     setSourceFile(filePath);
     setSourceLines(null);
     setSourceStatus('Loading source...');
     api.source(filePath, selectedEvent, tid)
       .then((d) => {
+        if (seq !== loadSeq.current) return;
         const lines = (d.lines ?? []) as unknown as SourceLine[];
         if (lines.length > 0) {
           setSourceLines(lines);
@@ -83,7 +102,10 @@ function ThreadDetail({ tid, comm, onBack }:
           setSourceStatus('No source data for this thread in ' + filePath);
         }
       })
-      .catch(() => setSourceStatus('Error loading source'));
+      .catch((err) => {
+        if (seq !== loadSeq.current) return;
+        setSourceStatus('Could not load source: ' + errText(err));
+      });
   };
 
   const fs = data?.function_summary;
@@ -98,18 +120,21 @@ function ThreadDetail({ tid, comm, onBack }:
           {(comm || '(unnamed)') + ' (TID ' + tid + ')'}
         </span>
       </div>
-      <div className="thread-detail-tabs">
+      <div className="thread-detail-tabs" role="tablist">
         {([['t-functions', 'Functions'], ['t-flamegraph', 'Flame Graph'],
            ['t-source', 'Source']] as const).map(([id, label]) => (
           <button key={id} className={'thread-dtab' + (subTab === id ? ' active' : '')}
+                  role="tab" aria-selected={subTab === id} aria-controls={id}
                   data-thread-tab={id} onClick={() => setSubTab(id)}>
             {label}
           </button>
         ))}
       </div>
-      <div id="t-functions" className={'thread-detail-panel' + (subTab === 't-functions' ? ' active' : '')}>
+      <div id="t-functions" role="tabpanel"
+           className={'thread-detail-panel' + (subTab === 't-functions' ? ' active' : '')}>
         <div id="thread-fn-table">
-          {!data ? <p className="empty loading">Loading...</p>
+          {isError ? <p className="empty view-error">Could not load this thread: {errText(error)}</p>
+            : !data ? <p className="empty loading">Loading...</p>
             : !fs?.functions?.length ? <p className="empty">No function data</p>
             : (
               <>
@@ -151,7 +176,8 @@ function ThreadDetail({ tid, comm, onBack }:
             )}
         </div>
       </div>
-      <div id="t-flamegraph" className={'thread-detail-panel' + (subTab === 't-flamegraph' ? ' active' : '')}>
+      <div id="t-flamegraph" role="tabpanel"
+           className={'thread-detail-panel' + (subTab === 't-flamegraph' ? ' active' : '')}>
         <div id="thread-fg-container">
           {subTab === 't-flamegraph' && (
             <ThreadFlamegraph tree={(data?.flamegraph ?? null) as FlameNode | null}
@@ -159,7 +185,8 @@ function ThreadDetail({ tid, comm, onBack }:
           )}
         </div>
       </div>
-      <div id="t-source" className={'thread-detail-panel' + (subTab === 't-source' ? ' active' : '')}>
+      <div id="t-source" role="tabpanel"
+           className={'thread-detail-panel' + (subTab === 't-source' ? ' active' : '')}>
         <div id="thread-source-files">
           {(data?.source_files?.length ?? 0) > 0 && (
             <div className="thread-source-file-list">
@@ -191,15 +218,30 @@ function ThreadDetail({ tid, comm, onBack }:
 export default function ThreadsTab({ active }: { active: boolean }) {
   const selectedEvent = useLive((s) => s.selectedEvent);
   const chunkCount = useLive((s) => s.chunkCount);
+  const generation = useLive((s) => s.generation);
   const isReplayMode = useLive((s) => s.isReplayMode);
   const threadLiveCpu = useLive((s) => s.threadLiveCpu);
   const [detail, setDetail] = useState<{ tid: number; comm: string } | null>(null);
 
-  const { data } = useQuery({
-    queryKey: ['thread-summary', selectedEvent, chunkCount, isReplayMode],
+  const { data, error, isError } = useQuery({
+    queryKey: ['thread-summary', selectedEvent, generation, chunkCount],
     queryFn: () => api.threadSummary(selectedEvent),
-    enabled: active && detail === null,
+    // Live-only: the thread views read the raw sample ring, which a saved
+    // session does not carry (it stores per-event aggregates only).
+    enabled: active && detail === null && !isReplayMode,
   });
+
+  if (isReplayMode) {
+    return (
+      <div id="threads-overview">
+        <p className="empty" data-testid="threads-replay-note">
+          Per-thread views are live-only: a saved session carries per-event aggregates,
+          not the raw samples the thread breakdown is built from. Connect an agent to
+          see threads.
+        </p>
+      </div>
+    );
+  }
 
   if (detail !== null) {
     return <ThreadDetail tid={detail.tid} comm={detail.comm}
@@ -207,10 +249,13 @@ export default function ThreadsTab({ active }: { active: boolean }) {
   }
 
   const haveLive = Object.keys(threadLiveCpu).length > 0;
+  const open = (t: { tid: number; comm: string }) => setDetail({ tid: t.tid, comm: t.comm });
 
   return (
     <div id="threads-overview">
-      {!data?.threads?.length ? (
+      {isError ? (
+        <p className="empty view-error">Could not load threads: {errText(error)}</p>
+      ) : !data?.threads?.length ? (
         <p className="empty">{data ? 'No thread data yet' : 'Waiting for data...'}</p>
       ) : (
         <>
@@ -226,8 +271,9 @@ export default function ThreadsTab({ active }: { active: boolean }) {
               {data.threads.map((t) => {
                 const live = threadLiveCpu[t.tid];
                 return (
-                  <tr key={t.tid} className="thread-row" data-tid={t.tid}
-                      onClick={() => setDetail({ tid: t.tid, comm: t.comm })}>
+                  <tr key={t.tid} className="thread-row" data-tid={t.tid} tabIndex={0}
+                      onClick={() => open(t)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') open(t); }}>
                     <td><strong>{t.comm || '(unnamed)'}</strong></td>
                     <td>{t.tid}</td>
                     <td>{t.samples.toLocaleString()}</td>

@@ -5,7 +5,7 @@ whole of test_agent_protocol.py skips when agent-c has not been built, and the
 server half of the handshake is the last thing that should be silently
 untested. Covers both entry points — connect_to_agent (the server dials a
 --listen agent) and handle_inbound_agent (a --server agent dials in) — because
-they must stay in step, and the legacy fallback for pre-0.10.0 agents.
+they must stay in step, and that pre-0.10.0 agents are refused.
 """
 
 import json
@@ -215,25 +215,28 @@ def test_metrics_frame_before_auth_response_is_skipped(agent):
 # Legacy agents (pre-0.10.0), which answer `unknown command: auth`
 # ---------------------------------------------------------------------------
 
-def test_legacy_agent_accepted_on_hello_token(agent):
+def test_legacy_agent_is_refused_with_an_upgrade_hint(agent):
+    """Until 0.11.0 a server with a token fell back to comparing the secret
+    such an agent put in its hello -- the very leak the pairing handshake
+    replaced. Since 0.12.0 it is refused, and the reason names the fix."""
     a = agent(behaviour='legacy', hello_token='old-secret')
     ctx = make_ctx(token='old-secret')
-    session = agentlink.connect_to_agent(ctx, '127.0.0.1', a.port)
+    with pytest.raises(RuntimeError, match='predates pairing-code'):
+        agentlink.connect_to_agent(ctx, '127.0.0.1', a.port)
+    assert ctx.agent.current() is None
+
+
+def test_legacy_agent_still_pairs_with_a_tokenless_server(agent):
+    """--server mode with nothing configured sends no auth at all, so an
+    old agent dialling such a server keeps working (its hello token is
+    stripped before the hello is served over HTTP)."""
+    a = agent(behaviour='legacy', hello_token='old-secret')
+    session = agentlink.connect_to_agent(make_ctx(), '127.0.0.1', a.port)
     try:
-        assert session.hello['agent_version'] == '0.9.0'
-        # The hello is served to browsers via GET /api/agent, so the legacy
-        # secret must not survive into it.
+        assert a.saw_auth is False
         assert 'token' not in session.hello
     finally:
         session.close()
-
-
-def test_legacy_agent_rejected_on_wrong_hello_token(agent):
-    a = agent(behaviour='legacy', hello_token='wrong')
-    ctx = make_ctx(token='expected')
-    with pytest.raises(RuntimeError, match='token mismatch'):
-        agentlink.connect_to_agent(ctx, '127.0.0.1', a.port)
-    assert ctx.agent.current() is None
 
 
 # ---------------------------------------------------------------------------

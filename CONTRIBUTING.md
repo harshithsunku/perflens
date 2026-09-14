@@ -70,8 +70,12 @@ For the C agent:
 
 ```bash
 cd agent-c
-make                              # native
-make CROSS=aarch64-linux-gnu-     # cross-compile
+make                                  # native
+make CROSS=aarch64-linux-musl-        # cross-compile (the release uses the musl
+                                      #   toolchains on the `toolchains` release)
+make all-cross                        # all five targets into build/<arch>/
+make check                            # C unit tests (metrics parsers)
+make SANITIZE=address,undefined       # instrumented build for the protocol tests
 ```
 
 ## Reporting issues

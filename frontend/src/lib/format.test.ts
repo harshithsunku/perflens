@@ -44,3 +44,17 @@ describe('format helpers', () => {
     expect(hashCode('a')).toBe(97);
   });
 });
+
+describe('large session counters', () => {
+  it('formatNumber scales to trillions', () => {
+    expect(formatNumber(11_219_400_000_000)).toBe('11.2T');
+    expect(formatNumber(999_000_000_000)).toBe('999.0B');
+  });
+
+  it('formatStatValue scales large fractional counters instead of printing every digit', () => {
+    expect(formatStatValue('task-clock', 1_003_215.3)).toBe('1.0M');
+    expect(formatStatValue('cpu_atom/instructions/', 11_219_400_000_000)).toBe('11.2T');
+    expect(formatStatValue('cache_miss_rate', 2.34)).toBe('2.3');
+    expect(formatStatValue('task-clock', 7829.5)).toBe('7.8K');
+  });
+});
