@@ -73,23 +73,39 @@
         </p>
         <ul>
             <li>Reads <code>/proc/sys/kernel/perf_event_paranoid</code> and warns if &gt; 1.</li>
-            <li>Enumerates candidate events (<code>cycles</code>, <code>instructions</code>, <code>cache-misses</code>, <code>cache-references</code>, <code>branch-misses</code>, <code>branch-instructions</code>, <code>page-faults</code>, <code>context-switches</code>, <code>cpu-migrations</code>) and keeps only the ones <code>perf record</code>/<code>perf stat</code> actually accepts.</li>
+            <li>Enumerates candidate events (<code>cycles</code>, <code>instructions</code>, <code>cache-misses</code>, <code>cache-references</code>, <code>branch-misses</code>, <code>branch-instructions</code>, the <code>cpu-clock</code> and <code>task-clock</code> software events that targets without a hardware PMU sample on, <code>page-faults</code>, <code>context-switches</code>, <code>cpu-migrations</code>) and keeps only the ones <code>perf record</code>/<code>perf stat</code> actually accepts.</li>
             <li>Tries call-graph modes in order: <code>fp</code> &rarr; <code>dwarf</code> &rarr; <code>lbr</code>, picks the first that produces non-empty stacks.</li>
             <li>Probes whether <code>perf script -F</code> is supported (perf &ge; ~3.12) and falls back to the default output format on older kernels.</li>
         </ul>
         <p>
-            This costs roughly <strong>6&ndash;12 seconds on first connection</strong>
-            and is a one-time hit.
+            The probe is batched &mdash; one <code>perf stat</code> over every candidate, one
+            <code>perf record</code> over the survivors &mdash; and took
+            <strong>10.8&nbsp;s on a hybrid x86_64 container and 12.7&nbsp;s on an
+            8-core ARM64 board</strong> when measured for 0.12.0. It runs once per
+            connection; switching to another process only re-checks that the new
+            pid can be recorded.
         </p>
 
-        <h3 id="rounds">Collection rounds</h3>
+        <h3 id="collection">Continuous collection</h3>
         <p>
-            Each round runs <code>perf record</code> and <code>perf stat</code> in parallel for
-            <em>N</em> seconds (default 8), then <code>perf script</code> flattens the trace.
-            The result &mdash; perf script text optionally followed by a
-            <code>### PERF_STAT ###</code> section &mdash; is compressed with
-            in-process zstd (level 1, vendored in the agent) and pushed over TCP
-            with a 5-byte header. Typical compression: <strong>20&ndash;40&times;</strong>.
+            Collection is one long-lived pipeline, <code>perf record -o - | perf script -i -</code>,
+            so there is no sampling dead time and symbol tables are parsed once. The agent
+            cuts its output into chunks at sample boundaries every <em>N</em> seconds
+            (default 8) or every 16&nbsp;MB of text, whichever comes first, and runs
+            <code>perf stat</code> rounds back to back so every interval is counted. Each
+            chunk &mdash; perf script text optionally followed by a
+            <code>### PERF_STAT ###</code> section &mdash; is compressed with in-process
+            zstd (level 1, vendored in the agent) and pushed over TCP with a 5-byte
+            header. Measured compression on device captures: <strong>about 20&times;</strong>.
+        </p>
+        <p>
+            Some old <code>perf</code> builds produce samples through a pipe but drop
+            their call chains (measured on perf 4.4). The capability probe detects
+            that, and the agent falls back to discrete rounds: <code>perf record</code>
+            to a file for <em>N</em> seconds, then <code>perf script</code> on it, with the
+            next round's <code>perf record</code> started while the previous round's
+            <code>perf script</code> runs. <code>perf script</code> runs at
+            <code>nice 5</code> in both modes, so the profiler yields to the workload.
         </p>
 
         <h3 id="health">Health metrics</h3>
@@ -255,7 +271,7 @@ sock.sendall(header + payload)</code></pre>
         <ul>
             <li><a href="#target">On the target</a></li>
             <li><a href="#probing">Capability probing</a></li>
-            <li><a href="#rounds">Collection rounds</a></li>
+            <li><a href="#collection">Continuous collection</a></li>
             <li><a href="#health">Health metrics</a></li>
             <li><a href="#local">On the local machine</a></li>
             <li><a href="#parser">Parser</a></li>

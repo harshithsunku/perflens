@@ -11,7 +11,7 @@
   <a href="#quick-start"><img alt="quick start" src="https://img.shields.io/badge/quick_start-60s-3fb950?style=flat-square"/></a>
   <img alt="license" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square"/>
   <img alt="agent" src="https://img.shields.io/badge/agent-static_C_binary-58a6ff?style=flat-square"/>
-  <img alt="arch" src="https://img.shields.io/badge/arch-x86__64_%7C_aarch64-c084fc?style=flat-square"/>
+  <img alt="arch" src="https://img.shields.io/badge/arch-x86__64_%7C_aarch64_%7C_armv7_%7C_aarch64__be_%7C_armeb-c084fc?style=flat-square"/>
   <img alt="wire" src="https://img.shields.io/badge/wire-zstd_%7C_5--byte_header-d29922?style=flat-square"/>
   <img alt="install" src="https://img.shields.io/badge/install-uvx_perflens-f85149?style=flat-square"/>
 </p>
@@ -23,20 +23,20 @@
 
 <p align="center">
   <img src="docs/demo.gif" alt="Live demo: function table updating in real time as perf samples stream in, then flame graph, then source view" width="100%"/>
-  <br><sub><em>Sample counts climb live as <code>perf record</code> rounds stream in. Flip to flame graph, click a function, drop into source with line-level heat. Zero polling — Server-Sent Events.</em></sub>
+  <br><sub><em>Sample counts climb live as chunks stream in from a continuous <code>perf record</code> pipeline. Flip to flame graph, click a function, drop into source with line-level heat. Zero polling — Server-Sent Events.</em></sub>
 </p>
 
 # PerfLens
 
 **PerfLens** is a remote Linux performance profiler with a real-time web UI. Drop the agent on any Linux device (ARM or x86), point it at a PID, and watch flame graphs, function tables, `perf stat` metrics, and line-level annotated source update live in your browser.
 
-No Docker, no sudo. A modern React + TypeScript UI shipped **prebuilt** inside the Python wheel (end users never need Node), and a single static C agent binary (~2 MB) with zero runtime dependencies — it runs on anything from bare-metal embedded boards to servers, installs with one curl command, and updates itself with `--update`.
+No Docker, no sudo. A modern React + TypeScript UI shipped **prebuilt** inside the Python wheel (end users never need Node), and a single static C agent binary (about 0.6 MB) with zero runtime dependencies — it runs on anything from bare-metal embedded boards to servers, installs with one curl command, and updates itself with `--update`.
 
 ---
 
 ## Highlights
 
-- **Real-time streaming** — `perf record` runs in ~8s rounds; each round is compressed with zstd and streamed over a 5-byte framed TCP protocol
+- **Real-time streaming** — one continuous `perf record | perf script` pipeline on the target, cut into chunks every interval (8 s by default) or every 16 MB of text, zstd-compressed and streamed over a 5-byte framed TCP protocol; discrete rounds are the fallback where a target's perf cannot keep call chains through a pipe
 - **Live web UI** — Server-Sent Events push parsed function tables, flame graphs, and `perf stat` panels to the browser as new data arrives
 - **Source-level annotation** — `addr2line` maps samples back to source lines; the UI heat-colors hot lines red/amber/green
 - **Differential profiling** — snapshot a baseline (or pick a saved session) and the flame graph recolors by change (red grew, blue shrank) while the function table shows per-function Δ; did-my-fix-help in one glance
@@ -48,10 +48,11 @@ No Docker, no sudo. A modern React + TypeScript UI shipped **prebuilt** inside t
 - **Cross-compilation toolchain support** — `--toolchain-prefix` derives addr2line and readelf from a single prefix; `--sysroot` resolves shared libraries and source files under a sysroot tree
 - **ARM + x86** — same agent code runs on aarch64, aarch64_be, armv7, armeb, x86_64
 - **Session save / replay** — raw chunks saved to disk, replayed lazily on demand via the UI's session list
+- **MCP server for AI agents** — `perflens mcp` (the optional `[mcp]` extra) lets Claude Code or any MCP client ask a running server for hot functions, hot stacks, source hot lines, IPC and miss rates, per-thread breakdowns and session comparisons
 - **Static C agent** — single binary with vendored zstd, no runtime dependencies; cross-compiles to aarch64, aarch64_be, armv7, armeb, x86_64; one-line curl install and built-in self-update
 - **Zero-friction server install** — `uvx perflens` (or `pipx` / `pip install --user`); everything resolves user-space, no sudo, corporate-machine friendly. Missing binutils? `perflens provision` downloads static addr2line/readelf into `~/.perflens/bin`
 - **Capability probing** — the agent discovers which perf events and call-graph modes (`fp` / `dwarf` / `lbr`) actually work on the target before collecting
-- **Zstd compression** — typical perf script payloads compress 20–40× before hitting the wire
+- **Zstd compression** — `perf script` payloads compress about 20× before hitting the wire (measured on x86_64 and ARM64 device captures)
 
 ---
 
@@ -65,11 +66,11 @@ The pipeline in one sentence: **`perf record` → agent → TCP+zstd → server 
 
 ### Target device
 
-- The agent probes the kernel's `perf_event_paranoid`, enumerates candidate events (`cycles`, `instructions`, `cache-*`, `branch-*`, `page-faults`, `context-switches`, `cpu-migrations`), tries call-graph modes in order (`fp`, `dwarf`, `lbr`), and picks the first that produces non-empty stacks
-- Each collection round runs `perf record` and `perf stat` in parallel for N seconds, then `perf script` to flatten the output
+- The agent probes the kernel's `perf_event_paranoid`, enumerates candidate events (`cycles`, `instructions`, `cache-*`, `branch-*`, the `cpu-clock` and `task-clock` software events that PMU-less targets sample on, and the stat-only `page-faults`, `context-switches`, `cpu-migrations`), tries call-graph modes in order (`fp`, `dwarf`, `lbr`), and picks the first that produces call chains
+- Collection is one continuous `perf record -o - | perf script -i -` pipeline, cut into chunks at sample boundaries every interval or every 16 MB of text, with `perf stat` rounds running back to back so every interval is counted. Where a target's perf drops call chains through a pipe (measured on perf 4.4), the agent falls back to discrete rounds, starting the next round's `perf record` while the previous round's `perf script` runs
 - The combined text is compressed with in-process zstd (level 1) and framed with a 5-byte header
 - Reconnects with exponential backoff if the server drops
-- Single static binary — **no Python, no libc, no zstd needed on the target**. Suitable for old or minimal ARM/x86 Linux devices.
+- Single static musl binary of about 0.6 MB — **no Python, no libc, no zstd needed on the target**. Suitable for old or minimal ARM/x86 Linux devices, big-endian ARM included.
 
 ### Local machine
 
@@ -110,7 +111,7 @@ The protocol is bidirectional — data and health metrics flow agent → server,
 | `3` | agent → server | Command response / `hello` handshake (JSON) |
 | `4` | agent → server | Device health metrics (JSON, every 2s: CPU, memory, temperature, network, per-process stats; opt-in disk I/O and per-thread CPU via `configure_metrics`) |
 
-The server reads the 5 header bytes first, then exactly `LEN` more. Compression is in-process zstd on both ends (vendored in the agent, the `zstandard` package on the server, external `zstd` binary as a fallback). Typical ratio on real `perf script` output is **20–40×**.
+The server reads the 5 header bytes first, then exactly `LEN` more. Compression is in-process zstd on both ends (vendored in the agent, the `zstandard` package on the server, external `zstd` binary as a fallback). Measured on real device captures, `perf script` output compresses **about 20×**.
 
 ### Handshake
 
@@ -292,7 +293,7 @@ Options:
 | `--pid PID` | — | PID of process to profile (required for `--output`; set via UI wizard in daemon modes) |
 | `--port PORT` | `9999` | TCP port (listen or connect) |
 | `--frequency HZ` | `99` | `perf record -F` sampling frequency |
-| `--duration SECS` | `8` | Length of each collection round |
+| `--duration SECS` | `8` | Chunk interval in continuous mode; the round length in the fallback round mode and `--output` |
 | `--rounds N` | `1` | Number of collection rounds (`--output` mode only) |
 | `--bind ADDR` | `0.0.0.0` | Address to listen on in `--listen` mode |
 | `--token SECRET` | — | Pairing code the server must present (or `PERFLENS_TOKEN`). In `--listen` mode one is generated and logged if you don't supply it. **Never sent over the wire.** |

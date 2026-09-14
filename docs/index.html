@@ -66,7 +66,7 @@
             <div class="hero-badges">
                 <img alt="license" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square">
                 <img alt="agent" src="https://img.shields.io/badge/agent-static_C_binary-58a6ff?style=flat-square">
-                <img alt="arch" src="https://img.shields.io/badge/arch-x86__64_%7C_aarch64_%7C_armv7-c084fc?style=flat-square">
+                <img alt="arch" src="https://img.shields.io/badge/arch-x86__64_%7C_aarch64_%7C_armv7_%7C_aarch64__be_%7C_armeb-c084fc?style=flat-square">
                 <img alt="wire" src="https://img.shields.io/badge/wire-zstd_%7C_5--byte_header-d29922?style=flat-square">
                 <img alt="install" src="https://img.shields.io/badge/install-uvx_perflens-f85149?style=flat-square">
             </div>
@@ -83,7 +83,7 @@
             <img src="demo.gif" alt="Live demo: function table updating in real time, flame graph, then source view" loading="lazy" style="display: block; width: 100%;">
         </div>
         <p style="color: var(--text-tertiary); font-size: 13.5px; margin-top: 14px;">
-            Counts update as each <code>perf record</code> round streams in. Flip to flame graph, click a function, land in source with line-level heat. Zero polling &mdash; Server-Sent Events.
+            Counts update as each chunk streams in from a continuous <code>perf record</code> pipeline. Flip to flame graph, click a function, land in source with line-level heat. Zero polling &mdash; Server-Sent Events.
         </p>
     </div>
 </section>
@@ -100,7 +100,7 @@
             <div class="feature">
                 <div class="feature-icon">&#9889;</div>
                 <h3>Real-time streaming</h3>
-                <p>The agent runs <code>perf record</code> in 8-second rounds. Each round is zstd-compressed and pushed over TCP. Browser sees flame graphs update as new data arrives.</p>
+                <p>The agent runs one continuous <code>perf record</code> pipeline and cuts it into chunks every interval or every 16&nbsp;MB. Each chunk is zstd-compressed and pushed over TCP, and the browser sees flame graphs update as new data arrives.</p>
             </div>
             <div class="feature">
                 <div class="feature-icon">&#128293;</div>
@@ -130,7 +130,7 @@
             <div class="feature">
                 <div class="feature-icon">&#128737;</div>
                 <h3>Static C agent</h3>
-                <p>Single static C agent binary (~2 MB, vendored zstd, zero runtime deps) &mdash; runs on anything from bare-metal embedded boards to servers. One-line curl install, built-in self-update.</p>
+                <p>Single static C agent binary (about 0.6&nbsp;MB, vendored zstd, zero runtime deps) &mdash; runs on anything from bare-metal embedded boards to servers. One-line curl install, built-in self-update.</p>
             </div>
             <div class="feature">
                 <div class="feature-icon">&#129518;</div>
@@ -404,7 +404,7 @@ uv venv && uv pip install -e .
                     to every connected browser via Server-Sent Events.
                 </p>
                 <p style="color: var(--text-secondary); margin-bottom: 22px;">
-                    Typical zstd ratio on real perf script output: <strong>20&ndash;40&times;</strong>.
+                    Measured zstd ratio on real perf script output from devices: <strong>about 20&times;</strong>.
                 </p>
                 <a class="btn btn-ghost" href="architecture.html">Read the architecture &rarr;</a>
             </div>
