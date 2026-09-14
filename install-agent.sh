@@ -26,10 +26,14 @@ machine="$(uname -m)"
 
 # Endianness: od -tx2 reads the two bytes 01 00 as one 16-bit word —
 # a little-endian machine sees 0x0001, a big-endian machine 0x0100.
-if printf '\1\0' | od -An -tx2 | grep -q '0001'; then
-    endian=little
-else
+# 0100 is the big-endian answer; anything else -- including no `od` at
+# all -- is treated as little-endian, which is what the vast majority of
+# targets are. Defaulting to big classified every od-less x86 box as
+# big-endian and fetched an asset that could not run.
+if printf '\1\0' | od -An -tx2 2>/dev/null | grep -q '0100'; then
     endian=big
+else
+    endian=little
 fi
 
 case "$machine" in

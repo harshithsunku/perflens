@@ -177,8 +177,37 @@ authenticated.
   `frequency`/`duration` are read under the state lock. The agent builds as
   C11.
 
+- **Self-update ran the download before any check.** `--update` (and the
+  `update` command) executed the downloaded binary for `--version` before
+  comparing versions, so even a rejected update had run whatever the origin
+  served, as the agent's user — often root on a device — and the `wget`
+  fallback is usually BusyBox's, which validates no TLS certificate. The
+  agent now fetches the release's `.sha256` sidecar and checks the download
+  with the device's `sha256sum` before making it executable or running it;
+  a mismatch is refused and the file removed. Without a sidecar or a
+  `sha256sum` it proceeds with a warning over curl, and refuses over wget.
+  A plaintext origin is still refused, except on loopback.
+
 ### Changed
 
+- **Every release agent is a musl static build, and both 32-bit ones are
+  soft-float.** The x86_64, aarch64 and armv7 assets were static *glibc*,
+  which cannot reliably resolve names (`getaddrinfo` wants the host's NSS
+  libraries at run time, which a foreign device does not have — the linker
+  warned about it on every build), and armv7 was hard-float, the same
+  SIGILL trap the big-endian pass hit on boards without VFP. The three
+  extra toolchains live on the repo's `toolchains` release like the
+  big-endian ones. The x86_64 asset went from 2.06 MB to 0.67 MB, with
+  `-ffunction-sections`/`--gc-sections` dropping the unused half of the
+  vendored zstd (the agent only compresses) and the release asset stripped
+  (the unstripped binary stays a CI artifact). Hardening flags for a
+  network-facing daemon: `-fstack-protector-strong`, `-D_FORTIFY_SOURCE=2`,
+  `-Wformat=2`, `relro` + `now`.
+- CI asserts what the assets claim instead of printing it: statically
+  linked for every arch, a soft-float ABI for both 32-bit ARM assets, BE8
+  for the big-endian one. The agent's Makefile refuses a non-static link.
+  `build_package.sh` names its asset `armv7` like every consumer, and
+  `install-agent.sh` no longer treats a device without `od` as big-endian.
 - **Agent log lines carry an ISO-8601 timestamp and go out in one
   `write(2)` each**, so lines from the collection, metrics and command
   threads no longer interleave and a field log can be matched against the
@@ -230,7 +259,12 @@ authenticated.
   the shared CPU% convention, and the per-core metrics. `make -C agent-c
   check` runs C unit tests over the `/proc` and `/sys` parsers with
   captured input (an offline core, a kernel without `MemAvailable`, the
-  thermal zone choice).
+  thermal zone choice). CI runs the protocol tests under
+  AddressSanitizer+UBSan and under ThreadSanitizer (`make SANITIZE=…`) —
+  the TSan run is what turned the shutdown flag and the child-pid slots
+  into C11 atomics — and shellchecks the shell scripts. Three tests drive
+  `--update` against a fake release over loopback: a verified asset, a
+  tampered one that must never run, and a missing sidecar.
 
 ## [0.11.0] — 2026-09-13
 

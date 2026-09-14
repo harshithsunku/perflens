@@ -1874,3 +1874,99 @@ def test_system_metrics_cover_every_core(harness):
         assert len(m['cpu']['freq_mhz']) == m['cpu']['num_cores']
     assert m['mem']['total_kb'] > 0
     assert 0 <= m['mem']['used_pct'] <= 100
+
+
+# ---------------------------------------------------------------------------
+# Self-update: verified before it runs
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def fake_release(tmp_path):
+    """A release directory served over loopback HTTP, with an asset that
+    records whether it was ever executed."""
+    import hashlib
+    import http.server
+    import threading as _threading
+
+    root = tmp_path / 'release'
+    root.mkdir()
+    marker = tmp_path / 'ran.marker'
+    asset = root / 'perflens-agent-linux-x86_64'
+    asset.write_text('#!/bin/sh\ntouch %s\necho "perflens-agent 9.9.9"\n' % marker)
+    (root / 'perflens-agent-linux-x86_64.sha256').write_text(
+        hashlib.sha256(asset.read_bytes()).hexdigest() + '  perflens-agent-linux-x86_64\n')
+
+    handler = type('Quiet', (http.server.SimpleHTTPRequestHandler,),
+                   {'log_message': lambda *a, **k: None})
+    srv = http.server.ThreadingHTTPServer(
+        ('127.0.0.1', 0), lambda *a, **k: handler(*a, directory=str(root), **k))
+    t = _threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        yield root, marker, f'http://127.0.0.1:{srv.server_address[1]}'
+    finally:
+        srv.shutdown()
+
+
+def run_update(tmp_path, base_url):
+    """Run a private copy of the agent with --update against base_url."""
+    copy = tmp_path / 'agent-copy'
+    shutil.copy(AGENT_BIN, copy)
+    copy.chmod(0o755)
+    r = subprocess.run([str(copy), '--update'], capture_output=True, text=True,
+                       timeout=120, env={**os.environ, 'PERFLENS_UPDATE_URL': base_url})
+    return r, copy
+
+
+@pytest.mark.skipif(os.uname().machine != 'x86_64',
+                    reason='the fake release publishes the x86_64 asset')
+def test_update_verifies_the_checksum_before_running_anything(tmp_path,
+                                                              fake_release):
+    root, marker, url = fake_release
+    r, copy = run_update(tmp_path, url)
+    assert r.returncode == 0, r.stderr
+    assert 'Checksum verified' in r.stderr
+    assert 'updated' in r.stderr
+    assert marker.exists(), 'the verified binary should have been run for --version'
+    assert copy.read_bytes().startswith(b'#!/bin/sh')
+
+
+@pytest.mark.skipif(os.uname().machine != 'x86_64',
+                    reason='the fake release publishes the x86_64 asset')
+def test_update_refuses_a_tampered_asset_without_executing_it(tmp_path,
+                                                              fake_release):
+    """The old order ran `--version` on the download before any check, so
+    a rejected update had already executed the attacker's file as the
+    agent's user."""
+    root, marker, url = fake_release
+    asset = root / 'perflens-agent-linux-x86_64'
+    asset.write_text(asset.read_text() + '# tampered\n')
+    r, copy = run_update(tmp_path, url)
+    assert r.returncode == 1
+    assert 'checksum mismatch' in r.stderr
+    assert not marker.exists(), 'the tampered binary was executed'
+    assert not copy.read_bytes().startswith(b'#!/bin/sh'), 'the agent was replaced'
+    assert not list(tmp_path.glob('agent-copy.update.*')), 'download left behind'
+
+
+@pytest.mark.skipif(os.uname().machine != 'x86_64',
+                    reason='the fake release publishes the x86_64 asset')
+def test_update_without_a_sidecar_proceeds_with_a_warning(tmp_path,
+                                                          fake_release):
+    root, marker, url = fake_release
+    (root / 'perflens-agent-linux-x86_64.sha256').unlink()
+    r, copy = run_update(tmp_path, url)
+    assert r.returncode == 0, r.stderr
+    assert 'not verified' in r.stderr
+    assert copy.read_bytes().startswith(b'#!/bin/sh')
+
+
+def test_update_refuses_plaintext_origins_off_loopback(tmp_path):
+    copy = tmp_path / 'agent-copy'
+    shutil.copy(AGENT_BIN, copy)
+    copy.chmod(0o755)
+    r = subprocess.run([str(copy), '--update'], capture_output=True, text=True,
+                       timeout=30, env={**os.environ,
+                                        'PERFLENS_UPDATE_URL': 'http://mirror.example/dl'})
+    assert r.returncode == 1
+    assert 'plaintext' in r.stderr

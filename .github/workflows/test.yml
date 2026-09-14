@@ -61,6 +61,70 @@ jobs:
         run: python -m pytest tests/ -v -ra
 
   # -------------------------------------------------------------------------
+  # The C agent under AddressSanitizer+UBSan and under ThreadSanitizer,
+  # driving the same protocol tests; plus its native unit tests. A daemon
+  # that forks perf from several threads and answers a network peer is
+  # exactly what these catch, and nothing ran them before.
+  # -------------------------------------------------------------------------
+  agent-sanitizers:
+    name: agent (${{ matrix.sanitize }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitize: ['address,undefined', 'thread']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Build instrumented agent
+        run: make -C agent-c SANITIZE=${{ matrix.sanitize }}
+
+      - name: C unit tests
+        run: make -C agent-c check
+
+      - name: Install package + test deps
+        run: python -m pip install -e '.[dev]'
+
+      - name: Protocol tests under the sanitizer
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+          TSAN_OPTIONS: halt_on_error=1
+        run: python -m pytest tests/test_agent_protocol.py -q
+
+      # A report goes to the agent's stderr, which the harness captures
+      # into agent.log; halt_on_error makes the agent die and the test fail,
+      # but grep as well so a report on the exit path cannot slip through.
+      - name: No sanitizer reports in any agent log
+        if: always()
+        run: |
+          if grep -rl 'Sanitizer\|runtime error:' /tmp/pytest-of-*/pytest-*/*/agent.log 2>/dev/null; then
+            grep -rh -A15 'Sanitizer\|runtime error:' /tmp/pytest-of-*/pytest-*/*/agent.log | head -100
+            exit 1
+          fi
+
+  # -------------------------------------------------------------------------
+  # The shell scripts: the curl-able installer, the package builder and
+  # the docs-capture helpers were never linted or run by CI.
+  # -------------------------------------------------------------------------
+  shell:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Install shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+      - name: Lint
+        run: shellcheck -S warning install-agent.sh build_package.sh tools/*.sh
+
+  # -------------------------------------------------------------------------
   # Frontend: typecheck + vitest unit tests + Playwright browser E2E
   # against a real server replaying a device-captured fixture session
   # (frontend/e2e is self-contained — it starts and stops its own server).

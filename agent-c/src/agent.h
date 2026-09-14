@@ -303,7 +303,10 @@ struct agent_state {
  * Globals (defined in subproc.c)
  * -------------------------------------------------------------------------- */
 
-extern volatile sig_atomic_t g_shutdown;
+/* Set from the signal handler. A lock-free atomic store is async-signal-
+ * safe, and unlike a volatile sig_atomic_t it is also a proper release to
+ * every thread that polls it. */
+extern atomic_int g_shutdown;
 extern struct agent_state *g_agent;        /* for signal handler */
 extern volatile int g_agent_sock_fd;       /* socket mirror for signal handler */
 

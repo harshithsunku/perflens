@@ -112,9 +112,11 @@ resolution. See [STATUS.md](STATUS.md) for what is open.
   runs at `nice 5` so the profiler yields to the workload, every perf child
   runs with `LC_ALL=C` in its own process group, and `perf stat` rounds run
   back to back so every interval is counted.
-- Single agent implementation: a static C binary (~2 MB, vendored zstd,
-  zero deps) that cross-compiles for five architectures, installs with one
-  curl command (install-agent.sh), and self-updates with --update.
+- Single agent implementation: a static musl C binary (~0.7 MB, vendored
+  zstd, zero deps) that cross-compiles for five architectures from the
+  toolchains on the repo's `toolchains` GitHub release, installs with one
+  curl command (install-agent.sh), and self-updates with --update after
+  checking the release's `.sha256` sidecar with the device's `sha256sum`.
 - Bidirectional interactive protocol: agent sends hello + data + metrics,
   server sends commands (start, stop, pause, resume, configure, etc.).
   `start` accepts an optional `events` subset of the probed record events;

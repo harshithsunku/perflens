@@ -165,7 +165,14 @@ build_agent_c() {
     # Raw binary with the stable release-asset name (used by
     # install-agent.sh and the agent's --update)
     local arch
-    arch="$(uname -m)"
+    # The release asset name every consumer asks for: armv7, not the armv7l
+    # that uname -m reports (install-agent.sh, push-agent and --update all
+    # normalize the same way, and asked for armv7l nothing existed).
+    case "$(uname -m)" in
+        armv7b|armeb*) arch=armeb ;;
+        arm*)          arch=armv7 ;;
+        *)             arch="$(uname -m)" ;;
+    esac
     cp "$REPO_ROOT/agent-c/perflens-agent" "$DIST_DIR/perflens-agent-linux-${arch}"
     ok "Wrote $DIST_DIR/perflens-agent-linux-${arch}"
 }
@@ -194,7 +201,7 @@ Usage
     # or from PyPI once published:  uvx perflens
 
   Agent (static C binary, zero deps):
-    1. scp ${DIST_DIR}/perflens-agent-linux-\$(uname -m) device:perflens-agent
+    1. scp ${DIST_DIR}/perflens-agent-linux-${arch} device:perflens-agent
     2. ssh device './perflens-agent --listen'        # or --server SERVER_IP
     (or on the device:  curl -fsSL .../install-agent.sh | sh)
     (or from this machine:  perflens push-agent user@device)

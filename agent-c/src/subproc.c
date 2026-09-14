@@ -8,9 +8,9 @@
  * Globals
  * -------------------------------------------------------------------------- */
 
-volatile sig_atomic_t g_shutdown = 0;
+atomic_int g_shutdown = 0;
 #define MAX_TRACKED_CHILDREN 8
-static volatile pid_t g_child_pids[MAX_TRACKED_CHILDREN];
+static atomic_int g_child_pids[MAX_TRACKED_CHILDREN];
 struct agent_state *g_agent = NULL;  /* for signal handler */
 volatile int g_agent_sock_fd = -1;   /* mirror of agent sock_fd for signal handler */
 
@@ -30,7 +30,8 @@ volatile int g_agent_sock_fd = -1;   /* mirror of agent sock_fd for signal handl
 void track_child(pid_t pid)
 {
     for (int i = 0; i < MAX_TRACKED_CHILDREN; i++) {
-        if (__sync_bool_compare_and_swap(&g_child_pids[i], 0, pid))
+        int expected = 0;
+        if (atomic_compare_exchange_strong(&g_child_pids[i], &expected, (int)pid))
             return;
     }
     agent_warn("child pid %d not tracked (all slots busy)", (int)pid);
@@ -39,7 +40,8 @@ void track_child(pid_t pid)
 void untrack_child(pid_t pid)
 {
     for (int i = 0; i < MAX_TRACKED_CHILDREN; i++) {
-        if (__sync_bool_compare_and_swap(&g_child_pids[i], pid, 0))
+        int expected = (int)pid;
+        if (atomic_compare_exchange_strong(&g_child_pids[i], &expected, 0))
             return;
     }
 }
@@ -53,11 +55,11 @@ void kill_child_group(pid_t pid, int sig)
     kill(pid, sig);
 }
 
-/* Async-signal-safe: only volatile reads + kill(2). */
+/* Async-signal-safe: only lock-free atomic loads + kill(2). */
 void kill_tracked_children(void)
 {
     for (int i = 0; i < MAX_TRACKED_CHILDREN; i++) {
-        pid_t p = g_child_pids[i];
+        pid_t p = (pid_t)atomic_load(&g_child_pids[i]);
         if (p > 0)
             kill_child_group(p, SIGTERM);
     }

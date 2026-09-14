@@ -45,7 +45,18 @@ the big-endian target, and a 0.12.0 release at the end.
       command thread, deliberately: `list_processes` (0.5 s), `verify_perf`
       (≤15 s) and `update`. `make -C agent-c check` runs C unit tests over
       the metrics parsers. **68 protocol tests.**
-- [ ] Phase 3 — build, update, CI hardening (A-30, A-32, A-33, A-34).
+- [x] **Phase 3 — build, update, CI hardening.** A-30 (checksum before
+      exec, via the device's `sha256sum`), A-32 (hardening flags; ASan+UBSan
+      and TSan jobs — TSan was clean once `g_shutdown` and the child-pid
+      slots became C11 atomics), A-33 (`--gc-sections`, strip in CI, the
+      unstripped binary kept as an artifact), A-34 (musl for all five
+      assets, soft-float armv7; `x86_64-linux-musl-cross.tgz`,
+      `aarch64-linux-musl-cross.tgz` and `arm-linux-musleabi-cross.tgz`
+      uploaded to the `toolchains` release, sha256 in the PR). The x86_64
+      musl agent passed the full protocol suite natively; the ARM ones
+      are `readelf`-checked here and run on hardware in Phase 7. CI asserts
+      static linking and the float ABI, and shellchecks the scripts.
+      **72 protocol tests.**
 - [ ] Phase 4 — transport (server side of the socket).
 - [ ] Phase 5 — server.
 - [ ] Phase 6 — UI.
