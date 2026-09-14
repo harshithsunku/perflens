@@ -188,9 +188,9 @@ Release assets published on every tagged release:
 | `perflens-agent-linux-aarch64_be` | Agent — static binary, Linux aarch64 BE |
 | `perflens-agent-linux-armv7` | Agent — static binary, Linux armv7 (32-bit LE) |
 | `perflens-agent-linux-armeb` | Agent — static binary, Linux armv7 BE |
+| `perflens-tools-linux-{x86_64,aarch64}.tar.gz` | Static addr2line+readelf for `perflens provision` |
 
 The asset suffix is the normalized arch, not `uname -m`: a device reporting `armv7l` fetches `perflens-agent-linux-armv7`.
-| `perflens-tools-linux-{x86_64,aarch64}.tar.gz` | Static addr2line+readelf for `perflens provision` |
 
 ### Option B — build the agent yourself
 

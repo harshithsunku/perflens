@@ -5,6 +5,26 @@ All notable changes to PerfLens are recorded here. Format follows
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html); pre-1.0
 releases may break APIs between minor versions when needed.
 
+## [Unreleased]
+
+### Fixed
+
+- **`perflens push-agent --help` prints usage.** It handed `--help` to ssh as
+  the host and failed with `ssh failed: unknown option -- -`. `-h`/`--help`
+  now print the usage and exit 0, and any other argument starting with `-` is
+  a usage error before ssh runs, rather than an option ssh or scp would parse.
+- **`perflens serve --help` described `--token` backwards.** It said agents
+  must present the secret in their hello, which stopped being true in 0.10.0:
+  the server presents the pairing code to the agent through the `auth` command,
+  and the agent never sends one. The help now says so, and notes that a
+  pre-0.10.0 agent's hello token is still accepted with a warning.
+- **`--max-samples` help understated memory.** It put the default's plateau
+  near 850 MB; the measured figure at 500000 samples is near 1.1 GB, as the
+  README and reference already said.
+- **README release-assets table.** A sentence between table rows cut off the
+  `perflens-tools-linux-{x86_64,aarch64}.tar.gz` row, which rendered as plain
+  text.
+
 ## [0.11.0] — 2026-09-13
 
 First hands-on validation on **big-endian** hardware — a big-endian ARMv7
