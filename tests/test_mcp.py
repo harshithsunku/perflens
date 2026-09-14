@@ -495,6 +495,12 @@ def test_agent_connect_points_the_agent_at_perf_path(core, monkeypatch):
         def __init__(self):
             self.sent = []
 
+        def close(self):
+            self.connected = False
+
+        def join(self, timeout=None):
+            pass
+
         def send_command(self, cmd, args, timeout=60):
             self.sent.append((cmd, args))
             if args.get('perf') == '/opt/perf-4.4/bin/perf':

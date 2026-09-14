@@ -1043,6 +1043,11 @@ async def _lifespan(app):
     app.state.sse_hub.attach(asyncio.get_running_loop())
     app.state.ctx.register_sse_sink(app.state.sse_hub.publish)
     yield
+    # Shutdown: end the agent session and wait for its metadata to be
+    # written. The receive and save threads are daemons, so a Ctrl-C mid-
+    # capture used to leave the session's directory without metadata --
+    # unlisted, unreplayable, and never cleaned up.
+    await run_in_threadpool(agentlink.shutdown_agent, app.state.ctx)
 
 
 def create_app(ctx):

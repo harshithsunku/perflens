@@ -389,8 +389,9 @@ protocol tests shorten it).
   (generated and logged when not supplied), sends none of it over the wire,
   and gates `dispatch_command` on a peer proving knowledge of it. Added
   `auth` to `CMD_TABLE` and a `--bind` flag; existing flags and frame types
-  are unchanged, and a 0.10.0 server still accepts a pre-0.10.0 agent on its
-  hello token with a warning.
+  are unchanged. A 0.10.0 and 0.11.0 server still accepted a pre-0.10.0
+  agent on its hello token with a warning; since 0.12.0 a server with a
+  token configured refuses such an agent and names the upgrade.
 - **Simplicity first.** A small, deliberate server dependency set
   (fastapi, uvicorn, orjson, zstandard, pydantic — all user-space).
   The UI is React + TS + Vite, but Node is dev/CI-only: the wheel ships

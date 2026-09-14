@@ -746,6 +746,12 @@ def test_verify_perf_refreshes_the_agents_hello(client, core, monkeypatch):
             return {'ok': True, 'available': True, 'path': args['perf'],
                     'version': 'perf version 4.4.0', 'functional': True}
 
+        def close(self):
+            self.connected = False
+
+        def join(self, timeout=None):
+            pass
+
     session = Session()
     monkeypatch.setattr(core.agent, 'current', lambda: session)
     events = []

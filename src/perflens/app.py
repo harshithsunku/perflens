@@ -92,6 +92,14 @@ def main(argv=None):
     cfg = config_from_args(argv)
 
     os.makedirs(cfg.sessions_dir, exist_ok=True)
+    if not os.access(cfg.sessions_dir, os.W_OK):
+        # Found at connect time otherwise, where it used to kill the
+        # receive thread before it read a byte.
+        print(f"[server] Error: sessions directory is not writable: "
+              f"{cfg.sessions_dir}", file=sys.stderr)
+        sys.exit(1)
+    from perflens.sessions import sweep_sessions_dir
+    sweep_sessions_dir(cfg.sessions_dir)
 
     if not os.path.isdir(cfg.ui_dir):
         print(f"[server] Warning: UI directory not found at {cfg.ui_dir}",

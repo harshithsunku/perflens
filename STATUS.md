@@ -57,7 +57,26 @@ the big-endian target, and a 0.12.0 release at the end.
       are `readelf`-checked here and run on hardware in Phase 7. CI asserts
       static linking and the float ABI, and shellchecks the scripts.
       **72 protocol tests.**
-- [ ] Phase 4 — transport (server side of the socket).
+- [x] **Phase 4 — transport (server side of the socket).** Legacy hello
+      tokens refused when the server has one configured (the item SECURITY.md
+      scheduled for 0.12.0); one malformed frame no longer ends a session
+      (non-object metrics, a bad stat line, `cpu: null` in the summary);
+      stat-only chunks keep their counters; keepalive plus a 30 s send bound
+      on every agent socket and a 1..600 s bound on relayed command
+      timeouts; the accept loop survives an `accept()` error; an unwritable
+      sessions dir is refused at startup and tolerated at connect; chunks
+      spool through a temp name and a failed one is a gap, not an
+      overwrite; `metadata.json` is written at session start and refreshed
+      per chunk (`live: true`), finalized by a uvicorn shutdown hook that
+      stops the agent and joins the save, and a startup sweep removes empty
+      session dirs and rebuilds metadata for orphaned chunks; a replacement
+      agent waits for the old receiver to finish before state is reset;
+      frame caps 64 KB pre-auth / 80 MB in session / 256 MB decompressed.
+      Not done: parsing off the socket thread (4.11) — measure the metrics
+      gap on the hybrid bed in Phase 7 first; the agent side's stat and
+      command replies no longer wait on the data send since Phase 1's
+      `writev` change, so the case for it is weaker than when the plan was
+      written. **9 new session tests** in `tests/test_agentlink_session.py`.
 - [ ] Phase 5 — server.
 - [ ] Phase 6 — UI.
 - [ ] Phase 7 — docs, hardware pass, 0.12.0.

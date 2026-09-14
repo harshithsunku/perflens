@@ -62,13 +62,13 @@ class ProfilingState:
             self._rebuild_needed.notify()
             return len(self.all_samples), list(self.event_types)
 
-    def get_snapshot(self):
+    def add_perf_stat(self, perf_stat):
+        """Merge a PERF_STAT section that arrived without samples (the
+        first chunk or two after start, while perf record fills its ring
+        buffer). Touches neither the ring nor the rebuild worker."""
         with self.lock:
-            return {
-                'all_samples': list(self.all_samples),
-                'event_types': list(self.event_types),
-                'perf_stat': dict(self.perf_stat),
-            }
+            self.perf_stat = merge_perf_stat(self.perf_stat, perf_stat)
+            self.last_update = time.time()
 
     def reset(self):
         with self.lock:
@@ -152,12 +152,18 @@ class MetricsState:
         with self.lock:
             if not self.system_history:
                 return None
-            cpu_vals = [m['cpu']['overall_pct'] for m in self.system_history
-                        if m.get('cpu', {}).get('overall_pct') is not None]
-            mem_vals = [m['mem']['used_pct'] for m in self.system_history
-                        if m.get('mem', {}).get('used_pct') is not None]
-            temp_vals = [m['temp_c'] for m in self.system_history
-                         if m.get('temp_c') is not None]
+            def num(frame, *keys):
+                v = frame
+                for k in keys:
+                    v = v.get(k) if isinstance(v, dict) else None
+                return v if isinstance(v, (int, float)) else None
+
+            cpu_vals = [v for v in (num(m, 'cpu', 'overall_pct')
+                                    for m in self.system_history) if v is not None]
+            mem_vals = [v for v in (num(m, 'mem', 'used_pct')
+                                    for m in self.system_history) if v is not None]
+            temp_vals = [v for v in (num(m, 'temp_c')
+                                     for m in self.system_history) if v is not None]
             n = len(self.system_history)
             summary = {'snapshots': n}
             if n >= 2:

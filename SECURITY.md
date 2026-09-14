@@ -164,9 +164,18 @@ Setting `PERFLENS_UPDATE_URL` to an `http://` origin is refused outright.
 
 Agents before 0.10.0 put their shared secret **in the hello frame** — which,
 in `--listen` mode, meant handing it to anyone who completed a TCP handshake.
-A 0.10.0 server still accepts such an agent when the token matches, logs a
-warning, and strips the token before the hello reaches the HTTP API. Upgrade
-those agents.
+A 0.10.0 or 0.11.0 server still accepted such an agent when the token
+matched, with a warning. **Since 0.12.0 a server with a token configured
+refuses it**, and the rejection names the fix (`perflens push-agent`, or
+`perflens-agent --update` on the device). A server with no token configured
+sends no `auth` at all, so an old agent dialling it in `--server` mode still
+works; either way the hello token is stripped before the hello reaches the
+HTTP API.
+
+The server also bounds what an unauthenticated peer can make it do: the
+hello and auth frames are capped at 64 KB, a session frame at 80 MB, and
+one frame's decompressed size at 256 MB; a malformed frame is dropped and
+logged rather than ending the session.
 
 **Upgrade order: server first, then agents.** A 0.10.0 agent sends no hello
 token, so an older server configured with `--token` will reject it.

@@ -947,6 +947,11 @@ export interface components {
             chunks: number;
             /** Event Types */
             event_types?: string[];
+            /**
+             * Live
+             * @default false
+             */
+            live: boolean;
             /** Metrics Summary */
             metrics_summary?: {
                 [key: string]: unknown;
@@ -959,6 +964,11 @@ export interface components {
             platform?: {
                 [key: string]: unknown;
             } | null;
+            /**
+             * Recovered
+             * @default false
+             */
+            recovered: boolean;
             /** Session Id */
             session_id: string;
             /**

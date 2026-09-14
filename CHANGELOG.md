@@ -7,8 +7,76 @@ releases may break APIs between minor versions when needed.
 
 ## [Unreleased]
 
+The sixth agent unfreeze, decided 2026-09-14 for a stabilization pass over
+the whole project. The wire protocol is unchanged: every frame type, command
+and hello field is as in 0.11.0, and a 0.11.0 server drives this agent as
+before. What changed is how the agent runs `perf`, what it does when
+something does not exit, and what a peer can make it do before it has
+authenticated. The server side of the socket got the same treatment: what
+one bad frame, one dead device or one full disk could do to a session.
+
+### Security
+
+- **Pre-0.10.0 agents are refused by a server with a pairing code.** Such
+  an agent puts its secret in the hello, where any port scanner reads it,
+  and until now a server with `--token` fell back to comparing it — the
+  leak the pairing handshake replaced. The rejection names the upgrade
+  (`perflens push-agent`, or `--update` on the device). A server with no
+  code configured sends no `auth` at all, so an old agent dialling it in
+  `--server` mode still pairs. Scheduled in SECURITY.md for this release.
+- The server bounds what a peer can make it allocate: 64 KB for the hello
+  and auth frames (read before the peer has proved anything), 80 MB for a
+  session frame, 256 MB for one frame's decompressed text. A garbage header
+  claiming 4 GB used to be allocated as asked.
+
 ### Fixed
 
+- **One malformed frame ended the whole session.** The receive loop's
+  catch-all broke out of the loop, and three ordinary things reached it: a
+  metrics frame that is not a JSON object, a `seconds time elapsed` line
+  the parser could not read, and a `cpu: null` in the health summary. A
+  bad frame is now dropped and logged (the first three with a trace, the
+  rest counted) and the capture goes on.
+- **The first chunks after `start` lost their counters.** Continuous mode's
+  first chunk or two carry only `PERF_STAT` while `perf record` fills its
+  ring buffer, and the server skipped a chunk with no samples before
+  merging its stat section. The counters are merged first.
+- **A dead device wedged every later command.** `send_command` held the
+  session lock across a `sendall` with no timeout, so a device that
+  stopped reading parked the next command behind it for as long as TCP
+  retransmits (about fifteen minutes), and the ones after that filled the
+  HTTP threadpool. Every agent socket now has keepalive, `TCP_USER_TIMEOUT`
+  and a 30 s send bound, on both connect paths, and a relayed command's
+  timeout is bounded to 1..600 s.
+- **The listener died on one `accept()` error.** `EMFILE` under descriptor
+  pressure or `ECONNABORTED` ended the accept thread and closed the
+  listening socket for good, with nothing in the API saying so. It logs,
+  backs off a second and keeps listening.
+- **A full or read-only sessions directory killed the receiver before it
+  read a byte**, leaving the UI showing a connected agent forever. The
+  directory is checked at startup (`perflens serve` refuses to start) and,
+  should it fail later, the session runs unsaved with one log line.
+- **A chunk that failed to spool (`ENOSPC`) was overwritten by the next.**
+  The truncated file kept its index, so the following chunk replaced it
+  and the count under-reported. Chunks are written to a temp name and
+  renamed; a failed one is a gap.
+- **A server killed mid-capture left an invisible session.** `metadata.json`
+  was written only when the receive loop ended, and daemon threads die with
+  uvicorn, so Ctrl-C left the chunks with no metadata: unlisted, not
+  replayable, never cleaned up (STATUS counted 332 such directories on one
+  machine). The metadata is written when the session directory is created
+  and refreshed with every chunk (`live: true` until finalized); a uvicorn
+  shutdown hook stops the agent and waits for the save; and a startup sweep
+  removes session directories with neither chunks nor metadata and rebuilds
+  metadata (`recovered: true`) for ones with chunks and none.
+- **Replacing an agent mid-chunk mixed the two sessions.** The new agent's
+  install reset the state and metrics while the old receiver might still
+  be parsing, so the dying agent's last chunk landed in the new session and
+  the old one was saved with the new agent's (empty) metrics. The old
+  receiver is closed and joined (bounded, 10 s) before the reset.
+- `connect_to_agent` closes the socket when installing the session fails
+  after a successful handshake, and in-flight commands are failed at once
+  on disconnect rather than left to time out.
 - **`perflens push-agent --help` prints usage.** It handed `--help` to ssh as
   the host and failed with `ssh failed: unknown option -- -`. `-h`/`--help`
   now print the usage and exit 0, and any other argument starting with `-` is
@@ -16,26 +84,13 @@ releases may break APIs between minor versions when needed.
 - **`perflens serve --help` described `--token` backwards.** It said agents
   must present the secret in their hello, which stopped being true in 0.10.0:
   the server presents the pairing code to the agent through the `auth` command,
-  and the agent never sends one. The help now says so, and notes that a
-  pre-0.10.0 agent's hello token is still accepted with a warning.
+  and the agent never sends one. The help now says so.
 - **`--max-samples` help understated memory.** It put the default's plateau
   near 850 MB; the measured figure at 500000 samples is near 1.1 GB, as the
   README and reference already said.
 - **README release-assets table.** A sentence between table rows cut off the
   `perflens-tools-linux-{x86_64,aarch64}.tar.gz` row, which rendered as plain
   text.
-
-## [Unreleased]
-
-The sixth agent unfreeze, decided 2026-09-14 for a stabilization pass over
-the whole project. The wire protocol is unchanged: every frame type, command
-and hello field is as in 0.11.0, and a 0.11.0 server drives this agent as
-before. What changed is how the agent runs `perf`, what it does when
-something does not exit, and what a peer can make it do before it has
-authenticated.
-
-### Fixed
-
 - **Long intervals lost every chunk, silently.** Continuous mode capped a
   chunk at 64 MB of `perf script` text, and past the cap the sink's sticky
   error made the flush skip the send and log nothing. Measured at ~3.4 MB/s
@@ -265,6 +320,14 @@ authenticated.
   into C11 atomics — and shellchecks the shell scripts. Three tests drive
   `--update` against a fake release over loopback: a verified asset, a
   tampered one that must never run, and a missing sidecar.
+- `tests/test_agentlink_session.py` drives the server's receive loop with a
+  scripted pure-Python agent: malformed frames, a stat-only chunk, early
+  and final metadata, an empty session leaving no directory, a chunk write
+  failing with `ENOSPC`, the startup sweep, replacing an agent mid-session,
+  the shutdown hook, the socket bounds, an oversized hello and an oversized
+  session frame, and an `accept()` error. The legacy-token test in
+  `test_agentlink_auth.py` now asserts the refusal, and a second one that a
+  tokenless server still pairs an old agent.
 
 ## [0.11.0] — 2026-09-13
 

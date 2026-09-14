@@ -284,9 +284,9 @@ def config_from_args(argv=None):
                         default=os.environ.get('PERFLENS_TOKEN'),
                         help='Pairing code to present to the agent (or '
                              'PERFLENS_TOKEN); the wizard can supply one per '
-                             'connection instead. A pre-0.10.0 agent that '
-                             'sends it in its hello is still accepted, with '
-                             'a warning')
+                             'connection instead. A pre-0.10.0 agent, which '
+                             'sends its secret in the hello, is refused when '
+                             'a code is configured; upgrade it')
     parser.add_argument('--sessions-dir', type=str, default=None,
                         metavar='DIR',
                         help='Where to save profiling sessions '

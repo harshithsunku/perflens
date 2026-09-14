@@ -86,41 +86,135 @@ def load_session_samples(cfg, session_id):
     return load_session_chunks(cfg, session_dir), metadata
 
 
+def write_metadata(session_dir, metadata):
+    """Write metadata.json atomically (temp name + rename). Best-effort:
+    returns False on failure, never raises."""
+    path = os.path.join(session_dir, 'metadata.json')
+    tmp = path + '.tmp'
+    try:
+        with open(tmp, 'w') as f:
+            json.dump(metadata, f, indent=2)
+        os.replace(tmp, path)
+        return True
+    except OSError as e:
+        print(f"[server] Cannot write {path}: {e}", file=sys.stderr)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return False
+
+
+def provisional_metadata(session_id, agent_addr, chunk_count, samples_total,
+                         event_types, perf_stat, hello=None, started=None,
+                         live=True):
+    """Metadata for a session that is still receiving (live=True), or
+    the same shape finalized. Written when the session directory is
+    created and refreshed with every chunk, so a server that dies
+    mid-capture leaves a session that still lists and replays."""
+    metadata = {
+        'version': __version__,
+        'session_id': session_id,
+        'agent': agent_addr,
+        'timestamp': (started or datetime.now()).isoformat(),
+        'total_samples': samples_total,
+        'chunks': chunk_count,
+        'event_types': list(event_types),
+        'perf_stat': perf_stat,
+        'live': bool(live),
+    }
+    if hello and hello.get('platform'):
+        metadata['platform'] = hello['platform']
+    return metadata
+
+
+def discard_empty_session(session_dir):
+    """Remove a session directory that only ever held its provisional
+    metadata. An agent started with --server reconnects with backoff, so
+    a disconnect produces a connect/disconnect cycle every few seconds;
+    persisting each one filled the session list with rows replaying to
+    nothing."""
+    try:
+        for name in ('metadata.json', 'metadata.json.tmp'):
+            try:
+                os.unlink(os.path.join(session_dir, name))
+            except FileNotFoundError:
+                pass
+        os.rmdir(session_dir)  # only succeeds while it is genuinely empty
+    except OSError:
+        pass
+
+
+def sweep_sessions_dir(sessions_dir):
+    """At startup: remove session directories with neither chunks nor
+    metadata (debris from crashes and pre-0.9.0 reconnect cycles), and give
+    a directory that has chunks but no metadata -- a capture a crashed
+    server never finalized -- a recovered metadata.json so it lists and
+    replays. Returns (removed, recovered)."""
+    removed = recovered = 0
+    if not os.path.isdir(sessions_dir):
+        return removed, recovered
+    for name in sorted(os.listdir(sessions_dir)):
+        d = os.path.join(sessions_dir, name)
+        if not os.path.isdir(d):
+            continue
+        try:
+            chunks = session_chunk_files(d)
+        except OSError:
+            continue
+        has_meta = os.path.isfile(os.path.join(d, 'metadata.json'))
+        if not chunks and not has_meta:
+            try:
+                for stray in os.listdir(d):
+                    os.unlink(os.path.join(d, stray))
+                os.rmdir(d)
+                removed += 1
+            except OSError:
+                pass
+        elif chunks and not has_meta:
+            meta = provisional_metadata(name, name.split('_', 2)[-1],
+                                        len(chunks), 0, [], {}, live=False)
+            meta['recovered'] = True
+            if write_metadata(d, meta):
+                recovered += 1
+    if removed or recovered:
+        print(f"[server] Sessions: removed {removed} empty director"
+              f"{'y' if removed == 1 else 'ies'}, recovered {recovered} "
+              f"unfinalized session{'' if recovered == 1 else 's'}",
+              file=sys.stderr)
+    return removed, recovered
+
+
 def save_session(session_dir, session_id, agent_addr, chunk_count,
                  all_samples, perf_stat, hello=None,
-                 metrics_snapshot=None, metrics_summary=None):
+                 metrics_snapshot=None, metrics_summary=None,
+                 samples_total=None, started=None):
     """Save session metadata + metrics (chunks are spooled at receive time).
 
     A session with nothing in it is not saved. An agent started with
     --server reconnects with backoff, so disconnecting one produces a
     connect/disconnect cycle every few seconds; persisting each one filled
     the session list with empty rows that replay to nothing.
+
+    `samples_total` is the session's parsed sample count; `all_samples` is
+    the live ring, which is capped, so its length under-reports a long
+    session (the ring is still what the event list is derived from).
     """
     if not all_samples and not chunk_count:
-        try:
-            os.rmdir(session_dir)  # only succeeds while it is genuinely empty
-        except OSError:
-            pass
+        discard_empty_session(session_dir)
         return
     try:
         event_types = get_event_types(all_samples)
-        metadata = {
-            'version': __version__,
-            'session_id': session_id,
-            'agent': agent_addr,
-            'timestamp': datetime.now().isoformat(),
-            'total_samples': len(all_samples),
-            'chunks': chunk_count,
-            'event_types': event_types,
-            'perf_stat': perf_stat,
-        }
-        if hello and hello.get('platform'):
-            metadata['platform'] = hello['platform']
+        metadata = provisional_metadata(
+            session_id, agent_addr, chunk_count,
+            samples_total if samples_total is not None else len(all_samples),
+            event_types, perf_stat, hello, started, live=False)
+        metadata['ring_samples'] = len(all_samples)
         if metrics_summary:
             metadata['metrics_summary'] = metrics_summary
 
-        with open(os.path.join(session_dir, 'metadata.json'), 'w') as f:
-            json.dump(metadata, f, indent=2)
+        if not write_metadata(session_dir, metadata):
+            return
 
         # Save metrics history
         if metrics_snapshot:

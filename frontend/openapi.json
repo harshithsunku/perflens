@@ -83,6 +83,8 @@
           },
           "timeout": {
             "default": 60,
+            "maximum": 600.0,
+            "minimum": 1.0,
             "title": "Timeout",
             "type": "integer"
           }
@@ -1091,6 +1093,11 @@
             "title": "Event Types",
             "type": "array"
           },
+          "live": {
+            "default": false,
+            "title": "Live",
+            "type": "boolean"
+          },
           "metrics_summary": {
             "anyOf": [
               {
@@ -1119,6 +1126,11 @@
               }
             ],
             "title": "Platform"
+          },
+          "recovered": {
+            "default": false,
+            "title": "Recovered",
+            "type": "boolean"
           },
           "session_id": {
             "title": "Session Id",

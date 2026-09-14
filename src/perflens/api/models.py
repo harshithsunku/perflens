@@ -132,6 +132,11 @@ class SessionMetadata(BaseModel):
     perf_stat: dict[str, Any] = Field(default_factory=dict)
     platform: Optional[dict[str, Any]] = None
     metrics_summary: Optional[dict[str, Any]] = None
+    # True while the session is still receiving (its metadata is refreshed
+    # per chunk); a server that died mid-capture leaves it True.
+    live: bool = False
+    # Metadata rebuilt at startup for a capture the server never finalized.
+    recovered: bool = False
 
 
 class SessionListResponse(BaseModel):
@@ -364,7 +369,9 @@ class AgentCommandRequest(BaseModel):
 
     cmd: AgentCommandName
     args: dict[str, Any] = Field(default_factory=dict)
-    timeout: int = 60
+    # Bounded: each relayed command parks a threadpool thread for up to
+    # this long, and an unbounded value could park it for days.
+    timeout: int = Field(60, ge=1, le=600)
 
 
 class AgentCommandResponse(BaseModel):
