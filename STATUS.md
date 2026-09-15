@@ -4,7 +4,7 @@ Cross-session working state. Update at the start and end of every working
 session. Release history lives in [CHANGELOG.md](CHANGELOG.md); this file
 is what is *currently true* and what is *left to do*.
 
-## Current phase — the stabilization pass toward 0.12.0
+## Previous phase — 0.12.0 released: the stabilization pass
 
 Started 2026-09-14 on branch `stabilize-0.12.0`, from the plan at
 `~/.claude/plans/understand-this-project-and-deep-fox.md` and the agent review
@@ -114,7 +114,7 @@ the big-endian target, and a 0.12.0 release at the end.
       hint, live/recovered session tags. **53 vitest (was 24), 16
       Playwright scenarios (was 10).** Deferred: component render tests
       needing jsdom, the visual overhaul.
-- [ ] **Phase 7 — docs, hardware pass, 0.12.0.** Done: docs drift
+- [x] **Phase 7 — docs, hardware pass, 0.12.0.** Done: docs drift
       (`--module-map`, `cpu-clock`/`task-clock`, the CI description, musl
       toolchains, "12 .c files", the build snippets in README, the docs
       site and CONTRIBUTING, the in-app docs for the single-event default
@@ -129,7 +129,27 @@ the big-endian target, and a 0.12.0 release at the end.
       "symbolization degraded" banner for one unnamed frame in 2.4 million,
       and a search readout over 100%. Screenshots and the demo GIF are
       regenerated from a live capture and reviewed. CI green on every job.
-      Left: the release itself and the user's big-endian run.
+      PR #5 merged after the user's review, then PR #6 brought the README,
+      docs site, in-app docs and GitHub About description in line with the
+      release. **0.12.0 released 2026-09-14**: tag `v0.12.0` on the PR #6
+      merge, a GitHub release with 21 assets, and PyPI. Verified after
+      publishing: every agent fetched through `latest/download` matches its
+      sidecar, is static-pie and stripped, armv7 reads soft-float and armeb
+      soft-float BE8; the published armeb agent is byte-identical to the
+      locally built candidate; `perflens==0.12.0` from PyPI in a fresh venv
+      serves the UI and `/api/status`; `install-agent.sh` piped from GitHub
+      on the x86_64 container verified the checksum and installed 0.12.0.
+
+### Open after 0.12.0
+
+- [ ] **The big-endian ARMv7 target.** No ssh; the user runs the checklist
+      at `~/.perflens-testbeds/bigendian-checklist-0.12.0.md` against the
+      published armeb asset. Until then that asset is `readelf`-checked only.
+- [ ] **The overnight memory soak**, carried since 0.9.0. Its scripts still
+      launch the ARM bed's old `bin/matrixlab.sym`, which is now
+      `bin/matrixlab.debug`.
+- [ ] Deferred by design: A-18, A-25, A-28, A-31 (wire changes), A-17
+      (`posix_spawn`), IPv6 (A-29). A-27 was measured and is not needed.
 
 ### Hardware pass, 2026-09-14
 
